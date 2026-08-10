@@ -1,0 +1,43 @@
+@startuml
+title WAGI – Gesamtarchitektur
+left to right direction
+skinparam componentStyle rectangle
+
+actor "Normaler WhatsApp-Nutzer" as User
+component "wa-connector\nNode.js + Baileys" as Connector
+actor "Telegram-Gruppe / Channel" as Telegram
+component "tg-connector\nNode.js + Telegram Bot API" as TgConnector
+component "NATS JetStream" as Bus
+database "PostgreSQL\nPostGIS + pgvector" as DB
+component "Go API" as API
+component "Next.js Dashboard" as Web
+component "media-worker\nWhisper/faster-whisper" as Media
+component "ai-worker\nRelevance/Facts/Events" as AI
+storage "MinIO" as S3
+
+User --> Connector : Linked Device / QR
+Connector --> DB : Gruppen + Nachrichten
+Connector --> Bus : wa.* events
+Telegram --> TgConnector : Bot-Mitgliedschaft
+TgConnector --> DB : Gruppen + Nachrichten
+TgConnector --> Bus : wa.* events
+Bus --> Media : media.audio.requested
+Media --> S3 : Medien lesen/schreiben
+Media --> Bus : media.audio.transcribed
+Bus --> AI : wa.messages / transcripts
+AI --> DB : strukturierte Analysen
+Web --> API : REST/JSON
+API --> DB
+API --> Bus : Audio-Jobs
+note right of Connector
+Adapter-Schicht hält die
+inoffizielle WhatsApp-Integration
+austauschbar.
+end note
+note right of TgConnector
+Bot-Token, Long Polling und
+persistenter Offset-State.
+Gruppen/Channels werden nur
+bei Bot-Mitgliedschaft gesehen.
+end note
+@enduml

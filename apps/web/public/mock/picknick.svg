@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Picknick-Checkliste</title>
+  <desc id="desc">Illustration einer Picknickdecke mit Korb und Bergkulisse.</desc>
+  <rect width="1200" height="720" rx="32" fill="#f6d6bb"/>
+  <path d="M0 360 200 215l160 116 185-156 175 135 200-176 280 225v361H0Z" fill="#8eb39b"/>
+  <path d="M0 500h1200v220H0Z" fill="#e58a61"/>
+  <path d="m200 520 520-100 310 100-210 200H390Z" fill="#f5e7c1" stroke="#bd6c50" stroke-width="12"/>
+  <path d="M460 498h230v170H460Z" fill="#d86f55"/><path d="M575 498v170" stroke="#f7c888" stroke-width="12"/>
+  <circle cx="830" cy="530" r="55" fill="#4f7a63"/><path d="M830 475v110m-55-55h110" stroke="#f7edcf" stroke-width="12"/>
+  <text x="70" y="92" fill="#713d37" font-family="Arial, sans-serif" font-size="30" font-weight="700" letter-spacing="5">PICKNICK-CHECKLISTE</text>
+  <text x="72" y="655" fill="#713d37" font-family="Arial, sans-serif" font-size="26" font-weight="700">Decken · Kaffee · Wasser · Obst</text>
+</svg>

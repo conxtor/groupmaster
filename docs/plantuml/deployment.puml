@@ -1,0 +1,21 @@
+@startuml
+title WAGI – Lokales Deployment
+node "Docker Compose" {
+  node "Frontend" { component "web :3000" }
+  node "Backend" { component "api :8080"; component "wa-connector :3001"; component "tg-connector :3002" }
+  node "Worker" { component "ai-worker"; component "media-worker" }
+  node "Data" { database "db :5432"; queue "nats :4222"; storage "minio :9000" }
+}
+web --> api
+api --> db
+api --> nats
+wa-connector --> db
+wa-connector --> nats
+tg-connector --> db
+tg-connector --> nats
+ai-worker --> db
+ai-worker --> nats
+media-worker --> db
+media-worker --> nats
+media-worker --> minio
+@enduml

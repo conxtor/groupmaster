@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Costa Brava Strand</title>
+  <desc id="desc">Illustration einer Bucht an der Costa Brava.</desc>
+  <defs><linearGradient id="sea" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#88cfd1"/><stop offset="1" stop-color="#3c8997"/></linearGradient></defs>
+  <rect width="1200" height="720" rx="32" fill="url(#sea)"/>
+  <circle cx="1000" cy="122" r="70" fill="#ffd37e"/>
+  <path d="M0 470c180-140 350-110 500-30s290 85 700-110v390H0Z" fill="#e9c58e"/>
+  <path d="M0 530c245-75 365 5 530 45s375 40 670-90v235H0Z" fill="#c98a63"/>
+  <path d="M0 435c225-85 395-65 545 5s340 68 655-94" fill="none" stroke="#e9f5e8" stroke-width="16" opacity=".72"/>
+  <path d="M150 345c38-106 80-126 124-150 39 39 47 88 34 147" fill="#5b8e69"/><path d="M103 350c46-84 92-107 131-124 13 72 3 103-29 143" fill="#3e7057"/>
+  <text x="70" y="94" fill="#fff8e6" font-family="Arial, sans-serif" font-size="30" font-weight="700" letter-spacing="5">COSTA BRAVA · PLATJA DE SANT POL</text>
+  <text x="74" y="658" fill="#fff8e6" font-family="Arial, sans-serif" font-size="26" font-weight="700">Sonntag · Sonne · Schatten</text>
+</svg>

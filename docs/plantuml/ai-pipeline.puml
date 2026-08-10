@@ -1,0 +1,22 @@
+@startuml
+title WAGI – AI-Pipeline
+start
+:Nachricht aus NATS empfangen;
+if (Audio oder Medien?) then (ja)
+  :Media-Job anlegen;
+  :MinIO-Objekt laden;
+  :faster-whisper / STT;
+  :Transkript publizieren;
+else (nein)
+endif
+:Text normalisieren;
+:Relevanz klassifizieren;
+:Facts extrahieren;
+:Entities erkennen;
+:Events und Zeitangaben erkennen;
+:Places / Geometrien erkennen;
+:Zusammenfassung erzeugen;
+:Strukturiertes Ergebnis validieren;
+:Postgres + pgvector persistieren;
+stop
+@enduml

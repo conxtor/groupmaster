@@ -1,0 +1,31 @@
+@startuml
+title WAGI – Ingestion-Sequenz
+actor User
+participant "wa-connector" as C
+participant "Baileys" as W
+participant "tg-connector" as T
+participant "Telegram Bot API" as TG
+database "Postgres" as DB
+queue "NATS JetStream" as N
+participant "ai-worker" as AI
+
+User -> C: QR scannen / Linked Device
+C -> W: Auth-State laden
+W --> C: connection.open
+W -> C: messages.upsert
+C -> DB: upsert wa_group + message
+C -> N: publish wa.messages.received
+N -> AI: deliver message event
+AI -> DB: upsert message_analyses
+AI -> N: publish ai.messages.analyzed
+== Telegram Bot API ==
+T -> TG: getUpdates (Long Polling)
+TG --> T: message / channel_post
+T -> DB: upsert tg:<chat-id> + message
+T -> N: publish wa.messages.received
+N -> AI: deliver message event
+note over C,DB
+Nur ausgewählte Gruppen werden
+nach der Gruppenauswahl verarbeitet.
+end note
+@enduml

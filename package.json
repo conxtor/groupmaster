@@ -1,0 +1,13 @@
+{
+  "name": "wa-group-intelligence",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "packageManager": "npm@10.8.2",
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:web": "npm run dev --workspace=@wagi/web",
+    "dev:connector": "npm run dev --workspace=@wagi/wa-connector",
+    "dev:telegram": "npm run dev --workspace=@wagi/tg-connector"
+  }
+}

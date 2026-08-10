@@ -1,0 +1,42 @@
+@startuml
+title WAGI – Datenmodell
+hide methods
+hide stereotypes
+
+entity wa_groups {
+  * id : text <<PK>>
+  --
+  subject : text
+  participant_count : int
+  is_selected : bool
+}
+entity messages {
+  * id : uuid <<PK>>
+  --
+  group_id : text <<FK>>
+  wa_message_id : text
+  kind : text
+  text : text
+  received_at : timestamptz
+}
+entity audio_jobs {
+  * id : uuid <<PK>>
+  --
+  message_id : uuid <<FK>>
+  status : text
+  transcript : text
+}
+entity message_analyses {
+  * message_id : uuid <<PK/FK>>
+  --
+  relevant : bool
+  facts : jsonb
+  entities : jsonb
+  events : jsonb
+  places : jsonb
+  embedding : vector(1536)
+}
+wa_groups ||--o{ messages
+messages ||--o{ audio_jobs
+messages ||--o| message_analyses
+@enduml

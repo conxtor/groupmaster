@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Team-Offsite Girona</title>
+  <desc id="desc">Illustration einer Gruppe vor einer mediterranen Landschaft.</desc>
+  <rect width="1200" height="720" rx="32" fill="#c5e0dc"/>
+  <path d="M0 430 250 180l210 220 205-255 260 290 160-160 115 145v300H0Z" fill="#6c9b83"/>
+  <path d="M0 555 270 350l155 125 230-170 210 190 145-90 190 140v175H0Z" fill="#3f6f5e"/>
+  <circle cx="960" cy="132" r="68" fill="#f4bd6d"/>
+  <g fill="#f0d7a9" stroke="#793f42" stroke-width="9"><circle cx="405" cy="490" r="26"/><circle cx="500" cy="470" r="26"/><circle cx="595" cy="485" r="26"/><circle cx="690" cy="462" r="26"/></g>
+  <path d="M365 590c20-90 55-108 80-108s60 18 80 108m0 0c20-90 55-108 80-108s60 18 80 108m0 0c20-90 55-108 80-108s60 18 80 108" fill="#e36c44"/>
+  <text x="70" y="94" fill="#21483f" font-family="Arial, sans-serif" font-size="30" font-weight="700" letter-spacing="5">TEAM-OFFSITE · GIRONA</text>
+</svg>

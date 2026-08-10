@@ -1,0 +1,141 @@
+services:
+  db:
+    image: supabase/postgres:15.8.1.060
+    environment:
+      # Supabase's bootstrap scripts require the standard postgres role.
+      # Application services connect through the least-privileged app role created by the migration.
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/healthz >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["minio_data:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}?sslmode=disable
+      NATS_URL: nats://nats:4222
+      PORT: 8080
+    ports: ["8080:8080"]
+    depends_on:
+      db: {condition: service_healthy}
+      nats: {condition: service_healthy}
+
+  wa-connector:
+    build:
+      context: ../..
+      dockerfile: apps/wa-connector/Dockerfile
+    environment:
+      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
+      NATS_URL: nats://nats:4222
+      PORT: 3001
+      WA_MOCK_MODE: ${WA_MOCK_MODE:-true}
+      WA_GROUP_ALLOWLIST: ${WA_GROUP_ALLOWLIST:-}
+      WA_AUTH_DIR: /data/wa-auth
+    ports: ["3001:3001"]
+    volumes: ["wa_auth:/data/wa-auth"]
+    depends_on:
+      db: {condition: service_healthy}
+      nats: {condition: service_healthy}
+
+  tg-connector:
+    build:
+      context: ../..
+      dockerfile: apps/tg-connector/Dockerfile
+    environment:
+      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
+      NATS_URL: nats://nats:4222
+      TG_PORT: 3002
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TG_GROUP_ALLOWLIST: ${TG_GROUP_ALLOWLIST:-}
+      TG_STATE_DIR: /data/tg-state
+      TG_POLL_TIMEOUT: ${TG_POLL_TIMEOUT:-25}
+    ports: ["3002:3002"]
+    volumes: ["tg_state:/data/tg-state"]
+    depends_on:
+      db: {condition: service_healthy}
+      nats: {condition: service_healthy}
+
+  ai-worker:
+    build:
+      context: ../..
+      dockerfile: apps/ai-worker/Dockerfile
+    environment:
+      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
+      NATS_URL: nats://nats:4222
+      AI_MODEL: ${AI_MODEL:-heuristic-mvp}
+    depends_on:
+      db: {condition: service_healthy}
+      nats: {condition: service_healthy}
+
+  media-worker:
+    build:
+      context: ../..
+      dockerfile: apps/media-worker/Dockerfile
+    environment:
+      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
+      NATS_URL: nats://nats:4222
+      WHISPER_ENABLED: ${WHISPER_ENABLED:-true}
+      WHISPER_MODEL: ${WHISPER_MODEL:-medium}
+      WHISPER_CPP_BIN: /usr/local/bin/whisper-cli
+      WHISPER_MODEL_PATH: /models/ggml-medium.bin
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-auto}
+      WHISPER_LANGUAGES: ${WHISPER_LANGUAGES:-es,ca,de,en,fr}
+      WHISPER_THREADS: ${WHISPER_THREADS:-4}
+    volumes:
+      - whisper_models:/models
+    depends_on:
+      db: {condition: service_healthy}
+      nats: {condition: service_healthy}
+
+  web:
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+      HOSTNAME: 0.0.0.0
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+volumes:
+  postgres_data:
+  minio_data:
+  wa_auth:
+  tg_state:
+  whisper_models:

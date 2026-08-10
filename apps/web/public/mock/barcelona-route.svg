@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Routenkarte Montserrat</title>
+  <desc id="desc">Illustration einer Wanderroute mit Bergen und Wegmarkierungen.</desc>
+  <defs><linearGradient id="sky" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#c9e7eb"/><stop offset="1" stop-color="#f7dfb5"/></linearGradient></defs>
+  <rect width="1200" height="720" rx="32" fill="url(#sky)"/>
+  <circle cx="1010" cy="130" r="72" fill="#f6bb5f" opacity=".85"/>
+  <path d="M0 515 250 300l120 120 225-280 230 260 145-150 230 265v205H0Z" fill="#668b78"/>
+  <path d="M0 575 250 410l125 80 220-170 220 140 130-85 255 160v185H0Z" fill="#3e6859"/>
+  <path d="M125 590c190-70 250-25 345-120s160-130 290-55 205 35 340-82" fill="none" stroke="#f9edc9" stroke-width="14" stroke-linecap="round" stroke-dasharray="22 18"/>
+  <g fill="#fffdf1" stroke="#d96e48" stroke-width="8"><circle cx="125" cy="590" r="22"/><circle cx="470" cy="470" r="22"/><circle cx="760" cy="415" r="22"/><circle cx="1100" cy="333" r="22"/></g>
+  <text x="74" y="90" fill="#21483f" font-family="Arial, sans-serif" font-size="30" font-weight="700" letter-spacing="5">MONTSERRAT · ROUTE</text>
+  <text x="78" y="655" fill="#fffdf1" font-family="Arial, sans-serif" font-size="25" font-weight="700">Samstag · 10:00 · 8,4 km</text>
+</svg>

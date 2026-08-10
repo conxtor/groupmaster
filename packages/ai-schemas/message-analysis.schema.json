@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WAGI message analysis",
+  "type": "object",
+  "required": ["messageId", "relevant", "relevanceScore", "summary", "facts", "entities", "events", "places", "model"],
+  "properties": {
+    "messageId": {"type": "string", "format": "uuid"},
+    "relevant": {"type": "boolean"},
+    "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
+    "summary": {"type": "string"},
+    "facts": {"type": "array", "items": {"type": "object"}},
+    "entities": {"type": "array", "items": {"type": "object"}},
+    "events": {"type": "array", "items": {"type": "object", "required": ["title", "confidence"], "properties": {"title": {"type": "string"}, "startsAt": {"type": "string"}, "location": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "sourceMessageIds": {"type": "array", "items": {"type": "string"}}}}},
+    "places": {"type": "array", "items": {"type": "object"}},
+    "model": {"type": "string"}
+  }
+}

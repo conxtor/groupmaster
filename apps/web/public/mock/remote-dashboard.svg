@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Dashboard-Entwurf</title>
+  <desc id="desc">Illustration eines modernen Produkt-Dashboards.</desc>
+  <rect width="1200" height="720" rx="32" fill="#202b3a"/>
+  <rect x="80" y="105" width="1040" height="510" rx="24" fill="#f3f4ed"/>
+  <rect x="120" y="150" width="230" height="420" rx="16" fill="#dfeee2"/><rect x="390" y="150" width="670" height="82" rx="16" fill="#fffefa"/>
+  <rect x="390" y="260" width="315" height="310" rx="16" fill="#fffefa"/><rect x="745" y="260" width="315" height="310" rx="16" fill="#fffefa"/>
+  <path d="M430 490c65-115 105-62 155-135s75 21 100-68" fill="none" stroke="#e36c44" stroke-width="13" stroke-linecap="round"/>
+  <circle cx="485" cy="415" r="15" fill="#4c8b68"/><circle cx="585" cy="355" r="15" fill="#4c8b68"/><circle cx="685" cy="287" r="15" fill="#4c8b68"/>
+  <circle cx="900" cy="410" r="88" fill="#d5e7dc"/><path d="M900 322a88 88 0 0 1 76 132l-76-44Z" fill="#e36c44"/><path d="M900 410v-88a88 88 0 0 0 0 176 88 88 0 0 0 76-44Z" fill="#4c8b68"/>
+  <text x="120" y="70" fill="#f7f7f2" font-family="Arial, sans-serif" font-size="30" font-weight="700" letter-spacing="5">REMOTE TEAM · DASHBOARD-ENTWURF</text>
+</svg>
