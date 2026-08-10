@@ -1,19 +1,37 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { connect, StorageType, StringCodec, type JetStreamClient, type NatsConnection } from "nats";
 import { Pool } from "pg";
-import { subjects, type EventEnvelope, type GroupDiscovered, type WhatsAppMessageReceived } from "@wagi/contracts";
+import { Api, TelegramClient } from "telegram";
+import { StringSession } from "telegram/sessions/index.js";
+import { NewMessage } from "telegram/events/index.js";
+import { subjects, type ConnectorLifecycleStatus, type EventEnvelope, type GroupDiscovered, type GroupSelectionChanged, type WhatsAppMessageReceived } from "@wagi/contracts";
 
 const port = Number(process.env.TG_PORT ?? process.env.PORT ?? 3002);
 const databaseUrl = process.env.DATABASE_URL ?? "postgres://wagi_app:app@localhost:5432/app";
 const natsUrl = process.env.NATS_URL ?? "nats://localhost:4222";
 const botToken = (process.env.TG_BOT_TOKEN ?? "").trim();
+const apiId = Number(process.env.TG_API_ID ?? 0);
+const apiHash = (process.env.TG_API_HASH ?? "").trim();
+let directPhone = (process.env.TG_PHONE ?? "").trim();
+const directSession = (process.env.TG_SESSION ?? "").trim();
 const stateDir = process.env.TG_STATE_DIR ?? "./data/tg-state";
+const directSessionPath = join(stateDir, "direct-session.txt");
+const mediaDir = process.env.MEDIA_DIR ?? "./data/media";
 const offsetPath = join(stateDir, "offset.json");
 const pollTimeout = Math.max(1, Math.min(50, Number(process.env.TG_POLL_TIMEOUT ?? 25)));
+const backfillDays = Math.max(1, Number(process.env.TG_BACKFILL_DAYS ?? 3));
+const connectionRetries = Math.max(5, Number(process.env.TG_CONNECTION_RETRIES ?? 12));
+const requestRetries = Math.max(3, Number(process.env.TG_REQUEST_RETRIES ?? 8));
+const downloadRetries = Math.max(3, Number(process.env.TG_DOWNLOAD_RETRIES ?? 8));
+const retryDelay = Math.max(500, Number(process.env.TG_RETRY_DELAY_MS ?? 2000));
+const mediaRetryAttempts = Math.max(1, Number(process.env.TG_MEDIA_RETRY_ATTEMPTS ?? 4));
+const groupRefreshIntervalMs = Math.max(30_000, Number(process.env.GROUP_REFRESH_INTERVAL_MS ?? 60_000));
+const mediaCleanupToken = (process.env.MEDIA_CLEANUP_TOKEN ?? "").trim();
 const allowlist = new Set((process.env.TG_GROUP_ALLOWLIST ?? "").split(",").map((value) => value.trim()).filter(Boolean));
+const directMode = apiId > 0 && Boolean(apiHash);
 
 const pool = new Pool({ connectionString: databaseUrl });
 const sc = StringCodec();
@@ -21,6 +39,55 @@ let nc: NatsConnection;
 let js: JetStreamClient;
 let botInfo: TelegramUser | null = null;
 let polling = false;
+let lifecycleStatus: ConnectorLifecycleStatus = "starting";
+let lastError: string | null = null;
+let connectedAt: string | null = null;
+let initialActivation = false;
+let backfillCutoff = new Date(0);
+let directClient: TelegramClient | null = null;
+let directRuntimeStarted = false;
+let directQr: string | null = null;
+let directQrExpiresAt: number | null = null;
+let directQrAuthPromise: Promise<void> | null = null;
+const mediaRetryCounts = new Map<string, number>();
+const directTopicGroups = new Map<string, Map<number, { groupId: string; title: string; topMessage: number }>>();
+let groupRefreshTimer: NodeJS.Timeout | null = null;
+let groupRefreshInProgress = false;
+
+async function prepareInitialActivation() {
+  const existing = await pool.query<{ initial_backfill_completed_at: string | null }>(
+    "SELECT initial_backfill_completed_at FROM connector_states WHERE connector='telegram'",
+  );
+  initialActivation = !existing.rows[0] || !existing.rows[0].initial_backfill_completed_at;
+  backfillCutoff = new Date(Date.now() - backfillDays * 24 * 60 * 60 * 1000);
+  if (initialActivation) {
+    await pool.query(
+      `INSERT INTO connector_states (connector, status, first_activated_at, initial_backfill_started_at, initial_backfill_days)
+       VALUES ('telegram', 'starting', NOW(), NOW(), $1)
+       ON CONFLICT (connector) DO UPDATE SET initial_backfill_started_at=COALESCE(connector_states.initial_backfill_started_at, NOW()), initial_backfill_days=$1, updated_at=NOW()`,
+      [backfillDays],
+    );
+  }
+}
+
+async function completeInitialActivation() {
+  if (!initialActivation) return;
+  await pool.query("UPDATE connector_states SET initial_backfill_completed_at=NOW(), updated_at=NOW() WHERE connector='telegram'");
+  initialActivation = false;
+}
+
+async function setStatus(status: ConnectorLifecycleStatus, detail?: string, error?: unknown) {
+  lifecycleStatus = status;
+  if (error) lastError = String(error);
+  await pool.query(
+    `INSERT INTO connector_states (connector, status, detail, last_error, connected_at)
+     VALUES ('telegram', $1, $2, $3, $4)
+     ON CONFLICT (connector) DO UPDATE SET status=EXCLUDED.status, detail=EXCLUDED.detail,
+       last_error=EXCLUDED.last_error, connected_at=EXCLUDED.connected_at, updated_at=NOW()`,
+    [status, detail ?? null, lastError, connectedAt],
+  ).catch((dbError) => console.warn("connector status persistence failed", dbError));
+  if (js) await publish(subjects.connectorStatus, subjects.connectorStatus, { connector: "telegram", status, detail, lastError: lastError ?? undefined, connectedAt: connectedAt ?? undefined });
+}
 
 type TelegramChatType = "private" | "group" | "supergroup" | "channel";
 
@@ -67,7 +134,7 @@ type TelegramMessage = {
   new_chat_member?: TelegramUser;
 };
 
-type TelegramChatMemberUpdate = { chat: TelegramChat; from: TelegramUser; date: number; new_chat_member?: { status: string; user: TelegramUser } };
+type TelegramChatMemberUpdate = { chat: TelegramChat; from: TelegramUser; date: number; new_chat_member?: { status: string; is_member?: boolean; user: TelegramUser } };
 type TelegramUpdate = {
   update_id: number;
   message?: TelegramMessage;
@@ -86,14 +153,32 @@ async function publish<T>(subject: string, type: EventEnvelope<T>["type"], data:
   await js.publish(subject, sc.encode(JSON.stringify(envelope(type, data))));
 }
 
+async function cleanupRemovedGroups(platform: "whatsapp" | "telegram", groupIds: string[]) {
+  const uniqueIds = [...new Set(groupIds.filter(Boolean))];
+  if (!uniqueIds.length) return;
+  if (!mediaCleanupToken) throw new Error("MEDIA_CLEANUP_TOKEN fehlt; Gruppenbereinigung wird abgebrochen");
+  const response = await nc.request(
+    "internal.groups.cleanup.requested",
+    sc.encode(JSON.stringify({ token: mediaCleanupToken, platform, groupIds: uniqueIds })),
+    { timeout: 30_000 },
+  );
+  const result = JSON.parse(sc.decode(response.data)) as { ok?: boolean; error?: string };
+  if (!result.ok) throw new Error(result.error ?? "Medienbereinigung fehlgeschlagen");
+  await pool.query("DELETE FROM wa_groups WHERE platform=$1 AND id=ANY($2::text[])", [platform, uniqueIds]);
+  console.log(`Removed ${uniqueIds.length} departed ${platform} group(s) and related data`);
+}
+
 async function ensureEventStream() {
   js = nc.jetstream();
   const manager = await nc.jetstreamManager();
   try {
-    await manager.streams.info("WAGI_EVENTS");
+    const stream = await manager.streams.info("WAGI_EVENTS");
+    if (!(stream.config.subjects ?? []).includes("connector.>")) {
+      await manager.streams.update(stream.config.name, { ...stream.config, subjects: [...(stream.config.subjects ?? []), "connector.>"] });
+    }
   } catch {
     try {
-      await manager.streams.add({ name: "WAGI_EVENTS", subjects: ["wa.>", "media.>", "ai.>"], storage: StorageType.File, max_msgs: -1 });
+      await manager.streams.add({ name: "WAGI_EVENTS", subjects: ["wa.>", "media.>", "ai.>", "connector.>"], storage: StorageType.File, max_msgs: -1 });
     } catch (error) {
       await manager.streams.info("WAGI_EVENTS").catch(() => { throw error; });
     }
@@ -114,6 +199,421 @@ async function telegramApi<T>(method: string, body: Record<string, unknown> = {}
   return payload.result;
 }
 
+async function loadDirectSession() {
+  if (directSession) return directSession;
+  try { return (await readFile(directSessionPath, "utf8")).trim(); } catch { return ""; }
+}
+
+function createDirectClient(session: string) {
+  return new TelegramClient(new StringSession(session), apiId, apiHash, {
+    connectionRetries,
+    requestRetries,
+    downloadRetries,
+    retryDelay,
+    timeout: 20,
+    autoReconnect: true,
+    maxConcurrentDownloads: 1,
+  });
+}
+
+function summarizeTelegramError(error: unknown) {
+  const value = error as { code?: unknown; errorMessage?: unknown; message?: unknown };
+  return [value.code, value.errorMessage, value.message].filter(Boolean).map(String).join(": ") || String(error);
+}
+
+function isRetryableTelegramError(error: unknown) {
+  const summary = summarizeTelegramError(error).toLowerCase();
+  return summary.includes("timeout") || summary.includes("-503") || summary.includes("connection") || summary.includes("disconnected") || summary.includes("network") || summary.includes("websocket");
+}
+
+async function retryTelegramOperation<T>(label: string, operation: () => Promise<T>) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= mediaRetryAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableTelegramError(error) || attempt >= mediaRetryAttempts) throw error;
+      console.warn(`${label} fehlgeschlagen (${attempt}/${mediaRetryAttempts}); neuer Versuch`, summarizeTelegramError(error));
+      await delay(retryDelay * attempt);
+    }
+  }
+  throw lastError ?? new Error(`${label} fehlgeschlagen`);
+}
+
+async function saveDirectSession() {
+  if (!directClient) return;
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(directSessionPath, (directClient.session as StringSession).save(), "utf8");
+}
+
+async function upsertDirectGroup(entity: any) {
+  const chatId = String(entity.id);
+  const groupId = `tg:${chatId}`;
+  const username = entity.username ? String(entity.username) : undefined;
+  const allowlisted = allowlist.has(chatId) || allowlist.has(groupId) || Boolean(username && (allowlist.has(username) || allowlist.has(`@${username}`)));
+  const chatType: "group" | "supergroup" | "channel" = entity.className === "Channel" ? (entity.broadcast ? "channel" : "supergroup") : "group";
+  const group: GroupDiscovered = { groupId, subject: String(entity.title ?? entity.username ?? groupId), ownerJid: `tg:direct:${chatId}`, participantCount: Number(entity.participantsCount ?? 0), isSelected: allowlisted, platform: "telegram", chatType };
+  const result = await pool.query<{ is_selected: boolean }>(
+    `INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id)
+     VALUES ($1, $2, $3, $4, $5, 'telegram', $6, $1)
+     ON CONFLICT (id) DO UPDATE SET subject = EXCLUDED.subject, owner_jid = EXCLUDED.owner_jid,
+       participant_count = EXCLUDED.participant_count, platform = 'telegram', chat_type = EXCLUDED.chat_type,
+       external_chat_id = EXCLUDED.external_chat_id, updated_at = NOW()
+     RETURNING is_selected`,
+    [group.groupId, group.subject, group.ownerJid, group.participantCount ?? 0, group.isSelected, chatType],
+  );
+  const selected = result.rows[0]?.is_selected ?? group.isSelected;
+  await publish(subjects.groupDiscovered, subjects.groupDiscovered, { ...group, isSelected: selected });
+  return { groupId, selected, chatType };
+}
+
+function directTopicGroupId(entity: any, topicId: number) {
+  return `tg:${String(entity.id)}:topic:${topicId}`;
+}
+
+async function upsertDirectTopic(entity: any, topic: { id: number; title?: string; topMessage?: number }) {
+  const parentGroupId = `tg:${String(entity.id)}`;
+  const topicId = Number(topic.id);
+  const groupId = directTopicGroupId(entity, topicId);
+  const title = String(topic.title || `Topic ${topicId}`);
+  const group: GroupDiscovered = {
+    groupId,
+    subject: `${String(entity.title ?? parentGroupId)} · ${title}`,
+    ownerJid: `tg:direct:${entity.id}:topic:${topicId}`,
+    participantCount: Number(entity.participantsCount ?? 0),
+    isSelected: allowlist.has(groupId) || allowlist.has(`${entity.id}:topic:${topicId}`),
+    platform: "telegram",
+    chatType: "topic",
+    parentGroupId,
+    topicId: String(topicId),
+  };
+  const result = await pool.query<{ is_selected: boolean }>(
+    `INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id, parent_group_id, topic_id, topic_root_message_id)
+     VALUES ($1, $2, $3, $4, $5, 'telegram', 'topic', $6, $7, $8, $9)
+     ON CONFLICT (id) DO UPDATE SET subject = EXCLUDED.subject, owner_jid = EXCLUDED.owner_jid,
+       participant_count = EXCLUDED.participant_count, platform = 'telegram', chat_type = 'topic',
+       external_chat_id = EXCLUDED.external_chat_id, parent_group_id = EXCLUDED.parent_group_id,
+       topic_id = EXCLUDED.topic_id, topic_root_message_id = EXCLUDED.topic_root_message_id, updated_at = NOW()
+     RETURNING is_selected`,
+    [groupId, group.subject, group.ownerJid, group.participantCount ?? 0, group.isSelected, `${entity.id}:${topicId}`, parentGroupId, topicId, Number(topic.topMessage ?? 0) || null],
+  );
+  const selected = result.rows[0]?.is_selected ?? group.isSelected;
+  await publish(subjects.groupDiscovered, subjects.groupDiscovered, { ...group, isSelected: selected });
+  return { groupId, selected, chatType: "topic" as const, parentGroupId, topicId };
+}
+
+async function discoverDirectTopics(entity: any): Promise<boolean> {
+  if (!directClient || entity?.className !== "Channel" || !entity.forum) return true;
+  const parentGroupId = `tg:${String(entity.id)}`;
+  const topicGroups = new Map<number, { groupId: string; title: string; topMessage: number }>();
+  try {
+    let offsetTopic = 0;
+    for (let page = 0; page < 20; page += 1) {
+      const result = await directClient.invoke(new Api.channels.GetForumTopics({
+        channel: entity,
+        offsetDate: 0,
+        offsetId: 0,
+        offsetTopic,
+        limit: 100,
+      }));
+      const topics = (result as any).topics ?? [];
+      for (const topic of topics) {
+        const topicId = Number(topic.id);
+        if (!Number.isFinite(topicId)) continue;
+        const title = String(topic.title || `Topic ${topicId}`);
+        topicGroups.set(topicId, { groupId: directTopicGroupId(entity, topicId), title, topMessage: Number(topic.topMessage ?? 0) });
+        await upsertDirectTopic(entity, { id: topicId, title, topMessage: Number(topic.topMessage ?? 0) });
+      }
+      const nextOffset = Number(topics.at(-1)?.id ?? 0);
+      if (topics.length < 100 || !nextOffset || nextOffset === offsetTopic) break;
+      offsetTopic = nextOffset;
+    }
+    directTopicGroups.set(parentGroupId, topicGroups);
+    return true;
+  } catch (error) {
+    console.warn("Telegram forum topic discovery failed", parentGroupId, summarizeTelegramError(error));
+    return false;
+  }
+}
+
+function directTopicIdFromMessage(message: any, entity: any) {
+  if (entity?.className !== "Channel" || !entity.forum) return undefined;
+  const reply = message.replyTo;
+  const explicitTopicId = Number(reply?.replyToTopId ?? 0);
+  if (Number.isFinite(explicitTopicId) && explicitTopicId > 0) return explicitTopicId;
+  const topics = directTopicGroups.get(`tg:${String(entity.id)}`);
+  const byRoot = [...(topics?.entries() ?? [])].find(([, topic]) => topic.topMessage === Number(message.id));
+  return byRoot?.[0];
+}
+
+function directMessageKind(message: any): WhatsAppMessageReceived["kind"] {
+  const mediaClass = message.media?.className;
+  const mime = String(message.media?.document?.mimeType ?? "");
+  if (mediaClass === "MessageMediaGeo" || mediaClass === "MessageMediaGeoLive") return "location";
+  if (mediaClass === "MessageMediaPhoto") return "image";
+  if (mediaClass === "MessageMediaDocument") {
+    if (mime.startsWith("audio/")) return "audio";
+    if (mime.startsWith("video/")) return "video";
+    return "document";
+  }
+  return message.message ? "text" : "system";
+}
+
+function directMessageText(message: any) {
+  if (message.media?.geo) return `Ort: ${message.media.geo.lat}, ${message.media.geo.long}`;
+  return typeof message.message === "string" ? message.message : undefined;
+}
+
+function directTimestamp(value: unknown) {
+  if (value instanceof Date) return Math.floor(value.getTime() / 1000);
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric > 10_000_000_000 ? Math.floor(numeric / 1000) : Math.floor(numeric);
+  return Math.floor(Date.now() / 1000);
+}
+
+async function downloadDirectMedia(message: any, mediaKey: string, kind: string) {
+  if (!message.media) return undefined;
+  const content = await retryTelegramOperation(`Direct Telegram media download ${mediaKey}`, async () => {
+    await ensureDirectConnection();
+    if (!directClient) throw new Error("Telegram-Client ist nicht verfügbar");
+    return directClient.downloadMedia(message, {});
+  });
+  if (!content) return undefined;
+  const safeName = mediaKey.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const mime = String(message.media?.document?.mimeType ?? (kind === "image" ? "image/jpeg" : "application/octet-stream"));
+  const extension = mime.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "bin";
+  const objectPath = join(mediaDir, "incoming", `${safeName}.${extension}`);
+  await mkdir(join(mediaDir, "incoming"), { recursive: true });
+  await writeFile(objectPath, Buffer.isBuffer(content) ? content : Buffer.from(String(content)));
+  return { objectPath, mediaMime: mime };
+}
+
+function scheduleDirectMediaRetry(message: any, entity: any, mediaKey: string) {
+  const retryCount = (mediaRetryCounts.get(mediaKey) ?? 0) + 1;
+  if (retryCount > mediaRetryAttempts) return;
+  mediaRetryCounts.set(mediaKey, retryCount);
+  setTimeout(() => {
+    void persistDirectMessage(message, entity).catch((error) => {
+      console.warn("Direct Telegram media retry failed", mediaKey, summarizeTelegramError(error));
+    });
+  }, retryDelay * retryCount * 2);
+}
+
+async function persistDirectMessage(message: any, entity: any) {
+  if (entity?.className === "Channel" && entity.forum && !directTopicGroups.has(`tg:${String(entity.id)}`)) {
+    await discoverDirectTopics(entity);
+  }
+  const topicId = directTopicIdFromMessage(message, entity);
+  const topic = topicId ? directTopicGroups.get(`tg:${String(entity.id)}`)?.get(topicId) : undefined;
+  const group = topic
+    ? await upsertDirectTopic(entity, { id: topicId!, title: topic.title, topMessage: topic.topMessage })
+    : await upsertDirectGroup(entity);
+  if (!group.selected) return;
+  const timestamp = directTimestamp(message.date);
+  if (initialActivation && new Date(timestamp * 1000) < backfillCutoff) return;
+  const groupId = group.groupId;
+  const waMessageId = `${groupId}:${message.id}`;
+  const kind = directMessageKind(message);
+  const mediaKey = ["audio", "image", "video", "document"].includes(kind) ? `telegram-direct/${entity.id}/${message.id}` : undefined;
+  let downloaded: { objectPath: string; mediaMime: string } | undefined;
+  if (mediaKey) {
+    try {
+      downloaded = await downloadDirectMedia(message, mediaKey, kind);
+      if (downloaded) mediaRetryCounts.delete(mediaKey);
+    } catch (error) {
+      console.warn("Direct Telegram media download failed; Nachricht bleibt pending", mediaKey, summarizeTelegramError(error));
+      scheduleDirectMediaRetry(message, entity, mediaKey);
+    }
+  }
+  const text = directMessageText(message);
+  const raw = { id: message.id, date: timestamp, message: text, location: message.media?.geo ? { latitude: Number(message.media.geo.lat), longitude: Number(message.media.geo.long) } : undefined, reply_to_message: message.replyTo?.replyToMsgId ? { message_id: Number(message.replyTo.replyToMsgId) } : undefined };
+  const contentHash = createHash("sha256").update(JSON.stringify({ groupId, waMessageId, kind, text, raw })).digest("hex");
+  const existing = await pool.query<{ id: string; content_hash: string | null; media_status: string | null }>("SELECT id, content_hash, media_status FROM messages WHERE group_id=$1 AND wa_message_id=$2", [groupId, waMessageId]);
+  if (existing.rows[0]?.content_hash === contentHash && (!mediaKey || existing.rows[0].media_status === "completed")) return;
+  const sender = await message.getSender?.();
+  const senderJid = `tg:user:${String(message.senderId ?? sender?.id ?? "unknown")}`;
+  const senderName = sender ? [sender.firstName, sender.lastName].filter(Boolean).join(" ") || sender.username : undefined;
+  const result = await pool.query<{ id: string }>(
+    `INSERT INTO messages (group_id, wa_message_id, platform, external_chat_id, sender_jid, sender_name, kind, text, received_at, has_media, media_key, media_mime, raw, content_hash, sequence_no, media_status)
+     VALUES ($1,$2,'telegram',$1,$3,$4,$5,$6,to_timestamp($7),$8,$9,$10,$11,$12,$7,$13)
+     ON CONFLICT (group_id, wa_message_id) DO UPDATE SET sender_jid=EXCLUDED.sender_jid, sender_name=EXCLUDED.sender_name, kind=EXCLUDED.kind, text=EXCLUDED.text, received_at=EXCLUDED.received_at, has_media=EXCLUDED.has_media, media_key=EXCLUDED.media_key, media_mime=EXCLUDED.media_mime, raw=EXCLUDED.raw, content_hash=EXCLUDED.content_hash, sequence_no=EXCLUDED.sequence_no, media_status=CASE WHEN EXCLUDED.media_status='completed' THEN 'completed' ELSE messages.media_status END
+     RETURNING id`,
+    [groupId, waMessageId, senderJid, senderName ?? null, kind, text ?? null, timestamp, Boolean(mediaKey), mediaKey ?? null, downloaded?.mediaMime ?? null, raw, contentHash, mediaKey ? (downloaded ? "completed" : "pending") : "none"],
+  );
+  const messageId = result.rows[0].id;
+  const data: WhatsAppMessageReceived = { messageId, waMessageId, groupId, platform: "telegram", chatType: group.chatType, externalChatId: String(entity.id), senderJid, senderName, kind, text, receivedAt: new Date(timestamp * 1000).toISOString(), hasMedia: Boolean(mediaKey), mediaKey, mediaMime: downloaded?.mediaMime, mediaObjectPath: downloaded?.objectPath, replyToWaMessageId: message.replyTo?.replyToMsgId ? `${groupId}:${message.replyTo.replyToMsgId}` : undefined, raw, changeType: existing.rows[0] ? "updated" : "created", sequenceNo: timestamp };
+  await publish(subjects.messageReceived, subjects.messageReceived, data);
+  if (mediaKey && downloaded?.objectPath) await publish(subjects.mediaRequested, subjects.mediaRequested, { messageId, mediaKey, objectPath: downloaded.objectPath, mediaMime: downloaded.mediaMime, platform: "telegram" });
+  if (kind === "audio" && mediaKey && downloaded?.objectPath) {
+    const job = await pool.query<{ id: string }>("SELECT id FROM audio_jobs WHERE message_id=$1 ORDER BY created_at DESC LIMIT 1", [messageId]);
+    const jobId = job.rows[0]?.id ?? randomUUID();
+    if (!job.rows[0]) await pool.query("INSERT INTO audio_jobs (id,message_id,media_key,media_mime,object_path) VALUES ($1,$2,$3,$4,$5)", [jobId, messageId, mediaKey, downloaded.mediaMime, downloaded.objectPath]);
+    else await pool.query("UPDATE audio_jobs SET media_mime=$1, object_path=$2, updated_at=NOW() WHERE id=$3", [downloaded.mediaMime, downloaded.objectPath, jobId]);
+    await publish(subjects.audioRequested, subjects.audioRequested, { jobId, messageId, mediaKey, mediaMime: downloaded?.mediaMime, objectPath: downloaded?.objectPath });
+  }
+}
+
+function isDirectGroupEntity(entity: any) {
+  return entity?.className === "Chat" || entity?.className === "Channel";
+}
+
+async function discoverDirectGroups() {
+  if (!directClient) return;
+  if (groupRefreshInProgress) return;
+  groupRefreshInProgress = true;
+  try {
+    const presentIds = new Set<string>();
+    directTopicGroups.clear();
+    const iterator = (directClient as any).iterDialogs?.({});
+    if (!iterator || typeof iterator[Symbol.asyncIterator] !== "function") throw new Error("Telegram liefert keine vollständige Dialogliste");
+    for await (const dialog of iterator) {
+      const entity = dialog?.entity;
+      if (!isDirectGroupEntity(entity)) continue;
+      const group = await upsertDirectGroup(entity);
+      presentIds.add(group.groupId);
+      if (!await discoverDirectTopics(entity)) throw new Error(`Telegram-Topics für ${group.groupId} konnten nicht vollständig gelesen werden`);
+      for (const topic of directTopicGroups.get(group.groupId)?.values() ?? []) presentIds.add(topic.groupId);
+    }
+    const stored = await pool.query<{ id: string }>("SELECT id FROM wa_groups WHERE platform='telegram'");
+    const stale = stored.rows.map((row) => row.id).filter((id) => !presentIds.has(id));
+    await cleanupRemovedGroups("telegram", stale);
+  } finally {
+    groupRefreshInProgress = false;
+  }
+}
+
+function startGroupRefreshTimer() {
+  if (groupRefreshTimer) return;
+  groupRefreshTimer = setInterval(() => {
+    if (directRuntimeStarted && directClient?.connected) {
+      void discoverDirectGroups().catch((error) => console.warn("Telegram group refresh failed", summarizeTelegramError(error)));
+    }
+  }, groupRefreshIntervalMs);
+  groupRefreshTimer.unref?.();
+}
+
+async function backfillDirectGroup(groupId: string) {
+  if (!directClient || !directRuntimeStarted) return;
+  const match = groupId.match(/^tg:([^:]+)(?::topic:(\d+))?$/);
+  if (!match) return;
+  const entity = await directClient.getEntity(Number(match[1]));
+  if (!isDirectGroupEntity(entity)) return;
+  await discoverDirectTopics(entity);
+  const topicId = match[2] ? Number(match[2]) : undefined;
+  const topic = topicId ? directTopicGroups.get(`tg:${String(entity.id)}`)?.get(topicId) : undefined;
+  const group = topic
+    ? await upsertDirectTopic(entity, { id: topicId!, title: topic.title, topMessage: topic.topMessage })
+    : await upsertDirectGroup(entity);
+  if (!group.selected) return;
+  for await (const message of directClient.iterMessages(entity, { limit: 500 })) {
+    if (directTimestamp(message.date) < Math.floor(backfillCutoff.getTime() / 1000)) break;
+    if (topicId && directTopicIdFromMessage(message, entity) !== topicId) continue;
+    await persistDirectMessage(message, entity);
+  }
+}
+
+async function handleGroupSelection(data: GroupSelectionChanged) {
+  if (data.platform && data.platform !== "telegram") return;
+  if (!data.groupId.startsWith("tg:")) return;
+  await pool.query("UPDATE wa_groups SET is_selected=$1, updated_at=NOW() WHERE id=$2", [data.selected, data.groupId]);
+  if (data.selected) {
+    try { await backfillDirectGroup(data.groupId); } catch (error) { console.warn("Telegram selected-group backfill failed", data.groupId, error); }
+  }
+}
+
+function subscribeGroupSelections() {
+  const subscription = nc.subscribe(subjects.groupSelectionChanged);
+  void (async () => {
+    for await (const message of subscription) {
+      try {
+        const envelope = JSON.parse(sc.decode(message.data)) as { data?: GroupSelectionChanged };
+        if (envelope.data) await handleGroupSelection(envelope.data);
+      } catch (error) {
+        console.warn("Telegram group selection event failed", error);
+      }
+    }
+  })();
+}
+
+async function backfillSelectedDirectGroups() {
+  const selected = await pool.query<{ id: string }>("SELECT id FROM wa_groups WHERE platform='telegram' AND is_selected=TRUE ORDER BY subject");
+  for (const group of selected.rows) {
+    try { await backfillDirectGroup(group.id); } catch (error) { console.warn("Telegram selected-group startup backfill failed", group.id, error); }
+  }
+}
+
+async function startDirectRuntime() {
+  if (!directClient || directRuntimeStarted) return;
+  directRuntimeStarted = true;
+  await setStatus("syncing", initialActivation ? `Direct Telegram: Backfill der letzten ${backfillDays} Tage läuft` : "Direct Telegram verbunden");
+  directClient.addEventHandler(async (event: any) => {
+    try {
+      const message = event.message;
+      const entity = await message.getChat();
+      if (isDirectGroupEntity(entity)) await persistDirectMessage(message, entity);
+    } catch (error) { console.error("Direct Telegram update failed", error); }
+  }, new NewMessage({ incoming: true }));
+  await discoverDirectGroups();
+  startGroupRefreshTimer();
+  await backfillSelectedDirectGroups();
+  await completeInitialActivation();
+  connectedAt = new Date().toISOString();
+  await setStatus("ready", "Direct Telegram verbunden");
+}
+
+async function ensureDirectConnection() {
+  if (!directClient) {
+    directClient = createDirectClient(await loadDirectSession());
+  }
+  if (directClient.connected) return;
+  const connected = await directClient.connect();
+  if (!connected || !directClient.connected) {
+    throw new Error("Telegram-Verbindung konnte nicht aufgebaut werden");
+  }
+}
+
+async function startDirectConnector() {
+  const session = await loadDirectSession();
+  directClient = createDirectClient(session);
+  if (session) {
+    await ensureDirectConnection();
+    if (await directClient.checkAuthorization()) { await startDirectRuntime(); return; }
+  }
+  await setStatus("reauth_required", "Keine gültige Direct-Telegram-Session. Session einmalig mit `npm run auth --workspace=@wagi/tg-connector` erzeugen.");
+}
+
+async function beginDirectQrAuth() {
+  if (!directMode) throw new Error("TG_API_ID und TG_API_HASH sind für den Direct-Telegram-QR erforderlich");
+  await ensureDirectConnection();
+  if (!directClient) throw new Error("Telegram-Client wurde nicht initialisiert");
+  const client = directClient;
+  if (await client.checkAuthorization()) { await startDirectRuntime(); return; }
+  if (directQrAuthPromise) return;
+  lastError = null;
+  directQrAuthPromise = client.signInUserWithQrCode(
+    { apiId, apiHash },
+    {
+      qrCode: async ({ token, expires }) => {
+        directQr = `tg://login?token=${token.toString("base64url")}`;
+        directQrExpiresAt = expires > 10_000_000_000 ? expires : expires * 1000;
+        await setStatus("pairing", "Telegram-QR mit der mobilen Telegram-App scannen");
+      },
+      password: async () => { throw new Error("DIRECT_TELEGRAM_2FA_REQUIRED: QR-Anmeldung benötigt das 2FA-Passwort; nutze einmalig den lokalen Auth-Befehl."); },
+      onError: async (error) => { lastError = String(error); return true; },
+    },
+  ).then(async () => {
+    directQr = null;
+    directQrExpiresAt = null;
+    await saveDirectSession();
+    await startDirectRuntime();
+  }).catch(async (error) => {
+    directQr = null;
+    directQrExpiresAt = null;
+    await setStatus("error", String(error).includes("DIRECT_TELEGRAM_2FA_REQUIRED") ? "Telegram-QR wurde gescannt, aber 2FA erfordert den lokalen Auth-Befehl" : "Telegram-QR-Anmeldung fehlgeschlagen", error);
+  }).finally(() => { directQrAuthPromise = null; });
+}
+
 function normalizedChatId(chatId: number) {
   return `tg:${chatId}`;
 }
@@ -127,7 +627,6 @@ function isTargetChat(chat: TelegramChat): chat is TelegramChat & { type: "group
 }
 
 function isSelected(chat: TelegramChat) {
-  if (allowlist.size === 0) return true;
   return allowlist.has(String(chat.id)) || allowlist.has(normalizedChatId(chat.id)) || (chat.username ? allowlist.has(`@${chat.username}`) || allowlist.has(chat.username) : false);
 }
 
@@ -138,15 +637,18 @@ async function upsertGroup(chat: TelegramChat) {
     subject: chatSubject(chat),
     ownerJid: `tg:chat:${chat.id}`,
     isSelected: isSelected(chat),
+    platform: "telegram",
+    chatType: chat.type,
   };
-  await pool.query(
-    `INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected)
-     VALUES ($1, $2, $3, $4, $5)
+  const result = await pool.query<{ is_selected: boolean }>(
+    `INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id)
+     VALUES ($1, $2, $3, $4, $5, 'telegram', $6, $1)
      ON CONFLICT (id) DO UPDATE SET subject = EXCLUDED.subject, owner_jid = EXCLUDED.owner_jid,
-       updated_at = NOW()`,
-    [group.groupId, group.subject, group.ownerJid, 0, group.isSelected],
+       platform = 'telegram', chat_type = EXCLUDED.chat_type, external_chat_id = EXCLUDED.external_chat_id, updated_at = NOW()
+     RETURNING is_selected`,
+    [group.groupId, group.subject, group.ownerJid, 0, group.isSelected, group.chatType],
   );
-  await publish(subjects.groupDiscovered, subjects.groupDiscovered, group);
+  await publish(subjects.groupDiscovered, subjects.groupDiscovered, { ...group, isSelected: result.rows[0]?.is_selected ?? group.isSelected });
 }
 
 function messageKind(message: TelegramMessage): WhatsAppMessageReceived["kind"] {
@@ -181,7 +683,20 @@ function mediaDetails(message: TelegramMessage, kind: WhatsAppMessageReceived["k
   if (!item || !["audio", "image", "video", "document"].includes(kind)) return undefined;
   const fileId = item.file_id;
   const mediaMime = "mime_type" in item ? item.mime_type : kind === "image" ? "image/jpeg" : undefined;
-  return { mediaKey: `telegram/${message.chat.id}/${message.message_id}/${fileId}`, mediaMime };
+  return { mediaKey: `telegram/${message.chat.id}/${message.message_id}/${fileId}`, mediaMime, fileId, fileName: "file_name" in item ? item.file_name : undefined };
+}
+
+async function downloadTelegramMedia(fileId: string, mediaKey: string) {
+  const file = await telegramApi<{ file_path?: string }>("getFile", { file_id: fileId });
+  if (!file.file_path) throw new Error("Telegram lieferte keinen file_path");
+  const response = await fetch(`https://api.telegram.org/file/bot${botToken}/${file.file_path}`);
+  if (!response.ok) throw new Error(`Telegram-Datei konnte nicht geladen werden: ${response.status}`);
+  const extension = file.file_path.includes(".") ? `.${file.file_path.split(".").pop()!.replace(/[^a-z0-9]/gi, "")}` : "";
+  const safeName = mediaKey.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const objectPath = join(mediaDir, "incoming", `${safeName}${extension}`);
+  await mkdir(join(mediaDir, "incoming"), { recursive: true });
+  await writeFile(objectPath, Buffer.from(await response.arrayBuffer()));
+  return objectPath;
 }
 
 async function persistMessage(message: TelegramMessage) {
@@ -192,20 +707,31 @@ async function persistMessage(message: TelegramMessage) {
 
   const groupId = normalizedChatId(message.chat.id);
   const waMessageId = `${groupId}:${message.message_id}`;
+  if (initialActivation && new Date(message.date * 1000) < backfillCutoff) return;
   const kind = messageKind(message);
   const media = mediaDetails(message, kind);
   const hasMedia = Boolean(media);
   const raw = message as unknown as Record<string, unknown>;
+  let objectPath: string | undefined;
+  if (media) {
+    try { objectPath = await retryTelegramOperation(`Telegram media download ${media.mediaKey}`, () => downloadTelegramMedia(media.fileId, media.mediaKey)); }
+    catch (error) { console.warn("Telegram media download failed; Nachricht bleibt pending", media.mediaKey, summarizeTelegramError(error)); }
+  }
+  const contentHash = createHash("sha256").update(JSON.stringify({ groupId, waMessageId, kind, text: messageText(message), raw })).digest("hex");
+  const existing = await pool.query<{ id: string; content_hash: string | null; media_status: string | null }>("SELECT id, content_hash, media_status FROM messages WHERE group_id=$1 AND wa_message_id=$2", [groupId, waMessageId]);
+  if (existing.rows[0]?.content_hash === contentHash && (!media || existing.rows[0].media_status === "completed")) return;
+  const mediaStatus = media ? (objectPath ? "completed" : "pending") : "none";
   const result = await pool.query<{ id: string }>(
-    `INSERT INTO messages (group_id, wa_message_id, sender_jid, sender_name, kind, text, received_at, has_media, media_key, media_mime, raw)
-     VALUES ($1,$2,$3,$4,$5,$6,to_timestamp($7),$8,$9,$10,$11)
+    `INSERT INTO messages (group_id, wa_message_id, platform, external_chat_id, sender_jid, sender_name, kind, text, received_at, has_media, media_key, media_mime, raw, content_hash, sequence_no, media_status)
+     VALUES ($1,$2,'telegram',$1,$3,$4,$5,$6,to_timestamp($7),$8,$9,$10,$11,$12,$7,$13)
      ON CONFLICT (group_id, wa_message_id) DO UPDATE SET sender_jid = EXCLUDED.sender_jid,
        sender_name = EXCLUDED.sender_name, kind = EXCLUDED.kind, text = EXCLUDED.text,
        received_at = EXCLUDED.received_at, has_media = EXCLUDED.has_media,
-       media_key = EXCLUDED.media_key, media_mime = EXCLUDED.media_mime, raw = EXCLUDED.raw
+       media_key = EXCLUDED.media_key, media_mime = EXCLUDED.media_mime, raw = EXCLUDED.raw, content_hash = EXCLUDED.content_hash,
+       sequence_no = EXCLUDED.sequence_no, media_status = CASE WHEN EXCLUDED.media_status='completed' THEN 'completed' ELSE messages.media_status END
      RETURNING id`,
     [groupId, waMessageId, senderId(message), senderName(message) ?? null, kind, messageText(message) ?? null,
-      message.date, hasMedia, media?.mediaKey ?? null, media?.mediaMime ?? null, raw],
+      message.date, hasMedia, media?.mediaKey ?? null, media?.mediaMime ?? null, raw, contentHash, mediaStatus],
   );
   const replyToWaMessageId = message.reply_to_message
     ? `${groupId}:${message.reply_to_message.message_id}`
@@ -227,16 +753,20 @@ async function persistMessage(message: TelegramMessage) {
     mediaMime: media?.mediaMime,
     replyToWaMessageId,
     raw,
+    mediaObjectPath: objectPath,
+    changeType: existing.rows[0] ? "updated" : "created",
+    sequenceNo: message.date,
   };
   await publish(subjects.messageReceived, subjects.messageReceived, data);
+  if (media && objectPath) await publish(subjects.mediaRequested, subjects.mediaRequested, { messageId: data.messageId, mediaKey: media.mediaKey, objectPath, mediaMime: media.mediaMime, platform: "telegram", fileName: media.fileName });
 
-  if (kind === "audio" && media) {
+  if (kind === "audio" && media && objectPath) {
     const existing = await pool.query<{ id: string }>("SELECT id FROM audio_jobs WHERE message_id = $1 ORDER BY created_at DESC LIMIT 1", [data.messageId]);
     const jobId = existing.rows[0]?.id ?? randomUUID();
     if (!existing.rows[0]) {
-      await pool.query("INSERT INTO audio_jobs (id, message_id, media_key, media_mime) VALUES ($1,$2,$3,$4)", [jobId, data.messageId, media.mediaKey, media.mediaMime ?? null]);
+      await pool.query("INSERT INTO audio_jobs (id, message_id, media_key, media_mime, object_path) VALUES ($1,$2,$3,$4,$5)", [jobId, data.messageId, media.mediaKey, media.mediaMime ?? null, objectPath]);
     }
-    await publish(subjects.audioRequested, subjects.audioRequested, { jobId, messageId: data.messageId, mediaKey: media.mediaKey, mediaMime: media.mediaMime });
+    await publish(subjects.audioRequested, subjects.audioRequested, { jobId, messageId: data.messageId, mediaKey: media.mediaKey, mediaMime: media.mediaMime, objectPath });
   }
 }
 
@@ -261,18 +791,29 @@ function delay(milliseconds: number) {
 }
 
 async function handleUpdate(update: TelegramUpdate) {
-  const membership = update.my_chat_member ?? update.chat_member;
-  if (membership) await upsertGroup(membership.chat);
+  if (update.my_chat_member) {
+    const membership = update.my_chat_member;
+    const state = membership.new_chat_member;
+    const removed = state?.status === "left" || state?.status === "kicked" || (state?.status === "restricted" && state.is_member === false);
+    if (removed && isTargetChat(membership.chat)) await cleanupRemovedGroups("telegram", [normalizedChatId(membership.chat.id)]);
+    else if (isTargetChat(membership.chat)) await upsertGroup(membership.chat);
+  } else if (update.chat_member && isTargetChat(update.chat_member.chat)) {
+    await upsertGroup(update.chat_member.chat);
+  }
   const message = update.message ?? update.channel_post;
   if (message) await persistMessage(message);
 }
 
 async function pollTelegram() {
   if (!botToken) return;
+  await setStatus("connecting", "Telegram Bot API wird verbunden");
   await telegramApi<boolean>("deleteWebhook", { drop_pending_updates: false });
   botInfo = await telegramApi<TelegramUser>("getMe");
+  connectedAt = new Date().toISOString();
+  await setStatus("ready", `Bot @${botInfo.username ?? botInfo.first_name} empfängt Gruppen und Channels`);
   polling = true;
-  let offset = await loadOffset();
+  let offset = initialActivation ? 0 : await loadOffset();
+  let initialPollCompleted = false;
   console.log(`tg-connector authenticated as @${botInfo.username ?? botInfo.first_name}; polling groups/channels`);
   while (true) {
     try {
@@ -287,11 +828,18 @@ async function pollTelegram() {
         offset = update.update_id + 1;
         await saveOffset(offset);
       }
+      if (initialActivation && !initialPollCompleted) {
+        initialPollCompleted = true;
+        await completeInitialActivation();
+        await setStatus("ready", `Erst-Backfill abgeschlossen: verfügbare Telegram-Updates geprüft; Bot API liefert keine rückwirkende Gruppenhistorie`);
+      }
     } catch (error) {
       polling = false;
+      await setStatus("degraded", "Polling unterbrochen; Wiederholung in 5 Sekunden", error);
       console.error("Telegram polling failed", error);
       await delay(5000);
       polling = true;
+      await setStatus("ready", "Telegram-Polling wieder aktiv");
     }
   }
 }
@@ -303,21 +851,35 @@ function respond(response: ServerResponse, status: number, body: unknown) {
 
 const server = createServer((request: IncomingMessage, response: ServerResponse) => {
   if (request.method === "OPTIONS") {
-    response.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,OPTIONS", "access-control-allow-headers": "content-type" });
+    response.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type" });
     return response.end();
   }
   if (request.url === "/healthz") return respond(response, 200, { status: "ok", service: "tg-connector" });
-  if (request.url === "/readyz") return respond(response, 200, { status: botInfo && polling ? "ready" : "waiting-for-bot-token", mode: "telegram-bot" });
+  if (request.url === "/readyz") return respond(response, lifecycleStatus === "ready" ? 200 : 503, { status: lifecycleStatus, mode: directMode ? "telegram-direct" : "telegram-bot", lastError });
+  if (request.url === "/status") {
+    return respond(response, 200, { connector: "telegram", status: lifecycleStatus, mode: directMode ? "telegram-direct" : "telegram-bot", connected: directRuntimeStarted || Boolean(botInfo && polling), connectedAt, lastError, qr: directQr, qrExpiresAt: directQrExpiresAt, qrLoginActive: Boolean(directQrAuthPromise), initialBackfillActive: initialActivation, backfillDays, backfillNote: directMode ? "Direct Telegram liest die letzten drei Tage aus der persönlichen Dialoghistorie." : "Die Telegram Bot API stellt keine rückwirkende Gruppenhistorie bereit; verarbeitet werden alle noch verfügbaren Updates." });
+  }
+  if (request.method === "POST" && request.url === "/auth/qr") {
+    if (!directMode) return respond(response, 400, { error: "Telegram-Direkt-QR benötigt TG_API_ID und TG_API_HASH in .env" });
+    void beginDirectQrAuth().catch((error) => { void setStatus("error", "Telegram-QR konnte nicht gestartet werden", error); });
+    return respond(response, 202, { status: "pairing", message: "Telegram-QR wird erzeugt" });
+  }
   if (request.url === "/bot") {
     return respond(response, 200, {
-      configured: Boolean(botToken),
-      connected: Boolean(botInfo && polling),
+      configured: directMode || Boolean(botToken),
+      mode: directMode ? "telegram-direct" : "telegram-bot",
+      connected: directRuntimeStarted || Boolean(botInfo && polling),
       bot: botInfo ? { id: botInfo.id, username: botInfo.username, firstName: botInfo.first_name } : null,
       groupAllowlist: [...allowlist],
+      initialBackfillActive: initialActivation,
+      backfillDays,
+      backfillNote: directMode ? "Direct Telegram liest die letzten drei Tage aus der persönlichen Dialoghistorie." : "Die Telegram Bot API stellt keine rückwirkende Gruppenhistorie bereit; verarbeitet werden alle noch verfügbaren Updates.",
       instructions: [
+        ...(directMode ? ["Direct Telegram verwendet die persönliche MTProto-Session; Gruppen müssen nur im persönlichen Konto erreichbar sein.", "Bei fehlender Session `npm run auth --workspace=@wagi/tg-connector` ausführen."] : [
         "Füge den Bot zu den gewünschten Gruppen hinzu.",
         "Für vollständige Gruppennachrichten den Bot als Administrator setzen oder die Privacy Mode über @BotFather mit /setprivacy deaktivieren.",
         "Für Channels reicht es, den Bot als Mitglied bzw. Administrator hinzuzufügen.",
+        ]),
       ],
     });
   }
@@ -327,9 +889,13 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
 async function main() {
   nc = await connect({ servers: natsUrl });
   await ensureEventStream();
+  subscribeGroupSelections();
   await pool.query("SELECT 1");
-  server.listen(port, () => console.log(`tg-connector listening on :${port} (${botToken ? "bot-api" : "waiting for TG_BOT_TOKEN"})`));
-  if (botToken) void pollTelegram().catch((error) => { polling = false; console.error(error); });
+  await prepareInitialActivation();
+  server.listen(port, () => console.log(`tg-connector listening on :${port} (${directMode ? "direct" : botToken ? "bot-api" : "waiting for Telegram credentials"})`));
+  if (directMode) void startDirectConnector().catch((error) => { void setStatus("error", "Direct Telegram Initialisierung fehlgeschlagen", error); console.error(error); });
+  else if (botToken) void pollTelegram().catch((error) => { polling = false; void setStatus("error", "Telegram-Initialisierung fehlgeschlagen", error); console.error(error); });
+  else void setStatus("starting", "TG_API_ID/TG_API_HASH oder TG_BOT_TOKEN ist noch nicht konfiguriert");
 }
 
 void main().catch((error) => { console.error(error); process.exitCode = 1; });

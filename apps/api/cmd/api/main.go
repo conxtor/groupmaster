@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
+	"mime"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -18,9 +23,11 @@ import (
 )
 
 type app struct {
-	db *pgxpool.Pool
-	nc *nats.Conn
-	js nats.JetStreamContext
+	db          *pgxpool.Pool
+	nc          *nats.Conn
+	js          nats.JetStreamContext
+	mediaDir    string
+	mediaSecret string
 }
 
 type group struct {
@@ -28,6 +35,11 @@ type group struct {
 	Subject          string    `json:"subject"`
 	ParticipantCount int       `json:"participantCount"`
 	IsSelected       bool      `json:"isSelected"`
+	Platform         string    `json:"platform"`
+	ChatType         string    `json:"chatType"`
+	Language         *string   `json:"language,omitempty"`
+	ParentGroupID    *string   `json:"parentGroupId,omitempty"`
+	TopicID          *int64    `json:"topicId,omitempty"`
 	DiscoveredAt     time.Time `json:"discoveredAt"`
 }
 
@@ -42,6 +54,13 @@ type message struct {
 	ReplyToWAID  *string         `json:"replyToWaMessageId,omitempty"`
 	Platform     string          `json:"platform"`
 	ImageURL     string          `json:"imageUrl,omitempty"`
+	MediaURL     string          `json:"mediaUrl,omitempty"`
+	ThumbnailURL string          `json:"thumbnailUrl,omitempty"`
+	Transcript   *string         `json:"transcript,omitempty"`
+	AudioStatus  *string         `json:"audioStatus,omitempty"`
+	MediaStatus  string          `json:"mediaStatus,omitempty"`
+	OCRText      *string         `json:"ocrText,omitempty"`
+	DeletedAt    *time.Time      `json:"deletedAt,omitempty"`
 	ReceivedAt   time.Time       `json:"receivedAt"`
 	HasMedia     bool            `json:"hasMedia"`
 	Analysis     json.RawMessage `json:"analysis,omitempty"`
@@ -51,6 +70,27 @@ type audioJobRequest struct {
 	MessageID string `json:"messageId"`
 	MediaKey  string `json:"mediaKey"`
 	MediaMime string `json:"mediaMime"`
+}
+
+type knowledgeItem struct {
+	ID               string          `json:"id"`
+	ItemType         string          `json:"itemType"`
+	Content          string          `json:"content"`
+	Confidence       float64         `json:"confidence"`
+	SourceMessageIDs json.RawMessage `json:"sourceMessageIds"`
+}
+
+type knowledgeTopic struct {
+	ID               string          `json:"id"`
+	GroupID          string          `json:"groupId"`
+	GroupSubject     string          `json:"groupSubject"`
+	TopicKey         string          `json:"topicKey"`
+	Title            string          `json:"title"`
+	Summary          string          `json:"summary"`
+	Confidence       float64         `json:"confidence"`
+	SourceMessageIDs json.RawMessage `json:"sourceMessageIds"`
+	Items            json.RawMessage `json:"items"`
+	UpdatedAt        time.Time       `json:"updatedAt"`
 }
 
 func env(key, fallback string) string {
@@ -104,7 +144,7 @@ func (a *app) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) groups(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(r.Context(), `SELECT id, subject, participant_count, is_selected, discovered_at FROM wa_groups ORDER BY subject`)
+	rows, err := a.db.Query(r.Context(), `SELECT id, subject, participant_count, is_selected, platform, chat_type, language, parent_group_id, topic_id, discovered_at FROM wa_groups ORDER BY platform, COALESCE(parent_group_id, id), CASE WHEN chat_type='topic' THEN 1 ELSE 0 END, subject`)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -113,7 +153,7 @@ func (a *app) groups(w http.ResponseWriter, r *http.Request) {
 	result := make([]group, 0)
 	for rows.Next() {
 		var item group
-		if err := rows.Scan(&item.ID, &item.Subject, &item.ParticipantCount, &item.IsSelected, &item.DiscoveredAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Subject, &item.ParticipantCount, &item.IsSelected, &item.Platform, &item.ChatType, &item.Language, &item.ParentGroupID, &item.TopicID, &item.DiscoveredAt); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -129,16 +169,43 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	rows, err := a.db.Query(r.Context(), `
+	conditions := []string{"g.is_selected = TRUE"}
+	args := make([]any, 0)
+	arg := func(value any) string { args = append(args, value); return fmt.Sprintf("$%d", len(args)) }
+	if value := strings.TrimSpace(r.URL.Query().Get("q")); value != "" {
+		placeholder := arg("%" + value + "%")
+		conditions = append(conditions, fmt.Sprintf("(m.text ILIKE %s OR g.subject ILIKE %s OR m.raw::text ILIKE %s)", placeholder, placeholder, placeholder))
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("groupId")); value != "" {
+		conditions = append(conditions, "m.group_id = "+arg(value))
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("kind")); value != "" {
+		conditions = append(conditions, "m.kind = "+arg(value))
+	}
+	if r.URL.Query().Get("relevant") == "true" {
+		conditions = append(conditions, "COALESCE(a.relevant, FALSE) = TRUE")
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("from")); value != "" {
+		conditions = append(conditions, "m.received_at >= "+arg(value))
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("to")); value != "" {
+		conditions = append(conditions, "m.received_at < "+arg(value))
+	}
+	args = append(args, limit)
+	limitArg := fmt.Sprintf("$%d", len(args))
+	rows, err := a.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT m.id, m.group_id, g.subject, m.sender_jid, m.sender_name, m.kind, m.text,
 		       COALESCE(NULLIF(m.raw #>> '{message,extendedTextMessage,contextInfo,stanzaId}', ''),
 		                CASE WHEN m.raw ? 'reply_to_message' THEN m.group_id || ':' || (m.raw #>> '{reply_to_message,message_id}') END),
-		       CASE WHEN m.group_id LIKE 'tg:%' THEN 'telegram' ELSE 'whatsapp' END,
-		       m.received_at, m.has_media,
-		       COALESCE(jsonb_build_object('relevant', a.relevant, 'score', a.relevance_score, 'summary', a.summary, 'facts', a.facts, 'entities', a.entities, 'events', a.events, 'places', a.places, 'model', a.model), '{}'::jsonb)
+		       COALESCE(m.platform, CASE WHEN m.group_id LIKE 'tg:%%' THEN 'telegram' ELSE 'whatsapp' END),
+		       m.received_at, m.has_media, m.media_status, m.deleted_at,
+		       mo.object_path, mo.thumbnail_path, mo.ocr_text, aj.transcript, aj.status,
+		       COALESCE(jsonb_build_object('relevant', a.relevant, 'score', a.relevance_score, 'summary', a.summary, 'facts', a.facts, 'entities', a.entities, 'events', a.events, 'places', a.places, 'model', a.model, 'schemaVersion', a.schema_version, 'promptVersion', a.prompt_version, 'provenance', a.provenance, 'conflicts', a.conflicts), '{}'::jsonb)
 		FROM messages m JOIN wa_groups g ON g.id = m.group_id
 		LEFT JOIN message_analyses a ON a.message_id = m.id
-		WHERE g.is_selected = TRUE ORDER BY m.received_at DESC LIMIT $1`, limit)
+		LEFT JOIN LATERAL (SELECT object_path, thumbnail_path, ocr_text FROM media_objects WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) mo ON TRUE
+		LEFT JOIN LATERAL (SELECT transcript, status FROM audio_jobs WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) aj ON TRUE
+		WHERE %s ORDER BY m.received_at DESC LIMIT %s`, strings.Join(conditions, " AND "), limitArg), args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -147,11 +214,184 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 	result := make([]message, 0)
 	for rows.Next() {
 		var item message
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.SenderJID, &item.SenderName, &item.Kind, &item.Text, &item.ReplyToWAID, &item.Platform, &item.ReceivedAt, &item.HasMedia, &item.Analysis); err != nil {
+		var objectPath, thumbnailPath *string
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.SenderJID, &item.SenderName, &item.Kind, &item.Text, &item.ReplyToWAID, &item.Platform, &item.ReceivedAt, &item.HasMedia, &item.MediaStatus, &item.DeletedAt, &objectPath, &thumbnailPath, &item.OCRText, &item.Transcript, &item.AudioStatus, &item.Analysis); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
 		item.ImageURL = mockImageURL(item.GroupID, item.Text)
+		if item.Kind == "image" && item.HasMedia && (item.Platform == "telegram" || !strings.HasPrefix(item.GroupID, "120363mock")) {
+			item.MediaURL = a.signedMediaURL(item.ID, false)
+			item.ThumbnailURL = a.signedMediaURL(item.ID, true)
+		} else if objectPath != nil && *objectPath != "" {
+			item.MediaURL = a.signedMediaURL(item.ID, false)
+			if thumbnailPath != nil && *thumbnailPath != "" {
+				item.ThumbnailURL = a.signedMediaURL(item.ID, true)
+			}
+		}
+		result = append(result, item)
+	}
+	writeJSON(w, 200, result)
+}
+
+func (a *app) signedMediaURL(messageID string, thumbnail bool) string {
+	expires := time.Now().Add(10 * time.Minute).Unix()
+	return fmt.Sprintf("/api/v1/media/%s?thumbnail=%d&expires=%d&token=%s", messageID, boolToInt(thumbnail), expires, a.mediaToken(messageID, thumbnail, expires))
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func (a *app) mediaToken(messageID string, thumbnail bool, expires int64) string {
+	mac := hmac.New(sha256.New, []byte(a.mediaSecret))
+	_, _ = fmt.Fprintf(mac, "%s|%t|%d", messageID, thumbnail, expires)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("allow", "GET, HEAD")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	messageID := strings.TrimPrefix(r.URL.Path, "/api/v1/media/")
+	thumbnail := r.URL.Query().Get("thumbnail") == "1"
+	expires, parseErr := strconv.ParseInt(r.URL.Query().Get("expires"), 10, 64)
+	token := r.URL.Query().Get("token")
+	if messageID == "" || strings.Contains(messageID, "/") || parseErr != nil || expires < time.Now().Unix() || !hmac.Equal([]byte(token), []byte(a.mediaToken(messageID, thumbnail, expires))) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "media URL expired or invalid"})
+		return
+	}
+	var mediaKey, mediaMime, kind string
+	var objectPath, thumbnailPath *string
+	var storedMime *string
+	err := a.db.QueryRow(r.Context(), `
+		SELECT COALESCE(m.media_key, ''), COALESCE(m.media_mime, ''), m.kind, mo.object_path, mo.thumbnail_path, mo.mime
+		FROM messages m
+		JOIN wa_groups g ON g.id = m.group_id AND g.is_selected = TRUE
+		LEFT JOIN LATERAL (
+			SELECT object_path, thumbnail_path, mime FROM media_objects
+			WHERE message_id = m.id ORDER BY updated_at DESC LIMIT 1
+		) mo ON TRUE
+		WHERE m.id = $1::uuid AND m.has_media = TRUE AND m.kind = 'image'`, messageID).
+		Scan(&mediaKey, &mediaMime, &kind, &objectPath, &thumbnailPath, &storedMime)
+	if err == pgx.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "media not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "media lookup failed"})
+		return
+	}
+	requestedPath := objectPath
+	if thumbnail && thumbnailPath != nil && *thumbnailPath != "" {
+		requestedPath = thumbnailPath
+	}
+	if requestedPath == nil || *requestedPath == "" {
+		safeKey := strings.Map(func(value rune) rune {
+			if (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == '_' || value == '-' {
+				return value
+			}
+			return '_'
+		}, mediaKey)
+		extension := "jpeg"
+		mediaType := strings.Split(mediaMime, ";")[0]
+		if slash := strings.Index(mediaType, "/"); slash >= 0 && slash+1 < len(mediaType) {
+			extension = strings.Map(func(value rune) rune {
+				if (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') {
+					return value
+				}
+				return -1
+			}, mediaType[slash+1:])
+		}
+		if extension == "" {
+			if values, _ := mime.ExtensionsByType(mediaType); len(values) > 0 {
+				extension = strings.TrimPrefix(values[0], ".")
+			}
+		}
+		fallback := filepath.Join(a.mediaDir, "incoming", safeKey+"."+extension)
+		requestedPath = &fallback
+	}
+	root, err := filepath.Abs(a.mediaDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "media root unavailable"})
+		return
+	}
+	filePath, err := filepath.Abs(*requestedPath)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid media path"})
+		return
+	}
+	relative, err := filepath.Rel(root, filePath)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid media path"})
+		return
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "media file not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "media file unavailable"})
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "media file unavailable"})
+		return
+	}
+	contentType := mediaMime
+	if storedMime != nil && *storedMime != "" {
+		contentType = *storedMime
+	}
+	if contentType == "" {
+		contentType = mime.TypeByExtension(filepath.Ext(filePath))
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("content-type", contentType)
+	w.Header().Set("cache-control", "private, max-age=300")
+	http.ServeContent(w, r, filepath.Base(filePath), info.ModTime(), file)
+}
+
+func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
+	conditions := []string{"g.is_selected = TRUE"}
+	args := make([]any, 0)
+	arg := func(value any) string { args = append(args, value); return fmt.Sprintf("$%d", len(args)) }
+	if value := strings.TrimSpace(r.URL.Query().Get("groupId")); value != "" {
+		conditions = append(conditions, "kt.group_id = "+arg(value))
+	}
+	rows, err := a.db.Query(r.Context(), fmt.Sprintf(`
+		SELECT kt.id::text, kt.group_id, g.subject, kt.topic_key, kt.title, kt.summary, kt.confidence,
+		       kt.source_message_ids, COALESCE(jsonb_agg(jsonb_build_object(
+		         'id', ki.id::text, 'itemType', ki.item_type, 'content', ki.content,
+		         'confidence', ki.confidence, 'sourceMessageIds', ki.source_message_ids
+		       ) ORDER BY ki.updated_at DESC) FILTER (WHERE ki.id IS NOT NULL), '[]'::jsonb), kt.updated_at
+		FROM knowledge_topics kt
+		JOIN wa_groups g ON g.id = kt.group_id
+		LEFT JOIN knowledge_items ki ON ki.topic_id = kt.id
+		WHERE %s
+		GROUP BY kt.id, kt.group_id, g.subject, kt.topic_key, kt.title, kt.summary, kt.confidence, kt.source_message_ids, kt.updated_at
+		ORDER BY g.subject, kt.updated_at DESC`, strings.Join(conditions, " AND ")), args...)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	result := make([]knowledgeTopic, 0)
+	for rows.Next() {
+		var item knowledgeTopic
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.TopicKey, &item.Title, &item.Summary, &item.Confidence, &item.SourceMessageIDs, &item.Items, &item.UpdatedAt); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
 		result = append(result, item)
 	}
 	writeJSON(w, 200, result)
@@ -189,7 +429,7 @@ func (a *app) selectGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var item group
-	err := a.db.QueryRow(r.Context(), `UPDATE wa_groups SET is_selected = $1, updated_at = NOW() WHERE id = $2 RETURNING id, subject, participant_count, is_selected, discovered_at`, body.Selected, groupID).Scan(&item.ID, &item.Subject, &item.ParticipantCount, &item.IsSelected, &item.DiscoveredAt)
+	err := a.db.QueryRow(r.Context(), `UPDATE wa_groups SET is_selected = $1, updated_at = NOW() WHERE id = $2 RETURNING id, subject, participant_count, is_selected, platform, chat_type, language, parent_group_id, topic_id, discovered_at`, body.Selected, groupID).Scan(&item.ID, &item.Subject, &item.ParticipantCount, &item.IsSelected, &item.Platform, &item.ChatType, &item.Language, &item.ParentGroupID, &item.TopicID, &item.DiscoveredAt)
 	if err == pgx.ErrNoRows {
 		writeJSON(w, 404, map[string]string{"error": "group not found"})
 		return
@@ -197,6 +437,20 @@ func (a *app) selectGroup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"id":         uuid.NewString(),
+		"type":       "connector.group.selection.changed",
+		"occurredAt": time.Now().UTC(),
+		"source":     "api",
+		"data": map[string]any{
+			"groupId":  item.ID,
+			"selected": item.IsSelected,
+			"platform": item.Platform,
+		},
+	})
+	if err := a.nc.Publish("connector.group.selection.changed", payload); err != nil {
+		log.Printf("group selection event publish failed: %v", err)
 	}
 	writeJSON(w, 200, item)
 }
@@ -262,7 +516,7 @@ func main() {
 	if err := ensureEventStream(js); err != nil {
 		log.Fatal(err)
 	}
-	a := &app{db: db, nc: natsConn, js: js}
+	a := &app{db: db, nc: natsConn, js: js, mediaDir: env("MEDIA_DIR", "/data/media"), mediaSecret: env("MEDIA_SIGNING_SECRET", uuid.NewString())}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", a.health)
 	mux.HandleFunc("/readyz", a.ready)
@@ -270,6 +524,8 @@ func main() {
 	mux.HandleFunc("/api/v1/groups", a.groups)
 	mux.HandleFunc("/api/v1/groups/", a.selectGroup)
 	mux.HandleFunc("/api/v1/messages", a.messages)
+	mux.HandleFunc("/api/v1/media/", a.mediaImage)
+	mux.HandleFunc("/api/v1/knowledge", a.knowledge)
 	mux.HandleFunc("/api/v1/audio/jobs", a.audioJob)
 	port := env("PORT", "8080")
 	log.Printf("wagi api listening on :%s", port)

@@ -4,7 +4,7 @@ services:
     environment:
       # Supabase's bootstrap scripts require the standard postgres role.
       # Application services connect through the least-privileged app role created by the migration.
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-supabase_admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
       POSTGRES_DB: ${POSTGRES_DB:-app}
     ports: ["5432:5432"]
@@ -12,7 +12,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ../migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-supabase_admin} -d ${POSTGRES_DB:-app}"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -49,7 +49,11 @@ services:
       DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}?sslmode=disable
       NATS_URL: nats://nats:4222
       PORT: 8080
+      MEDIA_DIR: /data/media
+      MEDIA_SIGNING_SECRET: ${MEDIA_SIGNING_SECRET:-}
     ports: ["8080:8080"]
+    volumes:
+      - media_data:/data/media:ro
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
@@ -65,8 +69,15 @@ services:
       WA_MOCK_MODE: ${WA_MOCK_MODE:-true}
       WA_GROUP_ALLOWLIST: ${WA_GROUP_ALLOWLIST:-}
       WA_AUTH_DIR: /data/wa-auth
-    ports: ["3001:3001"]
-    volumes: ["wa_auth:/data/wa-auth"]
+      WA_SYNC_HISTORY: ${WA_SYNC_HISTORY:-false}
+      WA_BACKFILL_DAYS: ${WA_BACKFILL_DAYS:-3}
+      GROUP_REFRESH_INTERVAL_MS: ${GROUP_REFRESH_INTERVAL_MS:-60000}
+      MEDIA_DIR: /data/media
+      MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
+    ports: ["127.0.0.1:3001:3001"]
+    volumes:
+      - wa_auth:/data/wa-auth
+      - media_data:/data/media
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
@@ -80,11 +91,26 @@ services:
       NATS_URL: nats://nats:4222
       TG_PORT: 3002
       TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TG_API_ID: ${TG_API_ID:-}
+      TG_API_HASH: ${TG_API_HASH:-}
+      TG_PHONE: ${TG_PHONE:-}
+      TG_SESSION: ${TG_SESSION:-}
       TG_GROUP_ALLOWLIST: ${TG_GROUP_ALLOWLIST:-}
       TG_STATE_DIR: /data/tg-state
       TG_POLL_TIMEOUT: ${TG_POLL_TIMEOUT:-25}
+      TG_BACKFILL_DAYS: ${TG_BACKFILL_DAYS:-3}
+      TG_CONNECTION_RETRIES: ${TG_CONNECTION_RETRIES:-12}
+      TG_REQUEST_RETRIES: ${TG_REQUEST_RETRIES:-8}
+      TG_DOWNLOAD_RETRIES: ${TG_DOWNLOAD_RETRIES:-8}
+      TG_RETRY_DELAY_MS: ${TG_RETRY_DELAY_MS:-2000}
+      TG_MEDIA_RETRY_ATTEMPTS: ${TG_MEDIA_RETRY_ATTEMPTS:-4}
+      GROUP_REFRESH_INTERVAL_MS: ${GROUP_REFRESH_INTERVAL_MS:-60000}
+      MEDIA_DIR: /data/media
+      MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
     ports: ["3002:3002"]
-    volumes: ["tg_state:/data/tg-state"]
+    volumes:
+      - tg_state:/data/tg-state
+      - media_data:/data/media
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
@@ -97,6 +123,11 @@ services:
       DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
       NATS_URL: nats://nats:4222
       AI_MODEL: ${AI_MODEL:-heuristic-mvp}
+      AI_PROVIDER: ${AI_PROVIDER:-heuristic}
+      AI_ENDPOINT: ${AI_ENDPOINT:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_PROMPT_VERSION: ${AI_PROMPT_VERSION:-phase1-v2-precision}
+      AI_KNOWLEDGE_VERSION: ${AI_KNOWLEDGE_VERSION:-precision-v3}
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
@@ -115,8 +146,15 @@ services:
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-auto}
       WHISPER_LANGUAGES: ${WHISPER_LANGUAGES:-es,ca,de,en,fr}
       WHISPER_THREADS: ${WHISPER_THREADS:-4}
+      MEDIA_DIR: /data/media
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-wa-media}
+      MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
     volumes:
       - whisper_models:/models
+      - media_data:/data/media
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
@@ -139,3 +177,4 @@ volumes:
   wa_auth:
   tg_state:
   whisper_models:
+  media_data:

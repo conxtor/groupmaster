@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { QRCodeSVG } from "qrcode.react";
 import EventMap from "./event-map";
+import { buildGroupHierarchy, type GroupHierarchyNode } from "./group-hierarchy";
 import {
   detectBrowserLocale,
   isSupportedLocale,
@@ -18,13 +21,16 @@ import {
 type Place = { name: string; latitude?: number; longitude?: number };
 type Event = { title: string; startsAt?: string; location?: string; sourceMessageIds?: string[] };
 type Analysis = { relevant?: boolean; score?: number; summary?: string; places?: Place[]; events?: Event[] };
-type Group = { id: string; subject: string; participantCount: number; isSelected: boolean; discoveredAt: string };
-type Message = { id: string; groupId: string; groupSubject: string; senderJid: string; senderName?: string; kind: string; text?: string; replyToWaMessageId?: string; platform?: string; imageUrl?: string; receivedAt: string; hasMedia: boolean; analysis?: Analysis };
+type Group = { id: string; subject: string; participantCount: number; isSelected: boolean; discoveredAt: string; platform?: "whatsapp" | "telegram"; chatType?: "group" | "supergroup" | "channel" | "topic"; language?: "de" | "es" | "ca" | "en" | "fr"; parentGroupId?: string; topicId?: number };
+type Message = { id: string; groupId: string; groupSubject: string; senderJid: string; senderName?: string; kind: string; text?: string; replyToWaMessageId?: string; platform?: string; imageUrl?: string; mediaUrl?: string; thumbnailUrl?: string; receivedAt: string; hasMedia: boolean; analysis?: Analysis };
 type EventVersion = { event: Event; place?: Place; updatedAt: string; sourceMessageIds: string[]; updateMessage?: Message };
-type EventRecord = { key: string; groupSubject: string; versions: EventVersion[] };
+type EventRecord = { key: string; groupId: string; groupSubject: string; groupPlatform?: string; versions: EventVersion[] };
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
+type ConnectorSnapshot = { connector: string; status: string; mode?: string; connected?: boolean; qr?: string | null; qrExpiresAt?: number | null; qrLoginActive?: boolean; lastError?: string | null };
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const waConnectorBase = process.env.NEXT_PUBLIC_WA_CONNECTOR_URL ?? "http://localhost:3001";
+const tgConnectorBase = process.env.NEXT_PUBLIC_TG_CONNECTOR_URL ?? "http://localhost:3002";
 const demoTimestamp = "2026-08-10T12:00:00.000Z";
 const sampleGroups: Group[] = [
   { id: "120363mock@g.us", subject: "Barcelona Wochenende", participantCount: 6, isSelected: true, discoveredAt: demoTimestamp },
@@ -38,6 +44,68 @@ const sampleMessages: Message[] = [
   { id: "sample-2", groupId: "120363mock2@g.us", groupSubject: "Familie Costa Brava", senderJid: "491709876543@s.whatsapp.net", senderName: "Sam", kind: "audio", text: "Audio wartet auf Transkription", receivedAt: demoTimestamp, hasMedia: true },
 ];
 
+function connectorLabel(snapshot: ConnectorSnapshot | null, t: Translator) {
+  if (!snapshot) return t("connectorNeedsAuth");
+  if (snapshot.status === "ready") return t("connectorConnected");
+  if (snapshot.status === "pairing" || snapshot.status === "reauth_required") return t("connectorNeedsAuth");
+  if (snapshot.status === "error") return t("connectorError");
+  return snapshot.status;
+}
+
+function ConnectorSetup({ locale }: { locale: Locale }) {
+  const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
+  const [whatsapp, setWhatsapp] = useState<ConnectorSnapshot | null>(null);
+  const [telegram, setTelegram] = useState<ConnectorSnapshot | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [telegramQrBusy, setTelegramQrBusy] = useState(false);
+
+  async function refreshStatus() {
+    try {
+      const [waResponse, tgResponse] = await Promise.all([
+        fetch(`${waConnectorBase}/status`),
+        fetch(`${tgConnectorBase}/status`),
+      ]);
+      if (!waResponse.ok || !tgResponse.ok) throw new Error(t("connectorError"));
+      setWhatsapp(await waResponse.json() as ConnectorSnapshot);
+      setTelegram(await tgResponse.json() as ConnectorSnapshot);
+      setSetupError(null);
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : t("connectorError"));
+    }
+  }
+
+  useEffect(() => {
+    void refreshStatus();
+    const timer = window.setInterval(() => void refreshStatus(), 4000);
+    return () => window.clearInterval(timer);
+  }, [locale]);
+
+  async function startTelegramQr() {
+    setTelegramQrBusy(true);
+    try {
+      const response = await fetch(`${tgConnectorBase}/auth/qr`, { method: "POST" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? t("connectorError"));
+      }
+      await refreshStatus();
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : t("connectorError"));
+    } finally { setTelegramQrBusy(false); }
+  }
+
+  return <section className="connectorSetup panel">
+    <div className="panelHead"><div><p className="eyebrow">{t("connectors")}</p><h2>{t("connectorSetup")}</h2><p className="muted">{t("connectorSetupHint")}</p></div><button className="textButton" onClick={() => void refreshStatus()}>{t("refreshStatus")}</button></div>
+    <div className="connectorSetupBody">
+      {setupError && <div className="notice setupNotice">{setupError}</div>}
+      <div className="connectorCards">
+        <article className="connectorCard"><div className="connectorCardHead"><div><p className="eventGroup">{t("whatsappConnector")}</p><strong>{connectorLabel(whatsapp, t)}</strong></div><span className={`connectorDot ${whatsapp?.status === "ready" ? "ready" : ""}`} /></div>{whatsapp?.qr ? <div className="connectorQr"><QRCodeSVG value={whatsapp.qr} size={168} includeMargin level="M" /><p>{t("scanWithWhatsapp")}</p></div> : <p className="connectorHint">{whatsapp?.lastError ?? (whatsapp?.status === "ready" ? t("connectorConnected") : t("waitingForQr"))}</p>}</article>
+        <article className="connectorCard"><div className="connectorCardHead"><div><p className="eventGroup">{t("telegramConnector")}</p><strong>{connectorLabel(telegram, t)}</strong></div><span className={`connectorDot ${telegram?.status === "ready" ? "ready" : ""}`} /></div>{telegram?.qr ? <div className="connectorQr"><QRCodeSVG value={telegram.qr} size={168} includeMargin level="M" /><p>{telegram.qrExpiresAt ? t("qrExpires", { time: new Date(telegram.qrExpiresAt).toLocaleTimeString(localeCodes[locale], { hour: "2-digit", minute: "2-digit" }) }) : t("waitingForQr")}</p></div> : <><p className="connectorHint">{telegram?.lastError ?? (telegram?.mode === "telegram-direct" ? t("directTelegramOnly") : t("directTelegramConfigRequired"))}</p><button className="primaryButton" disabled={telegramQrBusy || !telegram || telegram.mode !== "telegram-direct"} onClick={() => void startTelegramQr()}>{telegramQrBusy ? t("waitingForQr") : t("startTelegramQr")}</button></>}</article>
+      </div>
+    </div>
+  </section>;
+}
+
 function time(value: string, locale: Locale) {
   return new Intl.DateTimeFormat(localeCodes[locale], { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Madrid" }).format(new Date(value));
 }
@@ -45,6 +113,43 @@ function time(value: string, locale: Locale) {
 function kindLabel(kind: string, locale: Locale) {
   const key = kind === "audio" ? "audio" : kind === "image" ? "image" : kind === "location" ? "location" : kind === "video" ? "video" : "text";
   return translate(locale, key);
+}
+
+function resolveMediaUrl(value?: string) {
+  if (!value) return undefined;
+  if (!value.startsWith("/api/")) return value;
+  return `${apiBase.replace(/\/$/, "")}${value}`;
+}
+
+function imageSource(message: Message) {
+  return resolveMediaUrl(message.thumbnailUrl ?? message.mediaUrl ?? message.imageUrl);
+}
+
+function messageGroupSubject(message: Message, t: Translator) {
+  return message.platform === "whatsapp" && message.groupSubject === message.groupId ? t("whatsappGroup") : message.groupSubject;
+}
+
+function DashboardGroupBranch({ node, selectedGroup, onSelect, t, depth = 0 }: { node: GroupHierarchyNode<Group>; selectedGroup: string; onSelect: (groupId: string) => void; t: Translator; depth?: number }) {
+  const selectable = node.group.isSelected;
+  const subject = groupSubjectLabel(node.group, t);
+  return <div className={`dashboardGroupBranch ${depth > 0 ? "nestedGroupBranch" : ""}`}>
+    <button className={`groupRow ${selectedGroup === node.group.id ? "active" : ""} ${depth > 0 ? "topicRow" : ""} ${!selectable ? "groupContext" : ""}`} disabled={!selectable} onClick={() => onSelect(node.group.id)}>
+      <span className={`avatar ${depth === 0 ? "supergroupAvatar" : ""}`}>{subject.slice(0, 1).toUpperCase()}</span>
+      <span><strong>{subject}</strong><small>{node.group.platform === "telegram" ? "Telegram" : "WhatsApp"} · {groupTypeLabel(node.group, t)} · {t("members", { count: node.group.participantCount })}</small></span>
+    </button>
+    {node.children.length > 0 && <div className="groupChildren">{node.children.map((child) => <DashboardGroupBranch key={child.group.id} node={child} selectedGroup={selectedGroup} onSelect={onSelect} t={t} depth={depth + 1} />)}</div>}
+  </div>;
+}
+
+function groupTypeLabel(group: Group, t: Translator) {
+  if (group.chatType === "topic") return t("topic");
+  if (group.chatType === "channel") return t("channel");
+  if (group.chatType === "supergroup") return t("supergroup");
+  return t("group");
+}
+
+function groupSubjectLabel(group: Group, t: Translator) {
+  return group.platform === "whatsapp" && group.subject === group.id ? t("whatsappGroup") : group.subject;
 }
 
 function placeForEvent(event: Event, messages: Message[]) {
@@ -98,7 +203,7 @@ function eventVersions(messages: Message[]) {
       const updatedAt = updateMessage?.receivedAt ?? message.receivedAt;
       const key = eventKey(event, message);
       const signature = eventSignature(event, place);
-      const record = records.get(key) ?? { key, groupSubject: message.groupSubject, versions: [] };
+      const record = records.get(key) ?? { key, groupId: message.groupId, groupSubject: message.groupSubject, groupPlatform: message.platform, versions: [] };
       const existing = record.versions.find((version) => eventSignature(version.event, version.place) === signature);
       if (existing) {
         existing.sourceMessageIds = [...new Set([...existing.sourceMessageIds, ...(event.sourceMessageIds ?? []), message.id])];
@@ -128,7 +233,7 @@ function EventBoard({ events, locale }: { events: EventRecord[]; locale: Locale 
         const current = record.versions.at(-1)!;
         const location = eventLocation(current, t);
         return <article className="eventCard" key={record.key}>
-          <div className="eventCardHead"><div><p className="eventGroup">{record.groupSubject}</p><h3>{eventTitle(current.event)}</h3><p className="eventMeta">{location}{current.event.startsAt ? ` · ${current.event.startsAt}` : ""}</p></div><span className="eventState">{record.versions.length > 1 ? t("updated") : t("new")}</span></div>
+          <div className="eventCardHead"><div><p className="eventGroup">{record.groupPlatform === "whatsapp" && record.groupSubject === record.groupId ? t("whatsappGroup") : record.groupSubject}</p><h3>{eventTitle(current.event)}</h3><p className="eventMeta">{location}{current.event.startsAt ? ` · ${current.event.startsAt}` : ""}</p></div><span className="eventState">{record.versions.length > 1 ? t("updated") : t("new")}</span></div>
           <div className="eventSourceLine">{t("sourceMessages", { count: current.sourceMessageIds.length, date: eventDate(current.updatedAt, locale) })}</div>
           {current.place ? <EventMap latitude={current.place.latitude!} longitude={current.place.longitude!} label={location} mapLabel={t("mapFor", { label: location })} /> : <div className="mapMissing">{t("noCoordinates")}</div>}
           {record.versions.length > 1 && <div className="eventHistory"><div className="eventHistoryHead"><strong>{t("changeHistory")}</strong><span>{t("versions", { count: record.versions.length })}</span></div><ol>{[...record.versions].reverse().map((version, index, newestFirst) => { const chronologicalIndex = record.versions.indexOf(version); return <li key={`${record.key}-${version.updatedAt}-${index}`} className={index === 0 ? "current" : ""}><div className="historyMeta"><time dateTime={version.updatedAt}>{eventDate(version.updatedAt, locale)}</time><strong>{index === 0 ? t("current") : t("version", { number: chronologicalIndex + 1 })}</strong></div>{index < newestFirst.length - 1 && <p className="historyChange">{versionChange(newestFirst[index + 1], version, locale)}</p>}<p>{eventLocation(version, t)}{version.event.startsAt ? ` · ${version.event.startsAt}` : ""}</p>{version.updateMessage?.text && <small>{t("source", { text: version.updateMessage.text })}</small>}</li>; })}</ol></div>}
@@ -162,29 +267,41 @@ export default function Dashboard() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([fetch(`${apiBase}/api/v1/groups`), fetch(`${apiBase}/api/v1/messages?limit=100`)]).then(async ([groupsResponse, messagesResponse]) => {
-      if (!groupsResponse.ok || !messagesResponse.ok) throw new Error("API nicht erreichbar");
-      const nextGroups = await groupsResponse.json() as Group[];
-      const nextMessages = await messagesResponse.json() as Message[];
-      if (active) { setGroups(nextGroups); setMessages(nextMessages); setLive(true); setError(null); }
-    }).catch(() => { if (active) setError(t("demoNotice")); });
-    return () => { active = false; };
-  }, []);
+    async function loadDashboard() {
+      try {
+        const [groupsResponse, messagesResponse] = await Promise.all([fetch(`${apiBase}/api/v1/groups`), fetch(`${apiBase}/api/v1/messages?limit=100&relevant=true`)]);
+        if (!groupsResponse.ok || !messagesResponse.ok) throw new Error("API nicht erreichbar");
+        const nextGroups = await groupsResponse.json() as Group[];
+        const nextMessages = await messagesResponse.json() as Message[];
+        if (active) { setGroups(nextGroups); setMessages(nextMessages); setLive(true); setError(null); }
+      } catch { if (active) setError(t("demoNotice")); }
+    }
+    void loadDashboard();
+    const timer = window.setInterval(() => void loadDashboard(), 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [locale]);
 
   const visibleMessages = useMemo(() => selectedGroup === "all" ? messages : messages.filter((message) => message.groupId === selectedGroup), [messages, selectedGroup]);
   const eventRecords = useMemo(() => eventVersions(visibleMessages), [visibleMessages]);
+  const selectedGroups = useMemo(() => groups.filter((group) => group.isSelected), [groups]);
+  const dashboardGroupIds = useMemo(() => {
+    const byId = new Map(groups.map((group) => [group.id, group]));
+    const visible = new Set(selectedGroups.map((group) => group.id));
+    for (const group of selectedGroups) {
+      let parentId = group.parentGroupId;
+      while (parentId) {
+        visible.add(parentId);
+        parentId = byId.get(parentId)?.parentGroupId;
+      }
+    }
+    return visible;
+  }, [groups, selectedGroups]);
+  const dashboardHierarchy = useMemo(() => buildGroupHierarchy(groups, dashboardGroupIds), [groups, dashboardGroupIds]);
 
   function selectLocale(value: string) {
     if (!isSupportedLocale(value)) return;
     setLocale(value);
     document.cookie = `wagi_locale=${value}; Max-Age=31536000; Path=/; SameSite=Lax`;
-  }
-
-  async function toggleGroup(group: Group) {
-    const selected = !group.isSelected;
-    setGroups((current) => current.map((item) => item.id === group.id ? { ...item, isSelected: selected } : item));
-    try { await fetch(`${apiBase}/api/v1/groups/${encodeURIComponent(group.id)}/select`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ selected }) }); }
-    catch { setError(t("groupSelectionError")); }
   }
 
   const scope = selectedGroup === "all" ? t("allSelectedGroups") : t("selectedGroup");
@@ -193,13 +310,14 @@ export default function Dashboard() {
     <main className="shell">
       <header className="topbar">
         <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("title")}</h1></div>
-        <div className="topbarTools"><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
+        <div className="topbarTools"><nav className="pageNav"><Link href="/" className="pageNavActive">{t("dashboard")}</Link><Link href="/knowledge">{t("knowledge")}</Link><Link href="/groups">{t("manageGroups")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
       </header>
       <section className="hero"><div><p className="eyebrow">{t("signalCheck")}</p><p className="heroNumber">{visibleMessages.filter((item) => item.analysis?.relevant).length || 1}</p><p className="muted">{t("relevantSignals", { scope })}</p></div><div className="heroNote"><span>✦</span><p>{t("heroNote")}</p></div></section>
       {error && <div className="notice">{error}</div>}
+      <ConnectorSetup locale={locale} />
       <div className="grid">
-        <aside className="panel groupsPanel"><div className="panelHead"><h2>{t("groups")}</h2><span className="count">{groups.length}</span></div><button className={`groupRow ${selectedGroup === "all" ? "active" : ""}`} onClick={() => setSelectedGroup("all")}><span className="avatar all">✦</span><span><strong>{t("allSelected")}</strong><small>{t("liveOverview")}</small></span></button>{groups.map((group) => <div className="groupRowWrap" key={group.id}><button className={`groupRow ${selectedGroup === group.id ? "active" : ""}`} onClick={() => setSelectedGroup(group.id)}><span className="avatar">{group.subject.slice(0, 1).toUpperCase()}</span><span><strong>{group.subject}</strong><small>{t("members", { count: group.participantCount })}</small></span></button><button aria-label={t("groupSelection", { group: group.subject })} className={`toggle ${group.isSelected ? "selected" : ""}`} onClick={() => void toggleGroup(group)}>{group.isSelected ? "✓" : "＋"}</button></div>)}</aside>
-        <section className="panel feedPanel"><EventBoard events={eventRecords} locale={locale} /><div className="panelHead"><div><h2>{t("messageStream")}</h2><p className="muted">{t("messageSubtitle")}</p></div><span className="count">{visibleMessages.length}</span></div><div className="feed">{visibleMessages.map((message) => <article className="message" key={message.id}><div className="messageMeta"><span className="avatar small">{(message.senderName ?? "?").slice(0, 1)}</span><span><strong>{message.senderName ?? message.senderJid}</strong><small>{message.platform === "telegram" ? "Telegram" : "WhatsApp"} · {message.groupSubject} · {time(message.receivedAt, locale)}</small></span><span className={`kind ${message.kind}`}>{kindLabel(message.kind, locale)}</span></div>{message.replyToWaMessageId && <p className="replyRef">{t("replyTo", { id: message.replyToWaMessageId })}</p>}<p className="messageText">{message.text ?? t("noText")}</p>{message.kind === "image" && message.imageUrl && <figure className="imagePreview"><img src={message.imageUrl} alt={message.text ?? t("mockImageAlt")} loading="lazy" /><figcaption>{t("mockImageCaption")}</figcaption></figure>}{message.analysis?.summary && <div className="analysis"><span className="signal">● {message.analysis.relevant ? t("relevant") : t("lowRelevance")}</span><span>{message.analysis.summary}</span></div>}</article>)}</div></section>
+        <aside className="panel groupsPanel"><div className="panelHead"><div><h2>{t("selectedGroupsOnly")}</h2><p className="muted groupSelectionHint">{t("groupSelectionHint")}</p></div><span className="count">{selectedGroups.length}</span></div><Link className="manageGroupsLink" href="/groups">{t("manageGroups")}</Link><button className={`groupRow ${selectedGroup === "all" ? "active" : ""}`} onClick={() => setSelectedGroup("all")}><span className="avatar all">✦</span><span><strong>{t("allSelected")}</strong><small>{t("liveOverview")}</small></span></button>{dashboardHierarchy.map((node) => <DashboardGroupBranch key={node.group.id} node={node} selectedGroup={selectedGroup} onSelect={setSelectedGroup} t={t} />)}</aside>
+        <section className="panel feedPanel"><EventBoard events={eventRecords} locale={locale} /><div className="panelHead"><div><h2>{t("relevantMessages")}</h2><p className="muted">{t("relevantMessagesSubtitle")}</p></div><span className="count">{visibleMessages.length}</span></div><div className="feed">{visibleMessages.map((message) => { const source = imageSource(message); const original = resolveMediaUrl(message.mediaUrl) ?? source; return <article className="message" key={message.id}><div className="messageMeta"><span className="avatar small">{(message.senderName ?? "?").slice(0, 1)}</span><span><strong>{message.senderName ?? message.senderJid}</strong><small>{message.platform === "telegram" ? "Telegram" : "WhatsApp"} · {messageGroupSubject(message, t)} · {time(message.receivedAt, locale)}</small></span><span className={`kind ${message.kind}`}>{kindLabel(message.kind, locale)}</span></div>{message.replyToWaMessageId && <p className="replyRef">{t("replyTo", { id: message.replyToWaMessageId })}</p>}<p className="messageText">{message.text ?? t("noText")}</p>{message.kind === "image" && source && <figure className="imagePreview"><a href={original} target="_blank" rel="noreferrer"><img src={source} alt={message.text ?? t("mockImageAlt")} loading="lazy" /></a><figcaption>{t("mockImageCaption")}</figcaption></figure>}{message.analysis?.summary && <div className="analysis"><span className="signal">● {t("relevant")}</span><span>{message.analysis.summary}</span></div>}</article>; })}</div></section>
       </div>
       <footer><span>{t("footer")}</span><span>{t("build")}</span></footer>
     </main>

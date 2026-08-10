@@ -1,0 +1,2 @@
+Extrahiere nicht nur Events aus den Daten / Chats sondern gruppiere und sammle auch Erkentnisse / Daten zu bestimmten Themen die automatisch erkannt und gruppiert werden sollen. Wenn eine Gruppe oder ein Kanal ausgewählt ist, soll diese "knowledge base" einen separaten Menüpunkt haben. Events und "knowledge base" und die relevanten nachrichten sollen separat gehalten und angezeigt werden und nicht vermischt. 
+

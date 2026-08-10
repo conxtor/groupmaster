@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "WAGI message analysis",
   "type": "object",
-  "required": ["messageId", "relevant", "relevanceScore", "summary", "facts", "entities", "events", "places", "model"],
+  "required": ["messageId", "relevant", "relevanceScore", "summary", "facts", "entities", "events", "places", "knowledge", "model"],
   "properties": {
     "messageId": {"type": "string", "format": "uuid"},
     "relevant": {"type": "boolean"},
@@ -12,6 +12,11 @@
     "entities": {"type": "array", "items": {"type": "object"}},
     "events": {"type": "array", "items": {"type": "object", "required": ["title", "confidence"], "properties": {"title": {"type": "string"}, "startsAt": {"type": "string"}, "location": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "sourceMessageIds": {"type": "array", "items": {"type": "string"}}}}},
     "places": {"type": "array", "items": {"type": "object"}},
+    "knowledge": {"type": "array", "items": {"type": "object", "required": ["topicKey", "topicTitle", "itemKey", "itemType", "content", "confidence", "sourceMessageIds"], "properties": {"topicKey": {"type": "string"}, "topicTitle": {"type": "string"}, "itemKey": {"type": "string"}, "itemType": {"type": "string", "enum": ["fact", "insight", "entity"]}, "content": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "sourceMessageIds": {"type": "array", "items": {"type": "string"}}}}},
+    "schemaVersion": {"type": "string"},
+    "promptVersion": {"type": "string"},
+    "provenance": {"type": "array", "items": {"type": "object"}},
+    "conflicts": {"type": "array", "items": {"type": "object"}},
     "model": {"type": "string"}
   }
 }

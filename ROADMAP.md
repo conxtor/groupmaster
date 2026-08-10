@@ -5,7 +5,7 @@
 Der aktuelle Stand ist ein lauffähiger vertikaler MVP für WhatsApp- und Telegram-Gruppen:
 
 - WhatsApp-Connector mit Baileys, QR-/Linked-Device-Skelett und Mock-Daten
-- Telegram-Bot-Connector für Gruppen und Channels mit Long Polling
+- Telegram-Direkt-Connector über MTProto mit QR-Login im Dashboard und optionalem Bot-API-Fallback
 - PostgreSQL mit PostGIS und pgvector, NATS JetStream und MinIO-Grundgerüst
 - Audio-Job-Pipeline mit lokalem whisper.cpp und Medium-Modell
 - Heuristische Analyse für Relevanz, Facts, Entities, Events, Places und Zusammenfassungen
@@ -20,36 +20,36 @@ Ziel: Ein einzelner vertrauenswürdiger Nutzer kann reale Gruppen sicher verbind
 
 ### Konnektoren
 
-- [ ] WhatsApp-Reconnect, Session-Recovery, History-Sync und kontrollierter Backfill
-- [ ] Behandlung von Edits, Löschungen, Duplikaten und Nachrichten-Reihenfolge
-- [ ] Klare Statusanzeige für QR-Pairing, Session, Fehler und erneute Anmeldung
-- [ ] Telegram-Dateien über `getFile` abrufen und in MinIO ablegen
-- [ ] Gemeinsames Connector-SDK mit einheitlichem Lebenszyklus und Fehlervertrag
+- [x] WhatsApp-Reconnect, Session-Recovery, History-Sync und kontrollierter Sieben-Tage-Erst-Backfill
+- [x] Behandlung von Edits, Löschungen, Duplikaten und Nachrichten-Reihenfolge im Connector-Kern
+- [x] Connector-Status für QR-Pairing, Session, Fehler und erneute Anmeldung über die Status-Endpunkte
+- [x] Telegram-Dateien über `getFile` abrufen und an die MinIO-Medienpipeline übergeben
+- [x] Gemeinsamer Connector-SDK-Vertrag mit Lifecycle-Status und Fehlervertrag; produktive Connector-Implementierung wird weiter vereinheitlicht
 
 ### Medien
 
-- [ ] Echte WhatsApp-Medien herunterladen und entschlüsseln
-- [ ] Telegram- und WhatsApp-Medien dauerhaft in MinIO speichern
-- [ ] Bild-Thumbnails, Audio-/Videowiedergabe und sichere Download-URLs
-- [ ] OCR und erste Bildanalyse für Screenshots, Karten und Dokumente
-- [ ] Audio-Worker so verdrahten, dass reale Quelldateien an whisper.cpp übergeben werden
+- [x] Echte WhatsApp-Medien herunterladen und entschlüsseln
+- [x] Telegram- und WhatsApp-Medien dauerhaft in MinIO speichern
+- [x] Bild-Thumbnails und sichere Download-Pfade; Audio-/Videowiedergabe in der UI bleibt offen
+- [x] OCR und erste Bildanalyse für Bilder, Screenshots und Karten; Dokumentanalyse bleibt offen
+- [x] Audio-Worker so verdrahten, dass reale Quelldateien an whisper.cpp übergeben werden
 - [ ] Status, Retry und Fehleranzeige für Audiojobs
 
 ### KI und Datenqualität
 
-- [ ] Heuristik durch einen austauschbaren LLM-/AI-Adapter ergänzen
-- [ ] JSON-Schema-Validierung, Prompt-Versionierung und Modellkonfiguration
+- [x] Lokalen, austauschbaren AI-Adaptervertrag mit Heuristik-Fallback ergänzen; externe LLM-Übertragung bleibt aus Datenschutzgründen offen
+- [x] Strukturierte JSON-/Pydantic-Schema-Verträge, Prompt-Versionierung und Modellkonfiguration
 - [ ] Evaluationsdatensatz für Deutsch, Spanisch, Katalanisch, Englisch und Französisch
-- [ ] Konfidenzen, Quellenbelege und nachvollziehbare Herleitung je Ergebnis
-- [ ] Zusammenführung von Events aus mehreren Nachrichten ohne Duplikate
-- [ ] Behandlung widersprüchlicher Zeit-, Orts- und Terminangaben
+- [x] Konfidenzen, Quellenbelege und nachvollziehbare Herleitung je Ergebnis
+- [x] Zusammenführung von Events aus mehreren Nachrichten ohne Duplikate
+- [x] Widersprüchliche Zeitangaben erkennen und als Konflikt markieren; Orts-/Termin-Konflikte bleiben offen
 
 ### Nutzeroberfläche
 
 - [ ] Event-Detailansicht mit allen Quellnachrichten
 - [ ] Suche und Filter nach Gruppe, Zeitraum, Relevanz, Ort, Event und Medientyp
 - [ ] Transkript prüfen und korrigieren
-- [ ] Gruppen- und Connector-Setup als verständlicher Onboarding-Prozess
+- [x] Gruppen- und Connector-Setup als verständlicher lokaler QR-Onboarding-Prozess im Dashboard; Telegram-2FA bleibt als lokaler Terminal-Fallback
 - [ ] Fehler-, Job- und Verbindungsstatus sichtbar machen
 
 ## Phase 2 – Produktionsreife

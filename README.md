@@ -6,7 +6,7 @@ Die priorisierte Produktplanung mit Beta-Ziel, Produktionsreife, Risiken und Def
 
 ## Schnellstart
 
-Voraussetzungen: Docker Desktop mit Compose sowie Node.js 20 und npm für lokale Frontend-/Connector-Entwicklung.
+Voraussetzungen: Docker oder Colima mit `docker-compose` sowie Node.js 20 und npm für lokale Frontend-/Connector-Entwicklung.
 
 ```bash
 cp .env.example .env
@@ -16,9 +16,11 @@ docker-compose -f infra/docker/docker-compose.yml up --build
 Danach:
 
 - Dashboard: http://localhost:3000
+- Gruppenauswahl: http://localhost:3000/groups
+- Knowledge Base: http://localhost:3000/knowledge
 - Go API: http://localhost:8080/readyz
-- Connector-Pairing: http://localhost:3001/pairing
-- Telegram-Bot-Status und Einrichtung: http://localhost:3002/bot
+- Connector-Einrichtung: http://localhost:3000 (QR-Setup im Dashboard)
+- Connector-Status: http://localhost:3001/healthz und http://localhost:3002/readyz
 - NATS Monitoring: http://localhost:8222
 - MinIO Console: http://localhost:9001
 
@@ -36,6 +38,62 @@ docker-compose -f infra/docker/docker-compose.yml up -d --build wa-connector tg-
 Compose-Container werden Datenbank, NATS und MinIO über die internen
 Servicenamen erreicht; die Werte in `.env.example` sind für lokale Prozesse
 außerhalb von Compose gedacht.
+
+Für die interne Bereinigung verlassener Gruppen wird ein gemeinsames, zufällig
+gewähltes Secret benötigt. In einer neuen lokalen Umgebung `MEDIA_CLEANUP_TOKEN`
+in `.env` durch einen eigenen Wert ersetzen, zum Beispiel mit
+`openssl rand -hex 32`. Der Token wird nur zwischen den Konnektoren und dem
+Media-Worker verwendet und nicht im Dashboard angezeigt.
+
+Für das verwendete Supabase-Postgres-Image muss `POSTGRES_USER` auf
+`supabase_admin` stehen. Dieser Wert ist im `.env.example` und in Compose der
+Standard; ein vorhandener `.env`-Eintrag mit `POSTGRES_USER=postgres` sollte
+entsprechend angepasst werden.
+
+### Connector-Setup im Dashboard
+
+Die erstmalige Einrichtung von WhatsApp und Telegram erfolgt im Dashboard über
+QR-Codes. Ein Setup-Token ist dafür nicht erforderlich. Der WhatsApp-Connector
+bleibt lokal gebunden; der Telegram-Connector ist für die lokale Testumgebung
+an allen Interfaces verfügbar.
+
+Der Telegram-Status ist unter `http://<host>:3002/status` erreichbar; der
+tokenfreie QR-Start erfolgt per `POST http://<host>:3002/auth/qr`. Beide
+Endpunkte sind bewusst ohne Token und ohne Origin-Einschränkung freigegeben,
+damit ein Dashboard über ein beliebiges Interface den Connector konfigurieren
+kann.
+
+Die Auswahl der zu verarbeitenden Quellen erfolgt separat unter
+`http://localhost:3000/groups`. Das Haupt-Dashboard zeigt ausschließlich
+ausgewählte Gruppen. Telegram-Topics aus Foren-Supergroups werden dort als
+Untergruppen unter ihrer jeweiligen Supergroup angezeigt und können unabhängig
+ausgewählt oder entfernt werden. Nachrichten werden ebenfalls unter der
+ausgewählten Untergruppe gespeichert.
+
+Anschließend die Konnektoren und das Web-Dashboard neu erstellen:
+
+```bash
+docker-compose -f infra/docker/docker-compose.yml up -d --build wa-connector tg-connector web
+```
+
+Das Dashboard ruft die lokalen Connectoren automatisch ab. Danach gilt:
+
+1. WhatsApp zeigt den aktuellen Linked-Device-QR-Code an. In der WhatsApp-App
+   unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen.
+2. Telegram zeigt im Direktmodus nach **Telegram-QR starten** einen QR-Code
+   an. Diesen in der Telegram-App unter **Einstellungen** → **Geräte** →
+   **Desktop-Gerät verknüpfen** scannen.
+3. Status, Ablaufzeit des QR-Codes und erneute Anmeldung werden im Dashboard
+   angezeigt.
+
+Für Telegram müssen zusätzlich `TG_API_ID` und `TG_API_HASH` gesetzt sein.
+Wenn Telegram eine Zwei-Faktor-Anmeldung verlangt, wird das Passwort nicht
+über das Web-UI übertragen; die einmalige Anmeldung erfolgt sicher im lokalen
+Terminal über `npm run auth --workspace=@wagi/tg-connector`. Danach kann die
+gespeicherte Session vom Connector weiterverwendet werden.
+
+Ein QR-Code kann ein Konto autorisieren und darf deshalb nicht geteilt oder in
+Logs veröffentlicht werden.
 
 ### Dashboard-Sprache
 
@@ -57,25 +115,47 @@ Baileys. Für die Demo ist er zunächst im Mock-Modus aktiv:
 WA_MOCK_MODE=true
 WA_GROUP_ALLOWLIST=
 WA_AUTH_DIR=./data/wa-auth
+WA_SYNC_HISTORY=false
+WA_BACKFILL_DAYS=3
 ```
 
 Für ein echtes Konto:
 
 1. `WA_MOCK_MODE=false` in `.env` setzen.
 2. Den Konnektor starten: `docker-compose -f infra/docker/docker-compose.yml up -d --build wa-connector`.
-3. Den QR-Code mit `docker-compose -f infra/docker/docker-compose.yml logs -f wa-connector` anzeigen und in WhatsApp unter **Verknüpfte Geräte** scannen.
+3. Das Dashboard öffnen und den angezeigten QR-Code in WhatsApp unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen. Alternativ kann der QR-Code weiterhin mit `docker-compose -f infra/docker/docker-compose.yml logs -f wa-connector` betrachtet werden.
 4. Den persistenten Compose-Speicher `wa_auth` beibehalten. Dadurch muss das Gerät nach Neustarts nicht erneut gekoppelt werden.
 5. Gruppen im Dashboard auswählen oder bereits beim Einlesen mit `WA_GROUP_ALLOWLIST` begrenzen.
 
 `WA_GROUP_ALLOWLIST` ist eine kommagetrennte Liste exakter WhatsApp-Gruppen-
-JIDs, zum Beispiel `120363123456789@g.us`. Eine leere Liste lässt alle
-entdeckten Gruppen zu; die eigentliche Verarbeitung eingehender Nachrichten
-erfolgt nur für Gruppen, die in der Datenbank als ausgewählt markiert sind.
+JIDs, zum Beispiel `120363123456789@g.us`. Eine leere Liste entdeckt Gruppen
+für die Auswahl im Dashboard, aktiviert aber keine Gruppe automatisch. Die
+eigentliche Verarbeitung eingehender Nachrichten erfolgt nur für Gruppen, die
+in der Datenbank als ausgewählt markiert sind. Die Auswahl kann jederzeit im
+Dashboard geändert werden.
 
-Status und Pairing-Informationen sind unter
+Bei der ersten Aktivierung eines WhatsApp-Konnektors wird automatisch ein
+History-Sync gestartet. Es werden nur Nachrichten innerhalb des Zeitfensters
+`WA_BACKFILL_DAYS` (Standard: drei Tage) persistiert und an die Medien-/KI-
+Pipeline weitergegeben. Der Backfill wird in `connector_states` als erledigt
+gespeichert und bei späteren Reconnects nicht erneut ausgeführt. Ein erneuter
+Backfill kann über den Status der Connector-Session nachvollzogen werden.
+
+Die WhatsApp-Gruppenliste wird nach jeder erfolgreichen Verbindung und danach
+regelmäßig aktualisiert. Das Intervall wird über
+`GROUP_REFRESH_INTERVAL_MS` gesteuert und beträgt standardmäßig 60 Sekunden
+(mindestens 30 Sekunden). Gruppen, die in einem erfolgreichen Snapshot nicht
+mehr vorhanden sind, werden aus der Auswahl und dem Dashboard entfernt. Die
+zugehörigen Nachrichten, Analysen, Events, Knowledge-Base-Daten, Audiojobs und
+Medienreferenzen werden per Datenbank-Cascade gelöscht; die referenzierten
+Objekte in MinIO und lokale Mediendateien werden vorher ebenfalls entfernt.
+Bei einem fehlgeschlagenen Snapshot findet keine automatische Löschung statt.
+
+Status und Pairing-Informationen sind im Dashboard sowie unter
 `http://localhost:3001/healthz`, `http://localhost:3001/readyz` und
-`http://localhost:3001/pairing` verfügbar. Der QR-Code wird zusätzlich in den
-Connector-Logs ausgegeben.
+`http://localhost:3001/status` sowie `http://localhost:3001/pairing` verfügbar.
+Die Endpunkte sind für den lokalen Dashboard-Zugriff ohne Setup-Token verfügbar.
+Der QR-Code wird zusätzlich in den Connector-Logs ausgegeben.
 
 Wichtig: Baileys ist keine offizielle WhatsApp-Business-API. Der Abschnitt
 setzt daher ein privates Testkonto, die Zustimmung der Gruppenmitglieder und
@@ -84,24 +164,90 @@ auch [Bekannte Risiken und Sicherheitsgrenzen](#bekannte-risiken-und-sicherheits
 
 ### Telegram-Konnektor
 
-Der Telegram-Konnektor nutzt die offizielle Telegram Bot API per Long Polling.
-Er benötigt keinen Benutzer-Login, sondern einen Bot-Token:
+Der Telegram-Konnektor verwendet bevorzugt eine direkte persönliche Telegram-
+Verbindung über MTProto. Dadurch kann der verbundene Nutzer seine eigenen
+Gruppen und Channels lesen und die Historie der letzten drei Tage zum ersten
+Aktivierungszeitpunkt nachladen. Die direkte Verbindung wird aktiviert, sobald
+`TG_API_ID` und `TG_API_HASH` gesetzt sind:
+
+```dotenv
+TG_API_ID=123456
+TG_API_HASH=replace-with-api-hash
+TG_PHONE=+491701234567
+TG_SESSION=
+TG_GROUP_ALLOWLIST=
+TG_STATE_DIR=./data/tg-state
+TG_BACKFILL_DAYS=3
+TG_CONNECTION_RETRIES=12
+TG_REQUEST_RETRIES=8
+TG_DOWNLOAD_RETRIES=8
+TG_RETRY_DELAY_MS=2000
+TG_MEDIA_RETRY_ATTEMPTS=4
+```
+
+API-ID und API-Hash werden unter [my.telegram.org/apps](https://my.telegram.org/apps)
+erstellt. Die persönliche Session wird einmalig interaktiv erzeugt:
+
+```bash
+npm run auth --workspace=@wagi/tg-connector
+```
+
+Der Befehl fragt den Telegram-Bestätigungscode und bei aktivierter 2FA das
+Passwort ausschließlich im lokalen Terminal ab. Die Session wird als
+`direct-session.txt` im persistenten `TG_STATE_DIR` gespeichert und danach vom
+Docker-Konnektor automatisch wiederverwendet. Nach der Verbindung werden alle
+erreichbaren Telegram-Gruppen, Supergroups und Channels als auswählbare Liste
+entdeckt; keine Gruppe wird automatisch aktiviert. Die Liste wird nach dem
+Verbindungsaufbau und anschließend regelmäßig mit
+`GROUP_REFRESH_INTERVAL_MS` (Standard: 60 Sekunden, mindestens 30 Sekunden)
+aktualisiert. Supergroup-Topics werden bei der Synchronisierung als
+Untergruppen geführt. Beim Aktivieren eines
+Eintrags lädt der Connector höchstens die letzten `TG_BACKFILL_DAYS` (Standard:
+drei) Tage nach und empfängt anschließend neue Nachrichten über MTProto-
+Events. Das gilt auch für später neu entdeckte Gruppen und Channels.
+
+Wenn ein Nutzer eine Gruppe, einen Channel oder ein Topic verlässt, wird der
+Eintrag nach einem erfolgreichen Telegram-Snapshot aus der Auswahl und dem
+Dashboard entfernt. Die Löschkette entfernt die gruppenbezogenen Daten aus
+PostgreSQL und löscht die dazugehörigen Medienobjekte in MinIO. Ein nicht
+vollständig gelungener Snapshot löst aus Sicherheitsgründen keine Bereinigung
+aus. Im optionalen Bot-Modus wird die Entfernung über Telegrams
+`my_chat_member`-Ereignis erkannt; die Bot API kann keine vollständige Liste
+aller Dialoge des Bots liefern.
+
+Im Direktmodus kann die Anmeldung bevorzugt direkt im Dashboard erfolgen: Im
+Telegram-Connector-Panel **Telegram-QR starten** auswählen und den QR-Code in
+der Telegram-App unter **Einstellungen** → **Geräte** scannen. Der QR-Login ist
+für die normale Anmeldung ohne zusätzliches Passwort gedacht. Bei aktivierter
+Telegram-2FA ist der lokale `npm run auth --workspace=@wagi/tg-connector`-Weg
+erforderlich; ein 2FA-Passwort wird aus Sicherheitsgründen nicht über das Web-
+UI angenommen.
+
+Wenn keine direkten Zugangsdaten gesetzt sind, bleibt die bisherige Bot-API-
+Integration als optionaler Fallback verfügbar. Dafür wird ein Bot-Token
+benötigt:
 
 ```dotenv
 TG_BOT_TOKEN=123456789:replace-with-token-from-botfather
 TG_GROUP_ALLOWLIST=
 TG_STATE_DIR=./data/tg-state
 TG_POLL_TIMEOUT=25
+TG_BACKFILL_DAYS=3
+TG_CONNECTION_RETRIES=12
+TG_REQUEST_RETRIES=8
+TG_DOWNLOAD_RETRIES=8
+TG_RETRY_DELAY_MS=2000
+TG_MEDIA_RETRY_ATTEMPTS=4
 ```
 
-Einrichtung:
+Einrichtung des optionalen Bot-Fallbacks:
 
 1. Mit [@BotFather](https://core.telegram.org/bots#how-do-i-create-a-bot) einen Bot anlegen und den Token in `TG_BOT_TOKEN` eintragen.
 2. Den Bot zu den gewünschten Gruppen, Supergroups oder Channels hinzufügen.
 3. In Gruppen den Bot als Administrator setzen oder beim BotFather mit `/setprivacy` den Privacy Mode deaktivieren, damit normale Gruppennachrichten zugestellt werden.
 4. In Channels den Bot als Mitglied hinzufügen; für administrative Bot-Aktionen sind passende Rechte erforderlich.
 5. Den Konnektor starten: `docker-compose -f infra/docker/docker-compose.yml up -d --build tg-connector`.
-6. Unter `http://localhost:3002/bot` den Bot-Status prüfen; `http://localhost:3002/readyz` zeigt bei fehlendem Token `waiting-for-bot-token`.
+6. Unter `http://localhost:3000` den Telegram-Status prüfen; `http://localhost:3002/bot` und `http://localhost:3002/readyz` bleiben als technische Status-Endpunkte verfügbar.
 
 Mit `TG_GROUP_ALLOWLIST` kann die Verarbeitung begrenzt werden. Unterstützt
 werden die numerische Chat-ID, die Form `tg:<chat-id>` oder ein öffentlicher
@@ -111,13 +257,12 @@ Username:
 TG_GROUP_ALLOWLIST=-1001234567890,tg:-1009876543210,@meine_gruppe
 ```
 
-Eine leere Allowlist verarbeitet alle Gruppen, Supergroups und Channels, die
-der Bot entdeckt. Private Chats werden nicht importiert. Der Offset wird in
-`TG_STATE_DIR` gespeichert; der Compose-Speicher `tg_state` sollte für stabile
-Fortsetzung nach Neustarts erhalten bleiben. Der Bot erhält grundsätzlich nur
-Updates, die Telegram während seiner Mitgliedschaft und gemäß seinen
-Berechtigungen liefert; eine rückwirkende Vollsynchronisierung der alten
-Gruppenhistorie ist im MVP nicht enthalten.
+Eine leere Allowlist aktiviert keine Gruppe automatisch; sie dient nur dazu,
+Einträge per Konfiguration vorzuselektieren. Private Chats werden nicht
+importiert. Der Offset des Bot-Fallbacks wird in `TG_STATE_DIR` gespeichert; der
+Compose-Speicher `tg_state` sollte für stabile Fortsetzung nach Neustarts
+erhalten bleiben. Die Bot API stellt keine rückwirkende Gruppenhistorie bereit
+und ist deshalb für den Drei-Tage-Backfill nur eingeschränkt geeignet.
 
 ### KI- und Audio-Konnektoren
 
@@ -134,6 +279,14 @@ AI_MODEL=heuristic-mvp
 externer LLM-Provider ist noch nicht angeschlossen; Provider, API-Key,
 Prompt-Versionen und Modellwahl werden später hinter einem AI-Adapter ergänzt.
 Der Worker verbindet sich in Compose automatisch mit PostgreSQL und NATS.
+
+Die Knowledge-Base verwendet im MVP die präzisere Heuristik `precision-v2`.
+Ein einzelnes kurzes Posting, eine reine Terminzeile, ein einzelner Karten-Pin
+oder ein zufällig großgeschriebenes Wort erzeugt keinen Knowledge-Base-Eintrag.
+Ein Thema benötigt konkrete Detailbegriffe, technische/inhaltliche Evidenz oder
+wiederholte Ortsinformationen. Beim ersten Start dieser Heuristik wird die
+bisherige Knowledge-Base einmalig aus den ausgewählten Nachrichten neu erzeugt;
+die Version wird über `AI_KNOWLEDGE_VERSION` markiert.
 
 Audiotranskriptionen laufen lokal mit `whisper.cpp` und dem multilingualen
 `medium`-Modell. Die relevanten Einstellungen sind:
@@ -166,9 +319,9 @@ Die Compose-Umgebung startet standardmäßig im `WA_MOCK_MODE=true`, damit die v
 | Bereich | MVP-Implementierung |
 | --- | --- |
 | WhatsApp | Node.js/TypeScript, Baileys, persistenter Multi-File-Auth-State |
-| Telegram | Node.js/TypeScript, offizieller Bot API Connector, Long Polling, Offset-State |
+| Telegram | Node.js/TypeScript, direkte MTProto-Session mit historischem Backfill; optionaler Bot-API-Fallback |
 | Eventing | NATS mit JetStream-fähigem Server, Subjects `wa.*`, `media.*`, `ai.*` |
-| Persistenz | PostgreSQL mit PostGIS und pgvector, Migration `infra/migrations/001_init.sql` |
+| Persistenz | PostgreSQL mit PostGIS und pgvector, vollständige Initialmigration `infra/migrations/001_init.sql` |
 | Medien | MinIO/S3-Konvention, Audio-Job-Pipeline |
 | STT | lokales `whisper.cpp`, Modell `medium`, ffmpeg-Normalisierung, JSON-Ergebnis |
 | Karten | Leaflet mit OpenStreetMap-Tiles und sichtbarer OSM-Attribution |
@@ -198,8 +351,14 @@ Die API und Worker werden primär über Compose gestartet. Die Datenbankmigratio
 - `GET /api/v1/groups`
 - `PUT /api/v1/groups/{groupId}/select` mit `{ "selected": true|false }`
 - `GET /api/v1/messages?limit=100`
+- `GET /api/v1/knowledge` oder `GET /api/v1/knowledge?groupId=<selected-group>`
 - `POST /api/v1/audio/jobs` mit `messageId`, `mediaKey`, optional `mediaMime`
 - `GET /metrics`
+
+Events werden weiterhin aus `message_analyses.events` im Dashboard separat
+dargestellt. Thematische Fakten und Erkenntnisse werden zusätzlich durch den
+AI-Worker erkannt, in `knowledge_topics`/`knowledge_items` gruppiert und unter
+`/knowledge` getrennt von Events und relevanten Nachrichten angezeigt.
 
 ## Bekannte Risiken und Sicherheitsgrenzen
 

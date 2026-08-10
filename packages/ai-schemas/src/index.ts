@@ -12,6 +12,10 @@ export const analysisSchema = {
     entities: { type: "array" },
     events: { type: "array" },
     places: { type: "array" },
+    schemaVersion: { type: "string" },
+    promptVersion: { type: "string" },
+    provenance: { type: "array" },
+    conflicts: { type: "array" },
     model: { type: "string" },
   },
 } as const;

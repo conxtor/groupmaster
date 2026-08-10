@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -8,7 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import asyncpg
+import boto3
 import nats
+from botocore.client import Config
+from PIL import Image
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("wagi-media-worker")
@@ -23,6 +27,14 @@ WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "auto").lower()
 WHISPER_LANGUAGES = {item.strip().lower() for item in os.getenv("WHISPER_LANGUAGES", "es,ca,de,en,fr").split(",") if item.strip()}
 WHISPER_THREADS = max(1, int(os.getenv("WHISPER_THREADS", "4")))
 AUDIO_WORK_DIR = Path(os.getenv("AUDIO_WORK_DIR", "/tmp/wagi-audio"))
+MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "/data/media"))
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "miniosecret")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "wa-media")
+MEDIA_MAX_RETRIES = max(1, int(os.getenv("MEDIA_MAX_RETRIES", "3")))
+MEDIA_CLEANUP_TOKEN = os.getenv("MEDIA_CLEANUP_TOKEN", "").strip()
+_s3 = None
 
 
 def configured_language() -> str:
@@ -89,8 +101,154 @@ def transcribe_with_whisper_cpp(source_path: str) -> tuple[str, str, float]:
 
 
 async def publish(js, data: dict):
-    event = {"id": os.urandom(16).hex(), "type": "media.audio.transcribed", "occurredAt": datetime.now(timezone.utc).isoformat(), "source": "media-worker", "data": data}
-    await js.publish("media.audio.transcribed", json.dumps(event).encode())
+    subject = data.pop("_subject", "media.audio.transcribed")
+    event_type = data.pop("_type", subject)
+    event = {"id": os.urandom(16).hex(), "type": event_type, "occurredAt": datetime.now(timezone.utc).isoformat(), "source": "media-worker", "data": data}
+    await js.publish(subject, json.dumps(event).encode())
+
+
+def s3_client():
+    global _s3
+    if _s3 is None:
+        _s3 = boto3.client("s3", endpoint_url=MINIO_ENDPOINT, aws_access_key_id=MINIO_ACCESS_KEY, aws_secret_access_key=MINIO_SECRET_KEY, config=Config(signature_version="s3v4"), region_name="us-east-1")
+    return _s3
+
+
+def cleanup_group_media(object_keys: set[str], local_paths: set[str]) -> tuple[int, int]:
+    deleted_objects = 0
+    if object_keys:
+        client = s3_client()
+        ensure_bucket()
+        for start in range(0, len(object_keys), 1000):
+            batch = sorted(object_keys)[start:start + 1000]
+            client.delete_objects(Bucket=MINIO_BUCKET, Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True})
+            deleted_objects += len(batch)
+
+    media_root = MEDIA_DIR.resolve()
+    deleted_files = 0
+    for raw_path in local_paths:
+        path = Path(raw_path)
+        try:
+            resolved = path.resolve()
+            if resolved == media_root or not resolved.is_relative_to(media_root):
+                log.warning("refusing to delete media path outside MEDIA_DIR: %s", raw_path)
+                continue
+            if resolved.is_file():
+                resolved.unlink()
+                deleted_files += 1
+        except OSError as error:
+            raise RuntimeError(f"could not remove local media file {raw_path}: {error}") from error
+    return deleted_objects, deleted_files
+
+
+async def on_group_cleanup(db, message):
+    try:
+        payload = json.loads(message.data)
+        token = str(payload.get("token") or "")
+        platform = str(payload.get("platform") or "")
+        group_ids = [str(value) for value in payload.get("groupIds", []) if value]
+        if not MEDIA_CLEANUP_TOKEN or not hmac.compare_digest(token, MEDIA_CLEANUP_TOKEN):
+            await message.respond(json.dumps({"ok": False, "error": "cleanup not authorized"}).encode())
+            return
+        if platform not in {"whatsapp", "telegram"} or not group_ids or len(group_ids) > 5000:
+            await message.respond(json.dumps({"ok": False, "error": "invalid cleanup scope"}).encode())
+            return
+        rows = await db.fetch(
+            """SELECT mo.object_key, mo.thumbnail_key, mo.object_path, mo.thumbnail_path, aj.object_path AS audio_object_path
+               FROM wa_groups g
+               LEFT JOIN messages m ON m.group_id = g.id
+               LEFT JOIN media_objects mo ON mo.message_id = m.id
+               LEFT JOIN audio_jobs aj ON aj.message_id = m.id
+               WHERE g.platform=$1 AND g.id=ANY($2::text[])""",
+            platform, group_ids,
+        )
+        object_keys = {str(value) for row in rows for value in (row["object_key"], row["thumbnail_key"]) if value}
+        local_paths = {str(value) for row in rows for value in (row["object_path"], row["thumbnail_path"], row["audio_object_path"]) if value}
+        deleted_objects, deleted_files = await asyncio.to_thread(cleanup_group_media, object_keys, local_paths)
+        await message.respond(json.dumps({"ok": True, "deletedObjects": deleted_objects, "deletedFiles": deleted_files}).encode())
+    except Exception as error:
+        log.exception("group media cleanup failed")
+        await message.respond(json.dumps({"ok": False, "error": str(error)}).encode())
+
+
+def ensure_bucket():
+    client = s3_client()
+    try:
+        client.head_bucket(Bucket=MINIO_BUCKET)
+    except Exception:
+        try:
+            client.create_bucket(Bucket=MINIO_BUCKET)
+        except Exception as error:
+            log.warning("MinIO bucket could not be created: %s", error)
+
+
+def extract_ocr(source: Path) -> str:
+    try:
+        run = subprocess.run(["tesseract", str(source), "stdout", "-l", "eng+deu+spa+fra"], capture_output=True, text=True, check=False, timeout=90)
+        return run.stdout.strip() if run.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+
+def stage_media(data: dict) -> tuple[str, str | None, str, int, str]:
+    source = Path(str(data["objectPath"]))
+    if not source.is_file():
+        raise FileNotFoundError(f"Medienquelle nicht gefunden: {source}")
+    message_id = str(data["messageId"])
+    media_key = str(data["mediaKey"])
+    mime = str(data.get("mediaMime") or "application/octet-stream")
+    suffix = source.suffix.lower() or ".bin"
+    object_key = f"messages/{message_id}/original{suffix}"
+    thumbnail_key = None
+    thumbnail_path = None
+    ocr_text = ""
+    ensure_bucket()
+    client = s3_client()
+    client.upload_file(str(source), MINIO_BUCKET, object_key, ExtraArgs={"ContentType": mime})
+    if mime.startswith("image/"):
+        try:
+            thumb_dir = MEDIA_DIR / "thumbs"
+            thumb_dir.mkdir(parents=True, exist_ok=True)
+            thumb = thumb_dir / f"{message_id}.jpg"
+            with Image.open(source) as image:
+                image.thumbnail((640, 640))
+                image.convert("RGB").save(thumb, format="JPEG", quality=82)
+            thumbnail_key = f"messages/{message_id}/thumbnail.jpg"
+            client.upload_file(str(thumb), MINIO_BUCKET, thumbnail_key, ExtraArgs={"ContentType": "image/jpeg"})
+            thumbnail_path = str(thumb)
+            ocr_text = extract_ocr(source)
+        except Exception as error:
+            log.warning("image processing failed for %s: %s", message_id, error)
+    return object_key, thumbnail_key, thumbnail_path or "", source.stat().st_size, ocr_text
+
+
+async def on_media(db, js, message):
+    data = json.loads(message.data).get("data", json.loads(message.data))
+    message_id = data["messageId"]
+    media_key = data["mediaKey"]
+    try:
+        await db.execute("UPDATE messages SET media_status='processing' WHERE id=$1", message_id)
+        object_key, thumbnail_key, thumbnail_path, size, ocr_text = await asyncio.to_thread(stage_media, data)
+        await db.execute(
+            """INSERT INTO media_objects (message_id, media_key, object_key, thumbnail_key, object_path, thumbnail_path, mime, bytes, status, ocr_text, updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'completed',$9,NOW())
+               ON CONFLICT (message_id, media_key) DO UPDATE SET object_key=EXCLUDED.object_key, thumbnail_key=EXCLUDED.thumbnail_key,
+                 object_path=EXCLUDED.object_path, thumbnail_path=EXCLUDED.thumbnail_path, mime=EXCLUDED.mime, bytes=EXCLUDED.bytes,
+                 status='completed', error=NULL, ocr_text=EXCLUDED.ocr_text, updated_at=NOW()""",
+            message_id, media_key, object_key, thumbnail_key, data.get("objectPath"), thumbnail_path or None, data.get("mediaMime"), size, ocr_text or None,
+        )
+        await db.execute("UPDATE messages SET media_status='completed' WHERE id=$1", message_id)
+        if ocr_text:
+            await publish(js, {"_subject": "media.image.analyzed", "_type": "media.image.analyzed", "messageId": message_id, "ocrText": ocr_text, "provider": "tesseract"})
+        if str(data.get("mediaMime", "")).startswith("audio/"):
+            await db.execute("UPDATE audio_jobs SET object_path=$1 WHERE message_id=$2 AND media_key=$3", data.get("objectPath"), message_id, media_key)
+            await publish(js, {"_subject": "media.audio.requested", "_type": "media.audio.requested", "jobId": (await db.fetchval("SELECT id FROM audio_jobs WHERE message_id=$1 AND media_key=$2 ORDER BY created_at DESC LIMIT 1", message_id, media_key)), "messageId": message_id, "mediaKey": media_key, "mediaMime": data.get("mediaMime"), "objectPath": data.get("objectPath")})
+        await message.ack()
+    except Exception as error:
+        await db.execute("UPDATE messages SET media_status='failed' WHERE id=$1", message_id)
+        await db.execute("INSERT INTO media_objects (message_id, media_key, status, error, updated_at) VALUES ($1,$2,'failed',$3,NOW()) ON CONFLICT (message_id, media_key) DO UPDATE SET status='failed', error=$3, updated_at=NOW()", message_id, media_key, str(error))
+        log.exception("media job failed")
+        await message.ack()
 
 
 async def main():
@@ -110,8 +268,8 @@ async def main():
             payload = json.loads(message.data)
             data = payload.get("data", payload)
             job_id = data["jobId"]
-            await db.execute("UPDATE audio_jobs SET status='processing', updated_at=NOW() WHERE id=$1", job_id)
-            source = data.get("objectPath") or data.get("mediaKey", "unknown")
+            await db.execute("UPDATE audio_jobs SET status='processing', attempts=attempts+1, updated_at=NOW() WHERE id=$1", job_id)
+            source = data.get("objectPath") or (await db.fetchval("SELECT object_path FROM audio_jobs WHERE id=$1", job_id)) or data.get("mediaKey", "unknown")
             if WHISPER_ENABLED and os.path.exists(source):
                 transcript, language, confidence = transcribe_with_whisper_cpp(source)
                 provider = "whisper.cpp"
@@ -119,13 +277,22 @@ async def main():
                 transcript, language, confidence = transcribe_placeholder(source)
                 provider = "placeholder-mvp"
             await publish(js, {"jobId": job_id, "messageId": data["messageId"], "transcript": transcript, "language": language, "confidence": confidence, "provider": provider})
+            await db.execute("UPDATE audio_jobs SET status='completed', transcript=$1, language=$2, confidence=$3, error=NULL, updated_at=NOW() WHERE id=$4", transcript, language, confidence, job_id)
             await message.ack()
         except Exception as exc:
             log.exception("audio job failed")
             if "job_id" in locals():
-                await db.execute("UPDATE audio_jobs SET status='failed', error=$1, updated_at=NOW() WHERE id=$2", str(exc), job_id)
+                attempts = await db.fetchval("SELECT attempts FROM audio_jobs WHERE id=$1", job_id) or MEDIA_MAX_RETRIES
+                next_status = "queued" if attempts < MEDIA_MAX_RETRIES else "failed"
+                await db.execute("UPDATE audio_jobs SET status=$1, error=$2, next_attempt_at=CASE WHEN $1='queued' THEN NOW()+INTERVAL '30 seconds' ELSE NULL END, updated_at=NOW() WHERE id=$3", next_status, str(exc), job_id)
+            await message.ack()
 
+    await js.subscribe("media.objects.requested", durable="WAGI_MEDIA_OBJECTS", stream="WAGI_EVENTS", cb=lambda message: on_media(db, js, message))
     await js.subscribe("media.audio.requested", durable="WAGI_MEDIA_AUDIO", stream="WAGI_EVENTS", cb=on_audio)
+    async def on_cleanup_request(message):
+        await on_group_cleanup(db, message)
+
+    await nc.subscribe("internal.groups.cleanup.requested", cb=on_cleanup_request)
     log.info(
         "media worker listening on media.audio.requested (whisper.cpp=%s, model=%s, language=%s, enabled_languages=%s)",
         WHISPER_ENABLED, WHISPER_MODEL, WHISPER_LANGUAGE, sorted(WHISPER_LANGUAGES),
