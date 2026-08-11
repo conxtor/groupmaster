@@ -13,6 +13,7 @@ import {
   type TranslationKey,
   type TranslationValues,
 } from "../i18n";
+import { AuthGate, apiFetch } from "../auth";
 
 type Group = { id: string; subject: string; isSelected: boolean; platform?: string; chatType?: string; language?: "de" | "es" | "ca" | "en" | "fr" };
 type KnowledgeSourceMessage = {
@@ -109,18 +110,18 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
     <p className="knowledgeSourceMessageText">{displayText}</p>
     {source.kind === "image" && preview && <figure className="knowledgeSourceMessageFigure">
       <button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}>
-        <img src={preview} alt={imageAlt} loading="lazy" />
+        <img crossOrigin="use-credentials" src={preview} alt={imageAlt} loading="lazy" />
       </button>
       <figcaption>{imageCaption}</figcaption>
     </figure>}
     {source.kind === "video" && video && <figure className="knowledgeSourceMessageFigure">
-      <video className="embeddedVideo" controls preload="metadata" poster={preview || undefined} src={video}>{t("videoUnsupported")}</video>
+      <video crossOrigin="use-credentials" className="embeddedVideo" controls preload="metadata" poster={preview || undefined} src={video}>{t("videoUnsupported")}</video>
       <figcaption>{t("embeddedVideo")}</figcaption>
     </figure>}
     {imageOpen && original && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={imageAlt} onClick={() => setImageOpen(false)}>
       <div className="imageModal" onClick={(event) => event.stopPropagation()}>
         <button className="imageModalClose" type="button" onClick={() => setImageOpen(false)} aria-label={t("closeImage")}>×</button>
-        <img className="imageModalImage" src={original} alt={imageAlt} />
+        <img crossOrigin="use-credentials" className="imageModalImage" src={original} alt={imageAlt} />
       </div>
     </div>}
   </article>;
@@ -176,8 +177,8 @@ export default function KnowledgePage() {
     async function loadKnowledge() {
       try {
         const [groupsResponse, knowledgeResponse] = await Promise.all([
-          fetch(`${apiBase}/api/v1/groups`),
-          fetch(`${apiBase}/api/v1/knowledge`),
+          apiFetch("/api/v1/groups"),
+          apiFetch("/api/v1/knowledge"),
         ]);
         if (!groupsResponse.ok || !knowledgeResponse.ok) throw new Error(t("connectorError"));
         const nextGroups = (await groupsResponse.json() as Group[]).filter((group) => group.isSelected);
@@ -209,7 +210,7 @@ export default function KnowledgePage() {
     document.cookie = `wagi_locale=${value}; Max-Age=31536000; Path=/; SameSite=Lax`;
   }
 
-  return <main className="shell knowledgePage">
+  return <AuthGate><main className="shell knowledgePage">
     <header className="topbar">
       <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("knowledgeBaseTitle")}</h1></div>
       <div className="topbarTools"><nav className="pageNav"><Link href="/">{t("dashboard")}</Link><Link href="/knowledge" className="pageNavActive">{t("knowledge")}</Link><Link href="/groups">{t("manageGroups")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
@@ -226,5 +227,5 @@ export default function KnowledgePage() {
       </article>;
     })}</section>}
     <footer><span>{t("footer")}</span><Link href="/">{t("openDashboard")}</Link></footer>
-  </main>;
+  </main></AuthGate>;
 }

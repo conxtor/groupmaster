@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { buildGroupHierarchy, type GroupHierarchyNode } from "../group-hierarchy";
+import { AuthGate, apiFetch } from "../auth";
 import {
   detectBrowserLocale,
   isSupportedLocale,
@@ -82,7 +83,7 @@ export default function GroupSelectionPage() {
     let active = true;
     async function loadGroups() {
       try {
-        const response = await fetch(`${apiBase}/api/v1/groups`);
+        const response = await apiFetch("/api/v1/groups");
         if (!response.ok) throw new Error(t("groupSelectionError"));
         const nextGroups = await response.json() as Group[];
         if (active) { setGroups(nextGroups); setLive(true); setError(null); }
@@ -107,7 +108,7 @@ export default function GroupSelectionPage() {
     const selected = !group.isSelected;
     setGroups((current) => current.map((item) => item.id === group.id ? { ...item, isSelected: selected } : item));
     try {
-      const response = await fetch(`${apiBase}/api/v1/groups/${encodeURIComponent(group.id)}/select`, {
+      const response = await apiFetch(`/api/v1/groups/${encodeURIComponent(group.id)}/select`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ selected }),
@@ -121,7 +122,7 @@ export default function GroupSelectionPage() {
 
   const selectedCount = groups.filter((group) => group.isSelected).length;
 
-  return <main className="shell selectionPage">
+  return <AuthGate><main className="shell selectionPage">
     <header className="topbar">
       <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("groupSelectionPage")}</h1></div>
       <div className="topbarTools"><nav className="pageNav"><Link href="/">{t("dashboard")}</Link><Link href="/knowledge">{t("knowledge")}</Link><Link href="/groups" className="pageNavActive">{t("manageGroups")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
@@ -133,5 +134,5 @@ export default function GroupSelectionPage() {
       {groups.length === 0 ? <p className="emptyState">{t("noGroupsDiscovered")}</p> : <div className="selectionTree">{hierarchy.map((node) => <GroupBranch key={node.group.id} node={node} t={t} onToggle={toggleGroup} />)}</div>}
     </section>
     <footer><span>{t("footer")}</span><Link href="/">{t("openDashboard")}</Link></footer>
-  </main>;
+  </main></AuthGate>;
 }

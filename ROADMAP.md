@@ -58,8 +58,8 @@ Ziel: Sicherer und betrieblich belastbarer Einsatz mit mehreren Nutzern und Grup
 
 ### Sicherheit und Datenschutz
 
-- [ ] OIDC-Login und sichere Session-Verwaltung
-- [ ] Rollen und Rechte für Nutzer, Gruppen, Medien und Administration
+- [x] User-Login und sichere Session-Verwaltung über E-Mail/Passwort, bcrypt, HttpOnly-Sitzungscookie und Ablauf-/Logout-Handling
+- [x] Rollen und Rechte für Nutzer, Gruppen, Medien und Administration; Admin-Freigaben werden pro Gruppe in `user_group_access` geprüft
 - [ ] Tenant-Isolation für mehrere Organisationen oder private Arbeitsbereiche
 - [ ] Verschlüsselung bei Transport und Speicherung
 - [ ] Secret-Management statt ungeschützter `.env`-Werte

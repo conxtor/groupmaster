@@ -417,8 +417,24 @@ npm run dev --workspace=@wagi/web
 
 Die API und Worker werden primär über Compose gestartet. Die Datenbankmigrationen laufen automatisch beim ersten Start eines frischen `postgres_data`-Volumes. Für einen erneuten lokalen Test kann das Volume gezielt über Compose entfernt werden.
 
+Bei einer bereits bestehenden Datenbank muss die neue Auth-/Pool-Migration
+einmal manuell ausgeführt werden, weil PostgreSQL Init-Skripte nur für ein
+frisches Volume ausführt:
+
+```bash
+docker-compose exec -T db psql -U supabase_admin -d app \
+  -f /docker-entrypoint-initdb.d/006_auth_multitenancy.sql
+```
+
+Danach den API-Dienst neu starten. Er legt den Bootstrap-Administrator beim
+ersten erfolgreichen Start an.
+
 ## API-Endpunkte
 
+- `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/me`
+- `POST /api/v1/auth/register` für normale Nutzerkonten
+- `GET/POST /api/v1/connectors/accounts` für eigene persistente Connector-Konten
+- `GET /api/v1/admin/users` und `GET/PUT /api/v1/admin/groups/access` für Administratoren
 - `GET /healthz` und `GET /readyz`
 - `GET /api/v1/groups`
 - `PUT /api/v1/groups/{groupId}/select` mit `{ "selected": true|false }`
@@ -427,6 +443,52 @@ Die API und Worker werden primär über Compose gestartet. Die Datenbankmigratio
 - `GET /api/v1/knowledge` oder `GET /api/v1/knowledge?groupId=<selected-group>`
 - `POST /api/v1/audio/jobs` mit `messageId`, `mediaKey`, optional `mediaMime`
 - `GET /metrics`
+
+## Anmeldung, Rollen und Connector-Pool
+
+Die Anwendung legt den in der Compose-Umgebung konfigurierten Bootstrap-
+Administrator beim ersten API-Start automatisch an. Die Zugangsdaten werden
+nicht in dieser Dokumentation veröffentlicht; setze sie über
+`WAGI_BOOTSTRAP_ADMIN_EMAIL`, `WAGI_BOOTSTRAP_ADMIN_NAME` und
+`WAGI_BOOTSTRAP_ADMIN_PASSWORD`. Normale Nutzer können sich unter `/register`
+selbst registrieren. Sie sehen zunächst keine Gruppen; ein Administrator gibt
+in `/admin` Lese- und Verwaltungsrechte pro Gruppe frei. Sitzungen werden als
+zufällige, gehashte Token in PostgreSQL gespeichert und als HttpOnly-Cookie
+`wagi_session` geführt. Für HTTPS ist `WAGI_COOKIE_SECURE=true` zu setzen.
+`WAGI_CORS_ORIGIN` muss auf die tatsächliche Web-URL zeigen.
+
+Die Connectoren unterstützen bei `CONNECTOR_POOL_ENABLED=true` den gemeinsamen
+PostgreSQL-Control-Plane. Ein Worker übernimmt ein verfügbares Konto über eine
+exklusive Lease, erneuert diese regelmäßig und speichert Sitzungsdaten sowie
+den letzten Cursor je Gruppe in PostgreSQL. Dadurch darf dieselbe WhatsApp-
+oder Telegram-Session nie gleichzeitig von zwei Workern verwendet werden.
+Nach `CONNECTOR_ACCOUNT_SLOT_SECONDS` (Standard: 1800 Sekunden) gibt ein
+Worker sein Konto kontrolliert frei und übernimmt das nächste freie Konto.
+Das ist bewusst ein zeitgesteuerter Wechsel, da die Anwendung nicht
+Echtzeit-kritisch ist.
+Mehrere Worker lassen sich mit Compose starten, zum Beispiel:
+
+```bash
+docker-compose up -d --scale wa-connector-worker=4 --scale tg-connector-worker=4
+```
+
+Zusammen mit dem jeweils einen lokalen QR-/Statusdienst laufen damit fünf
+Worker pro Plattform. Die Zahl der Konten kann kleiner oder größer als die
+Workerzahl sein. Freie Worker warten dann auf eine Lease. Ein Konto pro Plattform wird beim Start für
+den Bootstrap-Administrator angelegt; weitere Nutzerkonten werden nach der
+Registrierung über `POST /api/v1/connectors/accounts` angelegt. Für einen
+bestimmten Worker kann `WA_CONNECTOR_ACCOUNT_ID` bzw. `TG_CONNECTOR_ACCOUNT_ID`
+gesetzt werden. Die Baileys-Auth-Dateien werden zusätzlich als Binärdaten in
+`connector_accounts.session_data` gespiegelt; der aktuelle MVP verwendet dafür
+noch keine KMS-Schlüssel und benötigt deshalb zusätzlichen Datenbank-/Volume-
+Schutz.
+
+Die Worker speichern pro Connector-Konto und Gruppe `connector_cursors`. Beim
+Neustart wird weiterhin der Sieben-Tage-Zeitraum gedrosselt geprüft, bereits
+verarbeitete Telegram-Nachrichten werden aber ab dem gespeicherten Telegram-
+Message-ID-Cursor fortgesetzt. Bei WhatsApp dient der persistierte Cursor der
+Nachvollziehbarkeit und die Baileys-History-Abfrage zusätzlich der
+Duplikatvermeidung.
 
 Events werden weiterhin aus `message_analyses.events` im Dashboard separat
 dargestellt. Thematische Fakten und Erkenntnisse werden zusätzlich durch den

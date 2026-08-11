@@ -5,6 +5,7 @@ import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
 import EventMap from "./event-map";
 import { buildGroupHierarchy, type GroupHierarchyNode } from "./group-hierarchy";
+import { AuthGate, apiFetch } from "./auth";
 import {
   detectBrowserLocale,
   isSupportedLocale,
@@ -340,15 +341,15 @@ function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscript
         {message.audioStatus === "failed" && message.audioJobId && onRetryAudio && <button className="textButton" type="button" onClick={async () => { setActionError(null); try { await onRetryAudio(message); } catch (error) { setActionError(error instanceof Error ? error.message : t("connectorError")); } }}>{t("retryAudio")}</button>}
         {(message.transcript || message.audioJobId) && <details className="transcriptReview" open={Boolean(message.transcript)}><summary>{t("reviewTranscript")}</summary><textarea value={transcriptDraft} onChange={(event) => setTranscriptDraft(event.target.value)} placeholder={t("transcriptPlaceholder")} /><button className="primaryButton" type="button" disabled={!onTranscriptSaved || !transcriptDraft.trim() || savingTranscript} onClick={async () => { if (!onTranscriptSaved) return; setActionError(null); setSavingTranscript(true); try { await onTranscriptSaved(message.id, transcriptDraft.trim()); } catch (error) { setActionError(error instanceof Error ? error.message : t("connectorError")); } finally { setSavingTranscript(false); } }}>{savingTranscript ? t("retryingAudio") : t("saveTranscript")}</button></details>}
       </div>}
-      {message.kind === "image" && source && <figure className="imagePreview"><button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}><img src={source} alt={message.text ?? (message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageAlt"))} loading="lazy" /></button><figcaption>{message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageCaption")}</figcaption></figure>}
-      {message.kind === "video" && video && <figure className="videoPreview"><video controls preload="metadata" poster={source || undefined} src={video}>{t("videoUnsupported")}</video><figcaption>{t("embeddedVideo")}</figcaption></figure>}
+      {message.kind === "image" && source && <figure className="imagePreview"><button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}><img crossOrigin="use-credentials" src={source} alt={message.text ?? (message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageAlt"))} loading="lazy" /></button><figcaption>{message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageCaption")}</figcaption></figure>}
+      {message.kind === "video" && video && <figure className="videoPreview"><video crossOrigin="use-credentials" controls preload="metadata" poster={source || undefined} src={video}>{t("videoUnsupported")}</video><figcaption>{t("embeddedVideo")}</figcaption></figure>}
       {message.analysis?.summary && <div className="analysis"><span className="signal">● {message.analysis.relevant === false ? t("lowRelevance") : t("relevant")}</span><span>{message.analysis.summary}</span></div>}
       {message.children.length > 0 && <div className="messageReplies">{message.children.map((child) => <MessageCard key={child.id} message={child} locale={locale} t={t} depth={depth + 1} onRetryAudio={onRetryAudio} onTranscriptSaved={onTranscriptSaved} />)}</div>}
     </article>
     {imageOpen && original && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={message.text ?? t("mockImageAlt")} onClick={() => setImageOpen(false)}>
       <div className="imageModal" onClick={(event) => event.stopPropagation()}>
         <button className="imageModalClose" type="button" onClick={() => setImageOpen(false)} aria-label={t("closeImage")}>×</button>
-        <img className="imageModalImage" src={original} alt={message.text ?? t("mockImageAlt")} />
+        <img crossOrigin="use-credentials" className="imageModalImage" src={original} alt={message.text ?? t("mockImageAlt")} />
       </div>
     </div>}
   </>;
@@ -402,7 +403,7 @@ export default function Dashboard() {
         if (placeOnly) filters.set("place", "true");
         const sourceFilters = new URLSearchParams({ limit: "300" });
         if (groupFilter !== "all") sourceFilters.set("groupId", groupFilter);
-        const [groupsResponse, messagesResponse, sourceMessagesResponse, statusResponse] = await Promise.all([fetch(`${apiBase}/api/v1/groups`), fetch(`${apiBase}/api/v1/messages?${filters.toString()}`), fetch(`${apiBase}/api/v1/messages?${sourceFilters.toString()}`), fetch(`${apiBase}/api/v1/status`)]);
+        const [groupsResponse, messagesResponse, sourceMessagesResponse, statusResponse] = await Promise.all([apiFetch("/api/v1/groups"), apiFetch(`/api/v1/messages?${filters.toString()}`), apiFetch(`/api/v1/messages?${sourceFilters.toString()}`), apiFetch("/api/v1/status")]);
         if (!groupsResponse.ok || !messagesResponse.ok) throw new Error("API nicht erreichbar");
         const nextGroups = await groupsResponse.json() as Group[];
         const nextMessages = await messagesResponse.json() as Message[];
@@ -452,7 +453,7 @@ export default function Dashboard() {
 
   async function retryAudio(message: Message) {
     if (!message.audioJobId) return;
-    const response = await fetch(`${apiBase}/api/v1/audio/jobs/${message.audioJobId}/retry`, { method: "POST" });
+    const response = await apiFetch(`/api/v1/audio/jobs/${message.audioJobId}/retry`, { method: "POST" });
     if (!response.ok) throw new Error(t("connectorError"));
     setMessages((current) => current.map((item) => item.id === message.id ? { ...item, audioStatus: "queued", audioError: undefined } : item));
   }
@@ -460,14 +461,14 @@ export default function Dashboard() {
   async function saveTranscript(messageID: string, transcript: string) {
     const message = messages.find((item) => item.id === messageID);
     if (!message?.audioJobId) return;
-    const response = await fetch(`${apiBase}/api/v1/audio/jobs/${message.audioJobId}/transcript`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ transcript }) });
+    const response = await apiFetch(`/api/v1/audio/jobs/${message.audioJobId}/transcript`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ transcript }) });
     if (!response.ok) throw new Error(t("connectorError"));
     setMessages((current) => current.map((item) => item.id === messageID ? { ...item, transcript, audioStatus: "completed", audioError: undefined } : item));
   }
 
   const scope = selectedGroup === "all" ? t("allSelectedGroups") : t("selectedGroup");
 
-  return (
+  return <AuthGate>{(
     <main className="shell">
       <header className="topbar">
         <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("title")}</h1></div>
@@ -484,5 +485,5 @@ export default function Dashboard() {
       </div>
       <footer><span>{t("footer")}</span><span>{t("build")}</span></footer>
     </main>
-  );
+  )}</AuthGate>;
 }

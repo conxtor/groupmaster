@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import makeWASocket, {
@@ -14,6 +14,7 @@ import { Pool } from "pg";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 import { subjects, type EventEnvelope, type GroupDiscovered, type GroupSelectionChanged, type WhatsAppMessageReceived } from "@wagi/contracts";
+import { acquireConnectorAccount, ensureConnectorAccount, type ConnectorAccountLease, type ConnectorSQLStore } from "@wagi/connector-sdk";
 
 const port = Number(process.env.PORT ?? 3001);
 const databaseUrl = process.env.DATABASE_URL ?? "postgres://wagi_app:app@localhost:5432/app";
@@ -30,6 +31,11 @@ const mockMode = (process.env.WA_MOCK_MODE ?? "false").toLowerCase() === "true";
 const groupRefreshIntervalMs = Math.max(30_000, Number(process.env.GROUP_REFRESH_INTERVAL_MS ?? 60_000));
 const mediaCleanupToken = (process.env.MEDIA_CLEANUP_TOKEN ?? "").trim();
 const allowlist = new Set((process.env.WA_GROUP_ALLOWLIST ?? "").split(",").map((value) => value.trim()).filter(Boolean));
+const poolEnabled = (process.env.CONNECTOR_POOL_ENABLED ?? "false").toLowerCase() === "true";
+const poolWorkerId = process.env.CONNECTOR_WORKER_ID ?? `wa-${process.pid}`;
+const poolLeaseSeconds = Math.max(30, Number(process.env.CONNECTOR_LEASE_SECONDS ?? 90));
+const poolSlotSeconds = Math.max(0, Number(process.env.CONNECTOR_ACCOUNT_SLOT_SECONDS ?? 1800));
+const poolBootstrapEmail = (process.env.WAGI_BOOTSTRAP_ADMIN_EMAIL ?? "volker@kerkhoff.es").trim();
 
 const pool = new Pool({ connectionString: databaseUrl });
 const sc = StringCodec();
@@ -50,6 +56,66 @@ let groupRefreshInProgress = false;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let reconnectAttempts = 0;
 let connectInProgress = false;
+let accountLease: ConnectorAccountLease | null = null;
+let accountRotationTimer: NodeJS.Timeout | null = null;
+const sqlStore = pool as unknown as ConnectorSQLStore;
+
+async function initializePoolLease() {
+  if (!poolEnabled || mockMode) return true;
+  const preferredAccountId = (process.env.CONNECTOR_ACCOUNT_ID ?? "").trim() || undefined;
+  if (!preferredAccountId) await ensureConnectorAccount(sqlStore, "whatsapp", poolBootstrapEmail, "WhatsApp");
+  accountLease = await acquireConnectorAccount(sqlStore, "whatsapp", poolWorkerId, preferredAccountId, poolLeaseSeconds);
+  if (!accountLease) {
+    await setStatus("degraded", "Kein freies WhatsApp-Connector-Konto; Worker wartet auf eine Lease");
+    return false;
+  }
+  accountLease.startRenewal((error) => console.warn("WhatsApp connector lease renewal failed", error));
+  if (poolSlotSeconds > 0) {
+    if (accountRotationTimer) clearTimeout(accountRotationTimer);
+    accountRotationTimer = setTimeout(() => void rotatePoolAccount(), poolSlotSeconds * 1000);
+    accountRotationTimer.unref?.();
+  }
+  await accountLease.setStatus("connecting");
+  console.log(`WhatsApp worker ${poolWorkerId} leased account ${accountLease.account.accountId} for ${accountLease.account.label}`);
+  return true;
+}
+
+async function rotatePoolAccount() {
+  if (!poolEnabled || !accountLease || mockMode) return;
+  const previousLease = accountLease;
+  accountRotationTimer = null;
+  lifecycleStatus = "stopped";
+  connected = false;
+  try { (waSocket as any)?.end?.(); } catch (error) { console.warn("WhatsApp socket rotation close failed", error); }
+  waSocket = null;
+  accountLease = null;
+  await previousLease.setStatus("paused", null).catch(() => undefined);
+  await previousLease.release().catch((error) => console.warn("WhatsApp account lease release failed", error));
+  try {
+    if (await initializePoolLease()) await connectWhatsApp();
+  } catch (error) {
+    console.warn("WhatsApp account rotation failed", error);
+  }
+}
+
+async function restoreAuthSnapshot(directory: string) {
+  if (!accountLease) return;
+  const snapshot = await accountLease.loadSession();
+  if (!snapshot) return;
+  const files = JSON.parse(snapshot.toString("utf8")) as Record<string, string>;
+  await mkdir(directory, { recursive: true });
+  for (const [name, value] of Object.entries(files)) await writeFile(join(directory, name), Buffer.from(value, "base64"));
+}
+
+async function persistAuthSnapshot(directory: string) {
+  if (!accountLease) return;
+  const snapshot: Record<string, string> = {};
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    snapshot[entry.name] = (await readFile(join(directory, entry.name))).toString("base64");
+  }
+  await accountLease.saveSession(Buffer.from(JSON.stringify(snapshot), "utf8"));
+}
 
 async function prepareInitialActivation() {
   const existing = await pool.query<{ initial_backfill_completed_at: string | null }>(
@@ -80,6 +146,7 @@ function backfillDelay(milliseconds: number) {
 async function setStatus(status: typeof lifecycleStatus, detail?: string, error?: unknown) {
   lifecycleStatus = status;
   lastError = error ? String(error) : lastError;
+  if (accountLease) await accountLease.setStatus(status, lastError).catch((dbError) => console.warn("connector account status persistence failed", dbError));
   await pool.query(
     `INSERT INTO connector_states (connector, status, detail, last_error, qr, connected_at)
      VALUES ('whatsapp', $1, $2, $3, $4, $5)
@@ -357,6 +424,7 @@ async function persistMessage(message: WAMessage) {
     }
     await publish(subjects.audioRequested, subjects.audioRequested, { jobId, messageId: data.messageId, mediaKey: data.mediaKey!, mediaMime: data.mediaMime, objectPath });
   }
+  if (accountLease) await accountLease.saveCursor(groupId, { externalMessageId: waMessageId, receivedAt: data.receivedAt, sequenceNo: timestamp });
 }
 
 async function queueOrPersistHistory(message: WAMessage) {
@@ -482,8 +550,10 @@ async function connectWhatsApp() {
   connectInProgress = true;
   try {
     await setStatus("connecting", `Baileys wird verbunden; ${initialActivation ? "Erst-" : "Neustart-"}Backfill: ${backfillDays} Tage`);
-    await mkdir(authDir, { recursive: true });
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    const activeAuthDir = accountLease ? join(authDir, accountLease.account.accountId) : authDir;
+    await mkdir(activeAuthDir, { recursive: true });
+    await restoreAuthSnapshot(activeAuthDir);
+    const { state, saveCreds } = await useMultiFileAuthState(activeAuthDir);
     // WhatsApp currently terminates Baileys sessions that advertise the
     // macOS/DARWIN desktop sub-platform before sending the QR event. Use the
     // browser profile so fresh linked-device registration reaches pair-device.
@@ -499,7 +569,10 @@ async function connectWhatsApp() {
       fireInitQueries: false,
     });
     waSocket = socket;
-    socket.ev.on("creds.update", saveCreds);
+    socket.ev.on("creds.update", async () => {
+      await saveCreds();
+      await persistAuthSnapshot(activeAuthDir).catch((error) => console.warn("WhatsApp session snapshot failed", error));
+    });
     socket.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) { latestQr = qr; void setStatus("pairing", "QR-Code zur erneuten Anmeldung scannen"); qrcode.generate(qr, { small: true }); }
     connected = connection === "open";
@@ -727,15 +800,32 @@ async function main() {
   subscribeGroupSelections();
   await pool.query("SELECT 1");
   await prepareInitialActivation();
+  let poolReady = true;
+  try {
+    poolReady = await initializePoolLease();
+  } catch (error) {
+    poolReady = false;
+    console.error("WhatsApp connector pool initialization failed", error);
+    await setStatus("error", "Connector-Pool konnte nicht initialisiert werden", error);
+  }
   server.listen(port, () => console.log(`wa-connector listening on :${port} (${mockMode ? "mock" : "baileys"})`));
   if (mockMode) { connected = true; connectedAt = new Date().toISOString(); await setStatus("syncing", initialActivation ? `Mock-Backfill der letzten ${backfillDays} Tage läuft` : "Mock-Daten aktiv"); await seedMockData(); await completeInitialActivation(); await setStatus("ready", "Mock-Daten aktiv"); }
-  else {
+  else if (poolReady) {
     try {
       await connectWhatsApp();
     } catch (error) {
       console.error("Initial WhatsApp connection failed", error);
       scheduleWhatsAppReconnect(error);
     }
+  } else if (poolEnabled) {
+    console.warn("WhatsApp connector is paused because no account lease is available");
+    const retryTimer = setInterval(() => {
+      if (accountLease) return;
+      void initializePoolLease().then((ready) => {
+        if (ready) void connectWhatsApp().catch((error) => scheduleWhatsAppReconnect(error));
+      }).catch((error) => console.warn("WhatsApp connector pool retry failed", error));
+    }, 10_000);
+    retryTimer.unref?.();
   }
 }
 

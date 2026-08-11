@@ -8,6 +8,7 @@ import { Api, TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
 import { subjects, type ConnectorLifecycleStatus, type EventEnvelope, type GroupDiscovered, type GroupSelectionChanged, type WhatsAppMessageReceived } from "@wagi/contracts";
+import { acquireConnectorAccount, ensureConnectorAccount, type ConnectorAccountLease, type ConnectorSQLStore } from "@wagi/connector-sdk";
 
 const port = Number(process.env.TG_PORT ?? process.env.PORT ?? 3002);
 const databaseUrl = process.env.DATABASE_URL ?? "postgres://wagi_app:app@localhost:5432/app";
@@ -34,6 +35,11 @@ const groupRefreshIntervalMs = Math.max(30_000, Number(process.env.GROUP_REFRESH
 const mediaCleanupToken = (process.env.MEDIA_CLEANUP_TOKEN ?? "").trim();
 const allowlist = new Set((process.env.TG_GROUP_ALLOWLIST ?? "").split(",").map((value) => value.trim()).filter(Boolean));
 const directMode = apiId > 0 && Boolean(apiHash);
+const poolEnabled = (process.env.CONNECTOR_POOL_ENABLED ?? "false").toLowerCase() === "true";
+const poolWorkerId = process.env.CONNECTOR_WORKER_ID ?? `tg-${process.pid}`;
+const poolLeaseSeconds = Math.max(30, Number(process.env.CONNECTOR_LEASE_SECONDS ?? 90));
+const poolSlotSeconds = Math.max(0, Number(process.env.CONNECTOR_ACCOUNT_SLOT_SECONDS ?? 1800));
+const poolBootstrapEmail = (process.env.WAGI_BOOTSTRAP_ADMIN_EMAIL ?? "volker@kerkhoff.es").trim();
 
 const pool = new Pool({ connectionString: databaseUrl });
 const sc = StringCodec();
@@ -55,6 +61,47 @@ const mediaRetryCounts = new Map<string, number>();
 const directTopicGroups = new Map<string, Map<number, { groupId: string; title: string; topMessage: number }>>();
 let groupRefreshTimer: NodeJS.Timeout | null = null;
 let groupRefreshInProgress = false;
+let accountLease: ConnectorAccountLease | null = null;
+let accountRotationTimer: NodeJS.Timeout | null = null;
+const sqlStore = pool as unknown as ConnectorSQLStore;
+
+async function initializePoolLease() {
+  if (!poolEnabled || !directMode) return true;
+  const preferredAccountId = (process.env.CONNECTOR_ACCOUNT_ID ?? "").trim() || undefined;
+  if (!preferredAccountId) await ensureConnectorAccount(sqlStore, "telegram", poolBootstrapEmail, "Telegram");
+  accountLease = await acquireConnectorAccount(sqlStore, "telegram", poolWorkerId, preferredAccountId, poolLeaseSeconds);
+  if (!accountLease) {
+    await setStatus("degraded", "Kein freies Telegram-Connector-Konto; Worker wartet auf eine Lease");
+    return false;
+  }
+  accountLease.startRenewal((error) => console.warn("Telegram connector lease renewal failed", error));
+  if (poolSlotSeconds > 0) {
+    if (accountRotationTimer) clearTimeout(accountRotationTimer);
+    accountRotationTimer = setTimeout(() => void rotatePoolAccount(), poolSlotSeconds * 1000);
+    accountRotationTimer.unref?.();
+  }
+  await accountLease.setStatus("connecting");
+  console.log(`Telegram worker ${poolWorkerId} leased account ${accountLease.account.accountId} for ${accountLease.account.label}`);
+  return true;
+}
+
+async function rotatePoolAccount() {
+  if (!poolEnabled || !accountLease || !directMode) return;
+  const previousLease = accountLease;
+  accountRotationTimer = null;
+  lifecycleStatus = "stopped";
+  directRuntimeStarted = false;
+  try { await directClient?.disconnect(); } catch (error) { console.warn("Telegram client rotation close failed", error); }
+  directClient = null;
+  accountLease = null;
+  await previousLease.setStatus("paused", null).catch(() => undefined);
+  await previousLease.release().catch((error) => console.warn("Telegram account lease release failed", error));
+  try {
+    if (await initializePoolLease()) await startDirectConnector();
+  } catch (error) {
+    console.warn("Telegram account rotation failed", error);
+  }
+}
 
 async function prepareInitialActivation() {
   const existing = await pool.query<{ initial_backfill_completed_at: string | null }>(
@@ -81,6 +128,7 @@ async function completeInitialActivation() {
 async function setStatus(status: ConnectorLifecycleStatus, detail?: string, error?: unknown) {
   lifecycleStatus = status;
   if (error) lastError = String(error);
+  if (accountLease) await accountLease.setStatus(status, lastError).catch((dbError) => console.warn("connector account status persistence failed", dbError));
   await pool.query(
     `INSERT INTO connector_states (connector, status, detail, last_error, connected_at)
      VALUES ('telegram', $1, $2, $3, $4)
@@ -202,6 +250,10 @@ async function telegramApi<T>(method: string, body: Record<string, unknown> = {}
 }
 
 async function loadDirectSession() {
+  if (accountLease) {
+    const stored = await accountLease.loadSession();
+    if (stored) return stored.toString("utf8");
+  }
   if (directSession) return directSession;
   try { return (await readFile(directSessionPath, "utf8")).trim(); } catch { return ""; }
 }
@@ -245,8 +297,13 @@ async function retryTelegramOperation<T>(label: string, operation: () => Promise
 
 async function saveDirectSession() {
   if (!directClient) return;
+  const value = (directClient.session as StringSession).save();
+  if (accountLease) {
+    await accountLease.saveSession(Buffer.from(value, "utf8"));
+    return;
+  }
   await mkdir(stateDir, { recursive: true });
-  await writeFile(directSessionPath, (directClient.session as StringSession).save(), "utf8");
+  await writeFile(directSessionPath, value, "utf8");
 }
 
 async function upsertDirectGroup(entity: any) {
@@ -454,6 +511,7 @@ async function persistDirectMessage(message: any, entity: any) {
     else await pool.query("UPDATE audio_jobs SET media_mime=$1, object_path=$2, updated_at=NOW() WHERE id=$3", [downloaded.mediaMime, downloaded.objectPath, jobId]);
     await publish(subjects.audioRequested, subjects.audioRequested, { jobId, messageId, mediaKey, mediaMime: downloaded?.mediaMime, objectPath: downloaded?.objectPath });
   }
+  if (accountLease) await accountLease.saveCursor(groupId, { externalMessageId: String(message.id), receivedAt: new Date(timestamp * 1000).toISOString(), sequenceNo: Number(message.id) });
 }
 
 function isDirectGroupEntity(entity: any) {
@@ -508,7 +566,9 @@ async function backfillDirectGroup(groupId: string) {
     ? await upsertDirectTopic(entity, { id: topicId!, title: topic.title, topMessage: topic.topMessage })
     : await upsertDirectGroup(entity);
   if (!group.selected) return;
-  for await (const message of directClient.iterMessages(entity, { limit: 500 })) {
+  const cursor = accountLease ? await accountLease.loadCursor(groupId) : null;
+  const minimumMessageId = cursor?.externalMessageId ? Number(cursor.externalMessageId) : undefined;
+  for await (const message of directClient.iterMessages(entity, { limit: 500, minId: minimumMessageId })) {
     if (directTimestamp(message.date) < Math.floor(backfillCutoff.getTime() / 1000)) break;
     if (topicId && directTopicIdFromMessage(message, entity) !== topicId) continue;
     await persistDirectMessage(message, entity);
@@ -899,10 +959,28 @@ async function main() {
   subscribeGroupSelections();
   await pool.query("SELECT 1");
   await prepareInitialActivation();
+  let poolReady = true;
+  try {
+    poolReady = await initializePoolLease();
+  } catch (error) {
+    poolReady = false;
+    console.error("Telegram connector pool initialization failed", error);
+    await setStatus("error", "Connector-Pool konnte nicht initialisiert werden", error);
+  }
   server.listen(port, () => console.log(`tg-connector listening on :${port} (${directMode ? "direct" : botToken ? "bot-api" : "waiting for Telegram credentials"})`));
-  if (directMode) void startDirectConnector().catch((error) => { void setStatus("error", "Direct Telegram Initialisierung fehlgeschlagen", error); console.error(error); });
+  if (directMode && poolReady) void startDirectConnector().catch((error) => { void setStatus("error", "Direct Telegram Initialisierung fehlgeschlagen", error); console.error(error); });
   else if (botToken) void pollTelegram().catch((error) => { polling = false; void setStatus("error", "Telegram-Initialisierung fehlgeschlagen", error); console.error(error); });
-  else void setStatus("starting", "TG_API_ID/TG_API_HASH oder TG_BOT_TOKEN ist noch nicht konfiguriert");
+  else if (!poolEnabled) void setStatus("starting", "TG_API_ID/TG_API_HASH oder TG_BOT_TOKEN ist noch nicht konfiguriert");
+  else {
+    console.warn("Telegram connector is paused because no account lease is available");
+    const retryTimer = setInterval(() => {
+      if (accountLease || !directMode) return;
+      void initializePoolLease().then((ready) => {
+        if (ready) void startDirectConnector().catch((error) => void setStatus("error", "Direct Telegram Initialisierung fehlgeschlagen", error));
+      }).catch((error) => console.warn("Telegram connector pool retry failed", error));
+    }, 10_000);
+    retryTimer.unref?.();
+  }
 }
 
 void main().catch((error) => { console.error(error); process.exitCode = 1; });

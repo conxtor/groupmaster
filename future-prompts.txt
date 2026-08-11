@@ -221,16 +221,9 @@ Die Lokale testumgebung soll wie bisher funktionieren, ändere hier nichts.
 
 HF_TOKEN: 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 
 
-Nein. Die aktuellen Konnektoren sind nicht mehrbenutzerfähig:
-WhatsApp verwendet eine einzige gemeinsame Baileys-Session unter WA_AUTH_DIR und den globalen Connector-State connector='whatsapp'.
-Telegram verwendet eine einzige gemeinsame StringSession unter TG_STATE_DIR/direct-session.txt.
-Gruppen, Nachrichten und Auswahlen sind nicht mit user_id oder tenant_id verknüpft. Alle Nutzer würden daher dieselben Daten und Konten sehen.
-Belege: [WhatsApp-Konnektor](/Users/Volker_Kerkhoff/Projects/Personal/wa-group-intelligence/apps/wa-connector/src/index.ts), [Telegram-Authentifizierung](/Users/Volker_Kerkhoff/Projects/Personal/wa-group-intelligence/apps/tg-connector/src/auth.ts), [Migrationen](/Users/Volker_Kerkhoff/Projects/Personal/wa-group-intelligence/infra/migrations/001_init.sql).
-Empfohlene Lösung:
-Benutzer-/Mandantenmodell mit users, connector_accounts, connector_sessions, group_memberships und group_selections.
-Pro WhatsApp-Konto ein eigener Connector-Prozess mit eigenem Auth-Verzeichnis.
-Pro Telegram-Konto eine eigene MTProto-StringSession; TG_API_ID und TG_API_HASH bleiben global, die Session ist benutzerspezifisch.
-NATS-Nachrichten um userId beziehungsweise accountId ergänzen.
-Datenbank- und Medienpfade strikt nach Konto/Mandant isolieren.
-Benutzeranmeldung im Web-UI, beispielsweise über OIDC.
-Für klassische WhatsApp-Gruppen bleibt damit nur die separate Linked-Device-Session pro Nutzer. Die offizielle WhatsApp-Business-API unterstützt diesen Consumer-Gruppenfall nicht. Telegram-Bots wären mehrbenutzertechnisch einfacher, entsprechen aber nicht der gewünschten direkten Telegram-Verbindung.
+- Nutzer sollen alle eigenen Gruppen sehen und verwalten können wie im single-user MVP
+- Wenn der jeweils abgearbeitete user auf dem neuesten Nachrichtenstand ist, soll der Konnektor wieder in das Pool freigegeben werden und vom nächsten User verwendet werden können
+- implementiere ein vollständig nutzergebundenes QR-Routing
+- Die grösse der pools für Whatsapp und Telegram soll in .env konfigurierbar sein.
+- Wenn die Anwendung bereits eine gewisse Zeit läuft ist kein Telegram-QR sichtbar und es kann auch kein Telegram-QR erzeugt werden
+- Im pool soll stets ein dedizierter Konnektor freigehalten werden damit neue Nutzer die Verbindung mit Whatsapp und Telegram via QR-Code herstellen können. Dieser Konnektor soll jedoch keine Nachrichten lesen oder verarbeiten, er soll unmittelbar nachdem die Verbindung hergestellt nur die Gruppen des users einlesen und wieder freigegeben werden. Die Nachrichtenverarbeitung und Backlog-Verarbeitung für den User soll dann turnusmässig stattfinden. 

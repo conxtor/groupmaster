@@ -51,6 +51,11 @@ services:
       PORT: 8080
       MEDIA_DIR: /data/media
       MEDIA_SIGNING_SECRET: ${MEDIA_SIGNING_SECRET:-}
+      WAGI_CORS_ORIGIN: ${WAGI_CORS_ORIGIN:-http://localhost:3000}
+      WAGI_COOKIE_SECURE: ${WAGI_COOKIE_SECURE:-false}
+      WAGI_BOOTSTRAP_ADMIN_EMAIL: ${WAGI_BOOTSTRAP_ADMIN_EMAIL:-volker@kerkhoff.es}
+      WAGI_BOOTSTRAP_ADMIN_NAME: ${WAGI_BOOTSTRAP_ADMIN_NAME:-Volker Kerkhoff}
+      WAGI_BOOTSTRAP_ADMIN_PASSWORD: ${WAGI_BOOTSTRAP_ADMIN_PASSWORD:-Ctas2025!}
     ports: ["8080:8080"]
     volumes:
       - media_data:/data/media:ro
@@ -78,6 +83,12 @@ services:
       GROUP_REFRESH_INTERVAL_MS: ${GROUP_REFRESH_INTERVAL_MS:-60000}
       MEDIA_DIR: /data/media
       MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
+      CONNECTOR_POOL_ENABLED: ${CONNECTOR_POOL_ENABLED:-true}
+      CONNECTOR_WORKER_ID: ${CONNECTOR_WORKER_ID:-}
+      CONNECTOR_ACCOUNT_ID: ${WA_CONNECTOR_ACCOUNT_ID:-}
+      CONNECTOR_LEASE_SECONDS: ${CONNECTOR_LEASE_SECONDS:-90}
+      CONNECTOR_ACCOUNT_SLOT_SECONDS: ${CONNECTOR_ACCOUNT_SLOT_SECONDS:-1800}
+      WAGI_BOOTSTRAP_ADMIN_EMAIL: ${WAGI_BOOTSTRAP_ADMIN_EMAIL:-volker@kerkhoff.es}
     ports: ["127.0.0.1:3001:3001"]
     volumes:
       - wa_auth:/data/wa-auth
@@ -113,6 +124,12 @@ services:
       GROUP_REFRESH_INTERVAL_MS: ${GROUP_REFRESH_INTERVAL_MS:-60000}
       MEDIA_DIR: /data/media
       MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
+      CONNECTOR_POOL_ENABLED: ${CONNECTOR_POOL_ENABLED:-true}
+      CONNECTOR_WORKER_ID: ${CONNECTOR_WORKER_ID:-}
+      CONNECTOR_ACCOUNT_ID: ${TG_CONNECTOR_ACCOUNT_ID:-}
+      CONNECTOR_LEASE_SECONDS: ${CONNECTOR_LEASE_SECONDS:-90}
+      CONNECTOR_ACCOUNT_SLOT_SECONDS: ${CONNECTOR_ACCOUNT_SLOT_SECONDS:-1800}
+      WAGI_BOOTSTRAP_ADMIN_EMAIL: ${WAGI_BOOTSTRAP_ADMIN_EMAIL:-volker@kerkhoff.es}
     ports: ["3002:3002"]
     volumes:
       - tg_state:/data/tg-state
@@ -120,6 +137,19 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+
+  # Additional pool workers intentionally do not publish a host port. The
+  # first service above remains the local QR/status control endpoint; these
+  # replicas consume leased accounts from PostgreSQL.
+  wa-connector-worker:
+    extends:
+      service: wa-connector
+    ports: []
+
+  tg-connector-worker:
+    extends:
+      service: tg-connector
+    ports: []
 
   ai-worker:
     build:
