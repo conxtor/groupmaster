@@ -22,7 +22,9 @@ const directSessionPath = join(stateDir, "direct-session.txt");
 const mediaDir = process.env.MEDIA_DIR ?? "./data/media";
 const offsetPath = join(stateDir, "offset.json");
 const pollTimeout = Math.max(1, Math.min(50, Number(process.env.TG_POLL_TIMEOUT ?? 25)));
-const backfillDays = Math.max(1, Number(process.env.TG_BACKFILL_DAYS ?? 3));
+const backfillDays = Math.max(1, Number(process.env.TG_BACKFILL_DAYS ?? 7));
+const backfillThrottleMs = Math.max(0, Number(process.env.TG_BACKFILL_THROTTLE_MS ?? 500));
+const backfillGroupDelayMs = Math.max(0, Number(process.env.TG_BACKFILL_GROUP_DELAY_MS ?? 2000));
 const connectionRetries = Math.max(5, Number(process.env.TG_CONNECTION_RETRIES ?? 12));
 const requestRetries = Math.max(3, Number(process.env.TG_REQUEST_RETRIES ?? 8));
 const downloadRetries = Math.max(3, Number(process.env.TG_DOWNLOAD_RETRIES ?? 8));
@@ -411,7 +413,7 @@ async function persistDirectMessage(message: any, entity: any) {
     : await upsertDirectGroup(entity);
   if (!group.selected) return;
   const timestamp = directTimestamp(message.date);
-  if (initialActivation && new Date(timestamp * 1000) < backfillCutoff) return;
+  if (new Date(timestamp * 1000) < backfillCutoff) return;
   const groupId = group.groupId;
   const waMessageId = `${groupId}:${message.id}`;
   const kind = directMessageKind(message);
@@ -510,6 +512,7 @@ async function backfillDirectGroup(groupId: string) {
     if (directTimestamp(message.date) < Math.floor(backfillCutoff.getTime() / 1000)) break;
     if (topicId && directTopicIdFromMessage(message, entity) !== topicId) continue;
     await persistDirectMessage(message, entity);
+    await delay(backfillThrottleMs);
   }
 }
 
@@ -518,6 +521,7 @@ async function handleGroupSelection(data: GroupSelectionChanged) {
   if (!data.groupId.startsWith("tg:")) return;
   await pool.query("UPDATE wa_groups SET is_selected=$1, updated_at=NOW() WHERE id=$2", [data.selected, data.groupId]);
   if (data.selected) {
+    await delay(backfillGroupDelayMs);
     try { await backfillDirectGroup(data.groupId); } catch (error) { console.warn("Telegram selected-group backfill failed", data.groupId, error); }
   }
 }
@@ -538,7 +542,8 @@ function subscribeGroupSelections() {
 
 async function backfillSelectedDirectGroups() {
   const selected = await pool.query<{ id: string }>("SELECT id FROM wa_groups WHERE platform='telegram' AND is_selected=TRUE ORDER BY subject");
-  for (const group of selected.rows) {
+  for (const [index, group] of selected.rows.entries()) {
+    if (index > 0) await delay(backfillGroupDelayMs);
     try { await backfillDirectGroup(group.id); } catch (error) { console.warn("Telegram selected-group startup backfill failed", group.id, error); }
   }
 }
@@ -546,7 +551,7 @@ async function backfillSelectedDirectGroups() {
 async function startDirectRuntime() {
   if (!directClient || directRuntimeStarted) return;
   directRuntimeStarted = true;
-  await setStatus("syncing", initialActivation ? `Direct Telegram: Backfill der letzten ${backfillDays} Tage läuft` : "Direct Telegram verbunden");
+  await setStatus("syncing", `${initialActivation ? "Erst-" : "Neustart-"}Backfill der letzten ${backfillDays} Tage läuft (gedrosselt)`);
   directClient.addEventHandler(async (event: any) => {
     try {
       const message = event.message;
@@ -707,7 +712,7 @@ async function persistMessage(message: TelegramMessage) {
 
   const groupId = normalizedChatId(message.chat.id);
   const waMessageId = `${groupId}:${message.message_id}`;
-  if (initialActivation && new Date(message.date * 1000) < backfillCutoff) return;
+  if (new Date(message.date * 1000) < backfillCutoff) return;
   const kind = messageKind(message);
   const media = mediaDetails(message, kind);
   const hasMedia = Boolean(media);
@@ -857,7 +862,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   if (request.url === "/healthz") return respond(response, 200, { status: "ok", service: "tg-connector" });
   if (request.url === "/readyz") return respond(response, lifecycleStatus === "ready" ? 200 : 503, { status: lifecycleStatus, mode: directMode ? "telegram-direct" : "telegram-bot", lastError });
   if (request.url === "/status") {
-    return respond(response, 200, { connector: "telegram", status: lifecycleStatus, mode: directMode ? "telegram-direct" : "telegram-bot", connected: directRuntimeStarted || Boolean(botInfo && polling), connectedAt, lastError, qr: directQr, qrExpiresAt: directQrExpiresAt, qrLoginActive: Boolean(directQrAuthPromise), initialBackfillActive: initialActivation, backfillDays, backfillNote: directMode ? "Direct Telegram liest die letzten drei Tage aus der persönlichen Dialoghistorie." : "Die Telegram Bot API stellt keine rückwirkende Gruppenhistorie bereit; verarbeitet werden alle noch verfügbaren Updates." });
+    return respond(response, 200, { connector: "telegram", status: lifecycleStatus, mode: directMode ? "telegram-direct" : "telegram-bot", connected: directRuntimeStarted || Boolean(botInfo && polling), connectedAt, lastError, qr: directQr, qrExpiresAt: directQrExpiresAt, qrLoginActive: Boolean(directQrAuthPromise), initialBackfillActive: initialActivation, backfillDays, backfillThrottleMs, backfillGroupDelayMs, backfillNote: directMode ? `Direct Telegram liest beim Neustart die letzten ${backfillDays} Tage aus ausgewählten Dialogen und drosselt die Verarbeitung.` : "Die Telegram Bot API stellt keine rückwirkende Gruppenhistorie bereit; verarbeitet werden alle noch verfügbaren Updates." });
   }
   if (request.method === "POST" && request.url === "/auth/qr") {
     if (!directMode) return respond(response, 400, { error: "Telegram-Direkt-QR benötigt TG_API_ID und TG_API_HASH in .env" });
@@ -873,7 +878,9 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       groupAllowlist: [...allowlist],
       initialBackfillActive: initialActivation,
       backfillDays,
-      backfillNote: directMode ? "Direct Telegram liest die letzten drei Tage aus der persönlichen Dialoghistorie." : "Die Telegram Bot API stellt keine rückwirkende Gruppenhistorie bereit; verarbeitet werden alle noch verfügbaren Updates.",
+      backfillThrottleMs,
+      backfillGroupDelayMs,
+      backfillNote: directMode ? `Direct Telegram liest beim Neustart die letzten ${backfillDays} Tage aus ausgewählten Dialogen und drosselt die Verarbeitung.` : "Die Telegram Bot API stellt keine rückwirkende Gruppenhistorie bereit; verarbeitet werden alle noch verfügbaren Updates.",
       instructions: [
         ...(directMode ? ["Direct Telegram verwendet die persönliche MTProto-Session; Gruppen müssen nur im persönlichen Konto erreichbar sein.", "Bei fehlender Session `npm run auth --workspace=@wagi/tg-connector` ausführen."] : [
         "Füge den Bot zu den gewünschten Gruppen hinzu.",

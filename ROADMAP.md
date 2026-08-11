@@ -33,24 +33,24 @@ Ziel: Ein einzelner vertrauenswürdiger Nutzer kann reale Gruppen sicher verbind
 - [x] Bild-Thumbnails und sichere Download-Pfade; Audio-/Videowiedergabe in der UI bleibt offen
 - [x] OCR und erste Bildanalyse für Bilder, Screenshots und Karten; Dokumentanalyse bleibt offen
 - [x] Audio-Worker so verdrahten, dass reale Quelldateien an whisper.cpp übergeben werden
-- [ ] Status, Retry und Fehleranzeige für Audiojobs
+- [x] Status, Retry und Fehleranzeige für Audiojobs; Audiojobs werden nach Worker-Neustarts und transienten Fehlern automatisch wieder eingeplant
 
 ### KI und Datenqualität
 
 - [x] Lokalen, austauschbaren AI-Adaptervertrag mit Heuristik-Fallback ergänzen; externe LLM-Übertragung bleibt aus Datenschutzgründen offen
 - [x] Strukturierte JSON-/Pydantic-Schema-Verträge, Prompt-Versionierung und Modellkonfiguration
-- [ ] Evaluationsdatensatz für Deutsch, Spanisch, Katalanisch, Englisch und Französisch
+- [x] Evaluationsdatensatz für Deutsch, Spanisch, Katalanisch, Englisch und Französisch unter `apps/ai-worker/eval/dataset.jsonl`
 - [x] Konfidenzen, Quellenbelege und nachvollziehbare Herleitung je Ergebnis
 - [x] Zusammenführung von Events aus mehreren Nachrichten ohne Duplikate
-- [x] Widersprüchliche Zeitangaben erkennen und als Konflikt markieren; Orts-/Termin-Konflikte bleiben offen
+- [x] Widersprüchliche Zeit-, Orts- und Terminangaben erkennen, mit Quellen belegen und als Konflikt markieren
 
 ### Nutzeroberfläche
 
-- [ ] Event-Detailansicht mit allen Quellnachrichten
-- [ ] Suche und Filter nach Gruppe, Zeitraum, Relevanz, Ort, Event und Medientyp
-- [ ] Transkript prüfen und korrigieren
+- [x] Event-Detailansicht mit allen Quellnachrichten
+- [x] Suche und Filter nach Gruppe, Zeitraum, Relevanz, Ort, Event und Medientyp
+- [x] Transkript prüfen und korrigieren; vollständige Transkripte werden im Dashboard und in den Knowledge-Base-Quellnachrichten als Nachrichtentext angezeigt
 - [x] Gruppen- und Connector-Setup als verständlicher lokaler QR-Onboarding-Prozess im Dashboard; Telegram-2FA bleibt als lokaler Terminal-Fallback
-- [ ] Fehler-, Job- und Verbindungsstatus sichtbar machen
+- [x] Fehler-, Job- und Verbindungsstatus sichtbar machen
 
 ## Phase 2 – Produktionsreife
 
@@ -73,6 +73,7 @@ Ziel: Sicherer und betrieblich belastbarer Einsatz mit mehreren Nutzern und Grup
 - [ ] Retry-Strategien, Dead-Letter-Queues und Backoff
 - [ ] Idempotente Verarbeitung mit Outbox- oder Inbox-Muster
 - [ ] Wiederanlauf und Recovery für unterbrochene Audio-/KI-Jobs
+- [ ] Dokumentanalyse
 - [ ] Replay und Backfill für ausgewählte Zeiträume
 - [ ] Datenbankmigrationen versioniert und für bestehende Installationen ausführbar machen
 - [ ] Backups, Restore-Tests und Aufbewahrungsregeln

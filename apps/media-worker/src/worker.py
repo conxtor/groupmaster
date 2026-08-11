@@ -33,6 +33,7 @@ MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "miniosecret")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "wa-media")
 MEDIA_MAX_RETRIES = max(1, int(os.getenv("MEDIA_MAX_RETRIES", "3")))
+MEDIA_STALE_PROCESSING_SECONDS = max(60, int(os.getenv("MEDIA_STALE_PROCESSING_SECONDS", "900")))
 MEDIA_CLEANUP_TOKEN = os.getenv("MEDIA_CLEANUP_TOKEN", "").strip()
 _s3 = None
 
@@ -104,7 +105,9 @@ async def publish(js, data: dict):
     subject = data.pop("_subject", "media.audio.transcribed")
     event_type = data.pop("_type", subject)
     event = {"id": os.urandom(16).hex(), "type": event_type, "occurredAt": datetime.now(timezone.utc).isoformat(), "source": "media-worker", "data": data}
-    await js.publish(subject, json.dumps(event).encode())
+    # asyncpg returns UUID/other PostgreSQL-native values. Events cross a JSON
+    # boundary, so normalize those values before handing the payload to NATS.
+    await js.publish(subject, json.dumps(event, default=str).encode())
 
 
 def s3_client():
@@ -228,21 +231,14 @@ async def on_media(db, js, message):
     media_key = data["mediaKey"]
     try:
         await db.execute("UPDATE messages SET media_status='processing' WHERE id=$1", message_id)
-        object_key, thumbnail_key, thumbnail_path, size, ocr_text = await asyncio.to_thread(stage_media, data)
-        await db.execute(
-            """INSERT INTO media_objects (message_id, media_key, object_key, thumbnail_key, object_path, thumbnail_path, mime, bytes, status, ocr_text, updated_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'completed',$9,NOW())
-               ON CONFLICT (message_id, media_key) DO UPDATE SET object_key=EXCLUDED.object_key, thumbnail_key=EXCLUDED.thumbnail_key,
-                 object_path=EXCLUDED.object_path, thumbnail_path=EXCLUDED.thumbnail_path, mime=EXCLUDED.mime, bytes=EXCLUDED.bytes,
-                 status='completed', error=NULL, ocr_text=EXCLUDED.ocr_text, updated_at=NOW()""",
-            message_id, media_key, object_key, thumbnail_key, data.get("objectPath"), thumbnail_path or None, data.get("mediaMime"), size, ocr_text or None,
-        )
+        ocr_text = await stage_and_record_media(db, data)
         await db.execute("UPDATE messages SET media_status='completed' WHERE id=$1", message_id)
         if ocr_text:
             await publish(js, {"_subject": "media.image.analyzed", "_type": "media.image.analyzed", "messageId": message_id, "ocrText": ocr_text, "provider": "tesseract"})
         if str(data.get("mediaMime", "")).startswith("audio/"):
             await db.execute("UPDATE audio_jobs SET object_path=$1 WHERE message_id=$2 AND media_key=$3", data.get("objectPath"), message_id, media_key)
-            await publish(js, {"_subject": "media.audio.requested", "_type": "media.audio.requested", "jobId": (await db.fetchval("SELECT id FROM audio_jobs WHERE message_id=$1 AND media_key=$2 ORDER BY created_at DESC LIMIT 1", message_id, media_key)), "messageId": message_id, "mediaKey": media_key, "mediaMime": data.get("mediaMime"), "objectPath": data.get("objectPath")})
+            job_id = await db.fetchval("SELECT id FROM audio_jobs WHERE message_id=$1 AND media_key=$2 ORDER BY created_at DESC LIMIT 1", message_id, media_key)
+            await publish(js, {"_subject": "media.audio.requested", "_type": "media.audio.requested", "jobId": str(job_id) if job_id else None, "messageId": message_id, "mediaKey": media_key, "mediaMime": data.get("mediaMime"), "objectPath": data.get("objectPath")})
         await message.ack()
     except Exception as error:
         await db.execute("UPDATE messages SET media_status='failed' WHERE id=$1", message_id)
@@ -251,9 +247,97 @@ async def on_media(db, js, message):
         await message.ack()
 
 
+async def stage_and_record_media(db, data: dict) -> str:
+    object_key, thumbnail_key, thumbnail_path, size, ocr_text = await asyncio.to_thread(stage_media, data)
+    await db.execute(
+        """INSERT INTO media_objects (message_id, media_key, object_key, thumbnail_key, object_path, thumbnail_path, mime, bytes, status, ocr_text, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'completed',$9,NOW())
+           ON CONFLICT (message_id, media_key) DO UPDATE SET object_key=EXCLUDED.object_key, thumbnail_key=EXCLUDED.thumbnail_key,
+             object_path=EXCLUDED.object_path, thumbnail_path=EXCLUDED.thumbnail_path, mime=EXCLUDED.mime, bytes=EXCLUDED.bytes,
+             status='completed', error=NULL, ocr_text=EXCLUDED.ocr_text, updated_at=NOW()""",
+        data["messageId"], data["mediaKey"], object_key, thumbnail_key, data.get("objectPath"), thumbnail_path or None,
+        data.get("mediaMime"), size, ocr_text or None,
+    )
+    return ocr_text
+
+
+def local_media_path(data: dict) -> Path | None:
+    platform = str(data.get("platform") or "")
+    message_id = str(data.get("waMessageId") or "")
+    media_key = str(data.get("mediaKey") or "")
+    if platform == "whatsapp" and message_id:
+        base = message_id
+    else:
+        base = "".join(value if value.isalnum() or value in "_-" else "_" for value in media_key)
+    if not base:
+        return None
+    candidates = sorted(path for path in (MEDIA_DIR / "incoming").glob(f"{base}*") if path.is_file())
+    if not candidates:
+        return None
+    media_mime = str(data.get("mediaMime") or "")
+    preferred = "." + media_mime.split("/", 1)[1].split(";", 1)[0] if "/" in media_mime else ""
+    for path in candidates:
+        if preferred and path.suffix.lower() == preferred.lower():
+            return path
+    return candidates[0]
+
+
+async def repair_local_media(db, js):
+    rows = await db.fetch(
+        """SELECT m.id, m.platform, m.wa_message_id, m.media_key, m.media_mime, m.kind
+           FROM messages m
+           WHERE m.has_media=TRUE AND m.media_key IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM media_objects mo
+               WHERE mo.message_id=m.id AND mo.status='completed' AND mo.object_path IS NOT NULL
+             )
+           ORDER BY m.received_at DESC"""
+    )
+    if not rows:
+        return
+    repaired = 0
+    for row in rows:
+        data = {
+            "messageId": str(row["id"]),
+            "mediaKey": str(row["media_key"]),
+            "mediaMime": row["media_mime"],
+            "platform": row["platform"],
+            "waMessageId": row["wa_message_id"],
+        }
+        source = local_media_path(data)
+        if source is None:
+            continue
+        data["objectPath"] = str(source)
+        try:
+            await stage_and_record_media(db, data)
+            await db.execute("UPDATE messages SET media_status='completed' WHERE id=$1", data["messageId"])
+            repaired += 1
+        except Exception:
+            log.exception("local media repair failed for %s", data["messageId"])
+    if repaired:
+        log.info("repaired %s local media file(s) without a completed media object", repaired)
+
+
 async def main():
     db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
-    nc = await nats.connect(NATS_URL)
+
+    async def on_disconnected():
+        log.warning("NATS connection lost; waiting for reconnect")
+
+    async def on_reconnected():
+        log.info("NATS connection restored")
+
+    async def on_nats_error(error):
+        log.error("NATS client error: %s", error)
+
+    nc = await nats.connect(
+        NATS_URL,
+        reconnect_time_wait=2,
+        max_reconnect_attempts=-1,
+        disconnected_cb=on_disconnected,
+        reconnected_cb=on_reconnected,
+        error_cb=on_nats_error,
+    )
     js = nc.jetstream()
     try:
         await js.stream_info("WAGI_EVENTS")
@@ -268,10 +352,21 @@ async def main():
             payload = json.loads(message.data)
             data = payload.get("data", payload)
             job_id = data["jobId"]
-            await db.execute("UPDATE audio_jobs SET status='processing', attempts=attempts+1, updated_at=NOW() WHERE id=$1", job_id)
+            current = await db.fetchrow("SELECT status FROM audio_jobs WHERE id=$1", job_id)
+            if not current or current["status"] == "completed":
+                await message.ack()
+                return
+            if current["status"] == "processing":
+                # A duplicate JetStream delivery must not run whisper.cpp twice.
+                await message.ack()
+                return
+            await db.execute("UPDATE audio_jobs SET status='processing', attempts=attempts+1, next_attempt_at=NULL, updated_at=NOW() WHERE id=$1", job_id)
             source = data.get("objectPath") or (await db.fetchval("SELECT object_path FROM audio_jobs WHERE id=$1", job_id)) or data.get("mediaKey", "unknown")
             if WHISPER_ENABLED and os.path.exists(source):
-                transcript, language, confidence = transcribe_with_whisper_cpp(source)
+                # whisper.cpp can run for minutes with the medium model. Keep
+                # the asyncio/NATS loop responsive so media jobs and JetStream
+                # heartbeats continue while transcription is in progress.
+                transcript, language, confidence = await asyncio.to_thread(transcribe_with_whisper_cpp, source)
                 provider = "whisper.cpp"
             else:
                 transcript, language, confidence = transcribe_placeholder(source)
@@ -287,8 +382,56 @@ async def main():
                 await db.execute("UPDATE audio_jobs SET status=$1, error=$2, next_attempt_at=CASE WHEN $1='queued' THEN NOW()+INTERVAL '30 seconds' ELSE NULL END, updated_at=NOW() WHERE id=$3", next_status, str(exc), job_id)
             await message.ack()
 
+    async def republish_due_audio_jobs():
+        """Recover queued jobs after a worker restart or a transient failure."""
+        while True:
+            try:
+                await db.execute(
+                    """UPDATE audio_jobs
+                       SET status=CASE WHEN attempts < $1 THEN 'queued' ELSE 'failed' END,
+                           error=COALESCE(error, 'worker restarted while audio job was processing'),
+                           next_attempt_at=CASE WHEN attempts < $1 THEN NOW() ELSE NULL END,
+                           updated_at=NOW()
+                       WHERE status='processing' AND updated_at < NOW() - ($2 * INTERVAL '1 second')""",
+                    MEDIA_MAX_RETRIES,
+                    MEDIA_STALE_PROCESSING_SECONDS,
+                )
+                rows = await db.fetch(
+                    """SELECT id::text, message_id::text, media_key, media_mime, object_path
+                       FROM audio_jobs
+                       WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+                       ORDER BY COALESCE(next_attempt_at, created_at), created_at
+                       LIMIT 20"""
+                )
+                for row in rows:
+                    claimed = await db.execute(
+                        """UPDATE audio_jobs SET next_attempt_at=NOW()+INTERVAL '2 minutes', updated_at=NOW()
+                           WHERE id=$1 AND status='queued' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())""",
+                        row["id"],
+                    )
+                    if claimed != "UPDATE 1":
+                        continue
+                    try:
+                        await publish(js, {
+                            "_subject": "media.audio.requested",
+                            "_type": "media.audio.requested",
+                            "jobId": str(row["id"]),
+                            "messageId": str(row["message_id"]),
+                            "mediaKey": row["media_key"],
+                            "mediaMime": row["media_mime"],
+                            "objectPath": row["object_path"],
+                        })
+                    except Exception:
+                        await db.execute("UPDATE audio_jobs SET next_attempt_at=NOW(), updated_at=NOW() WHERE id=$1 AND status='queued'", row["id"])
+                        log.exception("could not republish audio job %s", row["id"])
+            except Exception:
+                log.exception("audio retry scheduler failed")
+            await asyncio.sleep(5)
+
     await js.subscribe("media.objects.requested", durable="WAGI_MEDIA_OBJECTS", stream="WAGI_EVENTS", cb=lambda message: on_media(db, js, message))
     await js.subscribe("media.audio.requested", durable="WAGI_MEDIA_AUDIO", stream="WAGI_EVENTS", cb=on_audio)
+    asyncio.create_task(repair_local_media(db, js))
+    asyncio.create_task(republish_due_audio_jobs())
     async def on_cleanup_request(message):
         await on_group_cleanup(db, message)
 

@@ -21,7 +21,11 @@ const natsUrl = process.env.NATS_URL ?? "nats://localhost:4222";
 const authDir = process.env.WA_AUTH_DIR ?? "./data/wa-auth";
 const mediaDir = process.env.MEDIA_DIR ?? "./data/media";
 const syncHistory = (process.env.WA_SYNC_HISTORY ?? "false").toLowerCase() === "true";
-const backfillDays = Math.max(1, Number(process.env.WA_BACKFILL_DAYS ?? 3));
+const backfillDays = Math.max(1, Number(process.env.WA_BACKFILL_DAYS ?? 7));
+const backfillThrottleMs = Math.max(0, Number(process.env.WA_BACKFILL_THROTTLE_MS ?? 250));
+const backfillGroupDelayMs = Math.max(0, Number(process.env.WA_BACKFILL_GROUP_DELAY_MS ?? 1500));
+const mediaDownloadTimeoutMs = Math.max(10_000, Number(process.env.WA_MEDIA_DOWNLOAD_TIMEOUT_MS ?? 30_000));
+const mediaDownloadAttempts = Math.max(1, Number(process.env.WA_MEDIA_DOWNLOAD_ATTEMPTS ?? 3));
 const mockMode = (process.env.WA_MOCK_MODE ?? "false").toLowerCase() === "true";
 const groupRefreshIntervalMs = Math.max(30_000, Number(process.env.GROUP_REFRESH_INTERVAL_MS ?? 60_000));
 const mediaCleanupToken = (process.env.MEDIA_CLEANUP_TOKEN ?? "").trim();
@@ -43,6 +47,9 @@ let waSocket: ReturnType<typeof makeWASocket> | null = null;
 const pendingHistory = new Map<string, WAMessage[]>();
 let groupRefreshTimer: NodeJS.Timeout | null = null;
 let groupRefreshInProgress = false;
+let reconnectTimer: NodeJS.Timeout | null = null;
+let reconnectAttempts = 0;
+let connectInProgress = false;
 
 async function prepareInitialActivation() {
   const existing = await pool.query<{ initial_backfill_completed_at: string | null }>(
@@ -64,6 +71,10 @@ async function completeInitialActivation() {
   if (!initialActivation) return;
   await pool.query("UPDATE connector_states SET initial_backfill_completed_at=NOW(), updated_at=NOW() WHERE connector='whatsapp'");
   initialActivation = false;
+}
+
+function backfillDelay(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function setStatus(status: typeof lifecycleStatus, detail?: string, error?: unknown) {
@@ -185,10 +196,10 @@ async function refreshAllWhatsAppGroupNames(socket: ReturnType<typeof makeWASock
   }
 }
 
-function startGroupRefreshTimer(socket: ReturnType<typeof makeWASocket>) {
+function startGroupRefreshTimer() {
   if (groupRefreshTimer) return;
   groupRefreshTimer = setInterval(() => {
-    if (connected) void refreshAllWhatsAppGroupNames(socket);
+    if (connected && waSocket) void refreshAllWhatsAppGroupNames(waSocket);
   }, groupRefreshIntervalMs);
   groupRefreshTimer.unref?.();
 }
@@ -226,6 +237,46 @@ function replyToWaMessageId(message: WAMessage): string | undefined {
     ?? undefined;
 }
 
+function mediaMimeFor(message: WAMessage, kind: WhatsAppMessageReceived["kind"]) {
+  if (kind === "audio") return message.message?.audioMessage?.mimetype ?? undefined;
+  if (kind === "image") return message.message?.imageMessage?.mimetype ?? undefined;
+  if (kind === "video") return message.message?.videoMessage?.mimetype ?? undefined;
+  if (kind === "document") return message.message?.documentMessage?.mimetype ?? undefined;
+  return undefined;
+}
+
+async function withTimeout<T>(operation: Promise<T>, milliseconds: number) {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`WhatsApp media download timeout after ${milliseconds} ms`)), milliseconds); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function downloadWhatsAppMedia(message: WAMessage, socket: ReturnType<typeof makeWASocket>) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= mediaDownloadAttempts; attempt += 1) {
+    try {
+      return await withTimeout(
+        downloadMediaMessage(message, "buffer", {}, {
+          logger: downloadLogger,
+          reuploadRequest: async (sourceMessage) => socket.updateMediaMessage(sourceMessage),
+        }),
+        mediaDownloadTimeoutMs,
+      );
+    } catch (error) {
+      lastError = error;
+      console.warn(`WhatsApp media download attempt ${attempt}/${mediaDownloadAttempts} failed`, message.key.id, error);
+      if (attempt < mediaDownloadAttempts) await backfillDelay(1_000 * attempt);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 async function persistMessage(message: WAMessage) {
   const groupId = message.key.remoteJid;
   const waMessageId = message.key.id;
@@ -236,43 +287,49 @@ async function persistMessage(message: WAMessage) {
 
   const kind = messageKind(message);
   const hasMedia = kind === "audio" || kind === "image" || kind === "video" || kind === "document";
-  const mediaMime = kind === "audio" ? message.message?.audioMessage?.mimetype ?? undefined : undefined;
+  const mediaMime = mediaMimeFor(message, kind);
   const timestamp = Number(message.messageTimestamp ?? Math.floor(Date.now() / 1000));
-  if (initialActivation && new Date(timestamp * 1000) < backfillCutoff) return;
+  // The cutoff is reset at every process start. This keeps delayed history
+  // events bounded to the requested restart window as well as live updates.
+  if (new Date(timestamp * 1000) < backfillCutoff) return;
   const raw = JSON.parse(JSON.stringify(message, (_, value) => typeof value === "bigint" ? Number(value) : value));
   const text = messageText(message);
   const contentHash = createHash("sha256").update(JSON.stringify({ groupId, waMessageId, kind, text, raw })).digest("hex");
-  const previous = await pool.query<{ id: string; content_hash: string | null; deleted_at: string | null }>(
-    "SELECT id, content_hash, deleted_at FROM messages WHERE group_id = $1 AND wa_message_id = $2", [groupId, waMessageId],
+  const previous = await pool.query<{ id: string; content_hash: string | null; deleted_at: string | null; media_object_path: string | null }>(
+    `SELECT m.id, m.content_hash, m.deleted_at,
+            (SELECT mo.object_path FROM media_objects mo WHERE mo.message_id=m.id AND mo.status='completed' AND mo.object_path IS NOT NULL ORDER BY mo.updated_at DESC LIMIT 1) AS media_object_path
+     FROM messages m WHERE m.group_id = $1 AND m.wa_message_id = $2`, [groupId, waMessageId],
   );
-  if (previous.rows[0]?.content_hash === contentHash && !previous.rows[0]?.deleted_at) return;
+  const mediaAlreadyStored = !hasMedia || Boolean(previous.rows[0]?.media_object_path);
+  if (previous.rows[0]?.content_hash === contentHash && !previous.rows[0]?.deleted_at && mediaAlreadyStored) return;
   let objectPath: string | undefined;
   const mediaKey = hasMedia ? `${groupId}/${waMessageId}` : undefined;
-  if (hasMedia && !mockMode) {
+  if (hasMedia && !mockMode && waSocket) {
     try {
-      const media = await downloadMediaMessage(message, "buffer", {}, { logger: downloadLogger, reuploadRequest: async (sourceMessage) => sourceMessage });
+      const media = await downloadWhatsAppMedia(message, waSocket);
       const safeName = waMessageId.replace(/[^a-zA-Z0-9_-]/g, "_");
       const extension = mediaMime?.split("/")[1]?.split(";")[0] ?? kind;
       objectPath = join(mediaDir, "incoming", `${safeName}.${extension}`);
       await mkdir(join(mediaDir, "incoming"), { recursive: true });
       await writeFile(objectPath, media);
     } catch (error) {
-      console.warn("WhatsApp media download failed", waMessageId, error);
+      console.warn("WhatsApp media download failed after retries", waMessageId, error);
     }
   }
+  const mediaStatus = !hasMedia ? "none" : objectPath ? "completed" : "pending";
   const result = await pool.query<{ id: string }>(
     `INSERT INTO messages (group_id, wa_message_id, platform, external_chat_id, sender_jid, sender_name, kind, text, received_at, has_media, media_key, media_mime, raw, content_hash, sequence_no, media_status, edited_at, deleted_at)
-     VALUES ($1,$2,'whatsapp',$1,$3,$4,$5,$6,to_timestamp($7),$8,$9,$10,$11,$12,$7,CASE WHEN $8 THEN 'completed' ELSE 'none' END,CASE WHEN $13 THEN NOW() ELSE NULL END,NULL)
+     VALUES ($1,$2,'whatsapp',$1,$3,$4,$5,$6,to_timestamp($7),$8,$9,$10,$11,$12,$7,$13,CASE WHEN $14 THEN NOW() ELSE NULL END,NULL)
      ON CONFLICT (group_id, wa_message_id) DO UPDATE SET sender_jid = EXCLUDED.sender_jid,
        sender_name = EXCLUDED.sender_name, kind = EXCLUDED.kind, text = EXCLUDED.text,
        received_at = EXCLUDED.received_at, has_media = EXCLUDED.has_media,
        media_key = EXCLUDED.media_key, media_mime = EXCLUDED.media_mime, raw = EXCLUDED.raw,
        content_hash = EXCLUDED.content_hash, sequence_no = EXCLUDED.sequence_no,
-       media_status = CASE WHEN EXCLUDED.media_status = 'completed' THEN 'completed' ELSE messages.media_status END,
+       media_status = EXCLUDED.media_status,
        edited_at = CASE WHEN messages.content_hash IS NOT NULL THEN NOW() ELSE messages.edited_at END
      RETURNING id`,
     [groupId, waMessageId, message.key.participant ?? "unknown", message.pushName ?? null, kind, text ?? null,
-      timestamp, hasMedia, mediaKey ?? null, mediaMime ?? null, raw, contentHash, Boolean(previous.rows[0])],
+      timestamp, hasMedia, mediaKey ?? null, mediaMime ?? null, raw, contentHash, mediaStatus, Boolean(previous.rows[0])],
   );
   const messageId = result.rows[0].id;
   const revisionCount = await pool.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM message_revisions WHERE message_id = $1", [messageId]);
@@ -335,6 +392,45 @@ async function requestWhatsAppHistory(groupId: string) {
   }
 }
 
+async function backfillSelectedWhatsAppGroups(socket: ReturnType<typeof makeWASocket>) {
+  const selected = await pool.query<{ id: string }>(
+    "SELECT id FROM wa_groups WHERE platform='whatsapp' AND is_selected=TRUE ORDER BY subject",
+  );
+  for (const [index, group] of selected.rows.entries()) {
+    if (index > 0) await backfillDelay(backfillGroupDelayMs);
+    await requestWhatsAppHistory(group.id);
+  }
+}
+
+async function retryMissingWhatsAppMedia(socket: ReturnType<typeof makeWASocket>) {
+  const rows = await pool.query<{ id: string; raw: WAMessage }>(
+    `SELECT m.id, m.raw
+     FROM messages m
+     JOIN wa_groups g ON g.id = m.group_id AND g.platform='whatsapp' AND g.is_selected=TRUE
+     LEFT JOIN LATERAL (
+       SELECT mo.message_id
+       FROM media_objects mo
+       WHERE mo.message_id = m.id AND mo.status='completed' AND mo.object_path IS NOT NULL
+       LIMIT 1
+     ) stored ON TRUE
+     WHERE m.platform='whatsapp' AND m.has_media=TRUE AND m.kind IN ('image','video')
+       AND m.received_at >= $1 AND stored.message_id IS NULL
+     ORDER BY m.received_at DESC`,
+    [backfillCutoff],
+  );
+  if (!rows.rows.length) return;
+  console.log(`Retrying ${rows.rows.length} missing WhatsApp image/video file(s)`);
+  for (const row of rows.rows) {
+    if (!connected || waSocket !== socket) return;
+    try {
+      await persistMessage(row.raw);
+    } catch (error) {
+      console.warn("WhatsApp pending media retry failed", row.id, error);
+    }
+    await backfillDelay(backfillThrottleMs);
+  }
+}
+
 async function handleGroupSelection(data: GroupSelectionChanged) {
   if (data.platform && data.platform !== "whatsapp") return;
   const groupId = data.groupId;
@@ -346,7 +442,10 @@ async function handleGroupSelection(data: GroupSelectionChanged) {
   }
   const pending = pendingHistory.get(groupId) ?? [];
   pendingHistory.delete(groupId);
-  for (const message of pending) await persistMessage(message);
+  for (const message of pending) {
+    await persistMessage(message);
+    await backfillDelay(backfillThrottleMs);
+  }
   await requestWhatsAppHistory(groupId);
 }
 
@@ -364,64 +463,126 @@ function subscribeGroupSelections() {
   })();
 }
 
+function scheduleWhatsAppReconnect(reason?: unknown) {
+  if (mockMode || reconnectTimer || lifecycleStatus === "reauth_required" || lifecycleStatus === "stopped") return;
+  connected = false;
+  waSocket = null;
+  reconnectAttempts = Math.min(reconnectAttempts + 1, 10);
+  const delayMs = Math.min(30_000, 3_000 * 2 ** (reconnectAttempts - 1));
+  void setStatus("degraded", `Verbindung unterbrochen; erneuter Versuch in ${Math.ceil(delayMs / 1000)} s`, reason).catch((error) => console.warn("WhatsApp reconnect status failed", error));
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void connectWhatsApp().catch((error) => scheduleWhatsAppReconnect(error));
+  }, delayMs);
+  reconnectTimer.unref?.();
+}
+
 async function connectWhatsApp() {
-  await setStatus("connecting", `Baileys wird verbunden; Erst-Backfill: ${initialActivation ? `${backfillDays} Tage` : "bereits abgeschlossen"}`);
-  await mkdir(authDir, { recursive: true });
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
-  // WhatsApp currently terminates Baileys sessions that advertise the
-  // macOS/DARWIN desktop sub-platform before sending the QR event. Use the
-  // browser profile so fresh linked-device registration reaches pair-device.
-  const socket = makeWASocket({ auth: state, browser: Browsers.ubuntu("Chrome"), printQRInTerminal: false, syncFullHistory: syncHistory || initialActivation });
-  waSocket = socket;
-  socket.ev.on("creds.update", saveCreds);
-  socket.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
+  if (connectInProgress || mockMode) return;
+  connectInProgress = true;
+  try {
+    await setStatus("connecting", `Baileys wird verbunden; ${initialActivation ? "Erst-" : "Neustart-"}Backfill: ${backfillDays} Tage`);
+    await mkdir(authDir, { recursive: true });
+    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    // WhatsApp currently terminates Baileys sessions that advertise the
+    // macOS/DARWIN desktop sub-platform before sending the QR event. Use the
+    // browser profile so fresh linked-device registration reaches pair-device.
+    const socket = makeWASocket({
+      auth: state,
+      browser: Browsers.ubuntu("Chrome"),
+      printQRInTerminal: false,
+      syncFullHistory: syncHistory || initialActivation,
+      // This connector is read-only. Baileys' optional props/blocklist/privacy
+      // init queries can time out on an otherwise healthy linked-device socket;
+      // skipping them avoids a noisy 60-second error without affecting group
+      // discovery, message reception, or media downloads.
+      fireInitQueries: false,
+    });
+    waSocket = socket;
+    socket.ev.on("creds.update", saveCreds);
+    socket.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) { latestQr = qr; void setStatus("pairing", "QR-Code zur erneuten Anmeldung scannen"); qrcode.generate(qr, { small: true }); }
     connected = connection === "open";
     if (connection === "connecting") void setStatus("connecting", "WhatsApp-Verbindung wird aufgebaut");
-    if (connection === "open") { connectedAt = new Date().toISOString(); latestQr = null; void setStatus(initialActivation ? "syncing" : "ready", initialActivation ? `Erst-Backfill der letzten ${backfillDays} Tage läuft` : "WhatsApp verbunden"); startGroupRefreshTimer(socket); void refreshAllWhatsAppGroupNames(socket); }
+    if (connection === "open") {
+      reconnectAttempts = 0;
+      connectedAt = new Date().toISOString();
+      latestQr = null;
+      void setStatus("syncing", `${initialActivation ? "Erst-" : "Neustart-"}Backfill der letzten ${backfillDays} Tage läuft`);
+      startGroupRefreshTimer();
+      void (async () => {
+        await refreshAllWhatsAppGroupNames(socket);
+        await backfillSelectedWhatsAppGroups(socket);
+        void retryMissingWhatsAppMedia(socket)
+          .catch((error) => console.warn("WhatsApp missing-media repair failed", error));
+        await setStatus("ready", `WhatsApp verbunden; ${backfillDays}-Tage-Backfill eingeplant, Medienreparatur läuft im Hintergrund`);
+      })().catch((error) => void setStatus("degraded", "WhatsApp-Backfill konnte nicht vollständig gestartet werden", error));
+    }
     if (connection === "close") {
       const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
       if (statusCode === DisconnectReason.loggedOut) void setStatus("reauth_required", "Session abgemeldet; erneutes QR-Pairing erforderlich");
-      else { void setStatus("degraded", "Verbindung unterbrochen; Reconnect wird versucht", lastDisconnect?.error); setTimeout(() => void connectWhatsApp(), 3000); }
+      else scheduleWhatsAppReconnect(lastDisconnect?.error);
     }
   });
-  socket.ev.on("groups.upsert", async (groups) => {
-    for (const group of groups) {
-      const subject = group.subject?.trim() || group.id;
-      await upsertGroup({ groupId: group.id, subject, ownerJid: group.owner ?? undefined, participantCount: group.participants?.length ?? 0, isSelected: allowlistedGroup(group.id), platform: "whatsapp", chatType: "group" });
-      await refreshGroupName(socket, group.id, subject);
-    }
-  });
-  socket.ev.on("messages.upsert", async ({ messages }) => {
-    for (const message of messages) await persistMessage(message);
-  });
-  (socket.ev as any).on("messaging-history.set", async (history: { messages?: WAMessage[]; chats?: Array<{ id: string; name?: string; subject?: string; participants?: unknown[] }> }) => {
-    void setStatus("syncing", "WhatsApp-History wird kontrolliert übernommen");
-    for (const chat of history.chats ?? []) {
-      if (chat.id.endsWith("@g.us")) {
-        const subject = chat.name?.trim() || chat.subject?.trim() || chat.id;
-        await upsertGroup({ groupId: chat.id, subject, participantCount: chat.participants?.length ?? 0, isSelected: allowlistedGroup(chat.id), platform: "whatsapp", chatType: "group" });
-        await refreshGroupName(socket, chat.id, subject);
+    socket.ev.on("groups.upsert", async (groups) => {
+      try {
+        for (const group of groups) {
+          const subject = group.subject?.trim() || group.id;
+          await upsertGroup({ groupId: group.id, subject, ownerJid: group.owner ?? undefined, participantCount: group.participants?.length ?? 0, isSelected: allowlistedGroup(group.id), platform: "whatsapp", chatType: "group" });
+          await refreshGroupName(socket, group.id, subject);
+        }
+      } catch (error) {
+        console.warn("WhatsApp group update failed", error);
       }
-    }
-    for (const message of history.messages ?? []) await queueOrPersistHistory(message);
-    if (initialActivation) {
-      await completeInitialActivation();
-      if (connected) await setStatus("ready", `Erst-Backfill der letzten ${backfillDays} Tage abgeschlossen`);
-    } else if (connected) void setStatus("ready", "History Sync abgeschlossen");
-  });
-  (socket.ev as any).on("messages.update", async (updates: Array<{ key: WAMessage["key"]; update?: { message?: WAMessage["message"] } }>) => {
-    for (const update of updates) {
-      if (update.update?.message) await persistMessage({ key: update.key, message: update.update.message } as WAMessage);
-    }
-  });
-  (socket.ev as any).on("messages.delete", async (payload: { keys?: WAMessage["key"][] }) => {
-    for (const key of payload.keys ?? []) {
-      if (!key.remoteJid || !key.id) continue;
-      const result = await pool.query<{ id: string }>("UPDATE messages SET deleted_at=NOW(), media_status='deleted' WHERE group_id=$1 AND wa_message_id=$2 RETURNING id", [key.remoteJid, key.id]);
-      if (result.rows[0]) await pool.query("INSERT INTO message_revisions (message_id, revision_no, change_type, text) SELECT $1, COALESCE(MAX(revision_no),0)+1, 'deleted', NULL FROM message_revisions WHERE message_id=$1", [result.rows[0].id]);
-    }
-  });
+    });
+    socket.ev.on("messages.upsert", async ({ messages }) => {
+      for (const message of messages) {
+        try { await persistMessage(message); }
+        catch (error) { console.warn("WhatsApp message persistence failed", message.key.id, error); }
+      }
+    });
+    (socket.ev as any).on("messaging-history.set", async (history: { messages?: WAMessage[]; chats?: Array<{ id: string; name?: string; subject?: string; participants?: unknown[] }> }) => {
+      try {
+        void setStatus("syncing", "WhatsApp-History wird kontrolliert übernommen");
+        for (const chat of history.chats ?? []) {
+          if (chat.id.endsWith("@g.us")) {
+            const subject = chat.name?.trim() || chat.subject?.trim() || chat.id;
+            await upsertGroup({ groupId: chat.id, subject, participantCount: chat.participants?.length ?? 0, isSelected: allowlistedGroup(chat.id), platform: "whatsapp", chatType: "group" });
+            await refreshGroupName(socket, chat.id, subject);
+          }
+        }
+        for (const message of history.messages ?? []) {
+          try { await queueOrPersistHistory(message); }
+          catch (error) { console.warn("WhatsApp history message failed", message.key.id, error); }
+          await backfillDelay(backfillThrottleMs);
+        }
+        if (initialActivation) {
+          await completeInitialActivation();
+          if (connected) await setStatus("ready", `Erst-Backfill der letzten ${backfillDays} Tage abgeschlossen`);
+        } else if (connected) void setStatus("ready", "History Sync abgeschlossen");
+      } catch (error) {
+        await setStatus("degraded", "WhatsApp-History konnte nicht vollständig verarbeitet werden", error);
+      }
+    });
+    (socket.ev as any).on("messages.update", async (updates: Array<{ key: WAMessage["key"]; update?: { message?: WAMessage["message"] } }>) => {
+      for (const update of updates) {
+        try {
+          if (update.update?.message) await persistMessage({ key: update.key, message: update.update.message } as WAMessage);
+        } catch (error) { console.warn("WhatsApp message update failed", update.key.id, error); }
+      }
+    });
+    (socket.ev as any).on("messages.delete", async (payload: { keys?: WAMessage["key"][] }) => {
+      try {
+        for (const key of payload.keys ?? []) {
+          if (!key.remoteJid || !key.id) continue;
+          const result = await pool.query<{ id: string }>("UPDATE messages SET deleted_at=NOW(), media_status='deleted' WHERE group_id=$1 AND wa_message_id=$2 RETURNING id", [key.remoteJid, key.id]);
+          if (result.rows[0]) await pool.query("INSERT INTO message_revisions (message_id, revision_no, change_type, text) SELECT $1, COALESCE(MAX(revision_no),0)+1, 'deleted', NULL FROM message_revisions WHERE message_id=$1", [result.rows[0].id]);
+        }
+      } catch (error) { console.warn("WhatsApp delete event failed", error); }
+    });
+  } finally {
+    connectInProgress = false;
+  }
 }
 
 type MockReply = { waMessageId: string; participant: string; quotedText: string };
@@ -541,7 +702,7 @@ const server = createServer(async (request, response) => {
     if (request.url === "/healthz") return respond(response, 200, { status: "ok", service: "wa-connector" });
     if (request.url === "/readyz") return respond(response, lifecycleStatus === "ready" || mockMode ? 200 : 503, { status: lifecycleStatus, mode: mockMode ? "mock" : "baileys", lastError });
     if (request.url === "/status" || request.url === "/pairing") {
-      return respond(response, 200, { connector: "whatsapp", status: lifecycleStatus, connected, qr: latestQr, connectedAt, lastError, mode: mockMode ? "mock" : "baileys", historySync: syncHistory || initialActivation, initialBackfillActive: initialActivation, backfillDays });
+      return respond(response, 200, { connector: "whatsapp", status: lifecycleStatus, connected, qr: latestQr, connectedAt, lastError, mode: mockMode ? "mock" : "baileys", historySync: syncHistory || initialActivation, initialBackfillActive: initialActivation, backfillDays, backfillThrottleMs, backfillGroupDelayMs });
     }
     if (request.method === "GET" && request.url === "/groups") {
       const groups = await pool.query("SELECT id, subject, participant_count, is_selected, discovered_at FROM wa_groups ORDER BY subject");
@@ -568,7 +729,14 @@ async function main() {
   await prepareInitialActivation();
   server.listen(port, () => console.log(`wa-connector listening on :${port} (${mockMode ? "mock" : "baileys"})`));
   if (mockMode) { connected = true; connectedAt = new Date().toISOString(); await setStatus("syncing", initialActivation ? `Mock-Backfill der letzten ${backfillDays} Tage läuft` : "Mock-Daten aktiv"); await seedMockData(); await completeInitialActivation(); await setStatus("ready", "Mock-Daten aktiv"); }
-  else await connectWhatsApp();
+  else {
+    try {
+      await connectWhatsApp();
+    } catch (error) {
+      console.error("Initial WhatsApp connection failed", error);
+      scheduleWhatsAppReconnect(error);
+    }
+  }
 }
 
 void main().catch((error) => { console.error(error); process.exitCode = 1; });

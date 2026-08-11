@@ -1,0 +1,10 @@
+{"id":"de-event-01","language":"de","text":"Die Wanderung startet am Samstag um 10 Uhr am Parkplatz Montserrat.","expected":{"relevant":true,"event":true,"place":true,"knowledgeTopic":"travel"}}
+{"id":"de-noise-01","language":"de","text":"Danke für die Info, bis später!","expected":{"relevant":false,"event":false,"place":false,"knowledgeTopic":null}}
+{"id":"es-event-01","language":"es","text":"La excursión empieza el domingo a las 09:30 en la estación de Girona.","expected":{"relevant":true,"event":true,"place":true,"knowledgeTopic":"travel"}}
+{"id":"es-knowledge-01","language":"es","text":"El servidor Docker necesita el puerto 8080 y la actualización de configuración.","expected":{"relevant":true,"event":false,"place":false,"knowledgeTopic":"technology"}}
+{"id":"ca-event-01","language":"ca","text":"Ens trobem demà a les 18:00 davant del restaurant de la platja.","expected":{"relevant":true,"event":true,"place":true,"knowledgeTopic":"travel"}}
+{"id":"ca-noise-01","language":"ca","text":"Moltes gràcies, bona nit!","expected":{"relevant":false,"event":false,"place":false,"knowledgeTopic":null}}
+{"id":"en-knowledge-01","language":"en","text":"The APRS gateway uses 144.800 MHz and reaches the north repeater.","expected":{"relevant":true,"event":false,"place":false,"knowledgeTopic":"radio"}}
+{"id":"en-event-01","language":"en","text":"The meeting is tomorrow at 14:00 at the Barcelona office.","expected":{"relevant":true,"event":true,"place":true,"knowledgeTopic":"places"}}
+{"id":"fr-knowledge-01","language":"fr","text":"Le serveur API utilise le port 443 après la mise à jour réseau.","expected":{"relevant":true,"event":false,"place":false,"knowledgeTopic":"technology"}}
+{"id":"fr-noise-01","language":"fr","text":"Merci beaucoup, à bientôt !","expected":{"relevant":false,"event":false,"place":false,"knowledgeTopic":null}}

@@ -10,7 +10,7 @@ Voraussetzungen: Docker oder Colima mit `docker-compose` sowie Node.js 20 und np
 
 ```bash
 cp .env.example .env
-docker-compose -f infra/docker/docker-compose.yml up --build
+docker-compose --env-file .env -f infra/docker/docker-compose.yml up --build
 ```
 
 Danach:
@@ -31,7 +31,7 @@ Alle Einstellungen werden über `.env` gesetzt. Die Ausgangswerte stehen in
 betroffenen Services neu erstellen:
 
 ```bash
-docker-compose -f infra/docker/docker-compose.yml up -d --build wa-connector tg-connector ai-worker media-worker
+docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector tg-connector ai-worker media-worker
 ```
 
 `.env` enthält Zugangsdaten und darf nicht committed werden. Innerhalb der
@@ -73,7 +73,7 @@ ausgewählten Untergruppe gespeichert.
 Anschließend die Konnektoren und das Web-Dashboard neu erstellen:
 
 ```bash
-docker-compose -f infra/docker/docker-compose.yml up -d --build wa-connector tg-connector web
+docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector tg-connector web
 ```
 
 Das Dashboard ruft die lokalen Connectoren automatisch ab. Danach gilt:
@@ -116,14 +116,16 @@ WA_MOCK_MODE=true
 WA_GROUP_ALLOWLIST=
 WA_AUTH_DIR=./data/wa-auth
 WA_SYNC_HISTORY=false
-WA_BACKFILL_DAYS=3
+WA_BACKFILL_DAYS=7
+WA_BACKFILL_THROTTLE_MS=250
+WA_BACKFILL_GROUP_DELAY_MS=1500
 ```
 
 Für ein echtes Konto:
 
 1. `WA_MOCK_MODE=false` in `.env` setzen.
-2. Den Konnektor starten: `docker-compose -f infra/docker/docker-compose.yml up -d --build wa-connector`.
-3. Das Dashboard öffnen und den angezeigten QR-Code in WhatsApp unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen. Alternativ kann der QR-Code weiterhin mit `docker-compose -f infra/docker/docker-compose.yml logs -f wa-connector` betrachtet werden.
+2. Den Konnektor starten: `docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector`.
+3. Das Dashboard öffnen und den angezeigten QR-Code in WhatsApp unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen. Alternativ kann der QR-Code weiterhin mit `docker-compose --env-file .env -f infra/docker/docker-compose.yml logs -f wa-connector` betrachtet werden.
 4. Den persistenten Compose-Speicher `wa_auth` beibehalten. Dadurch muss das Gerät nach Neustarts nicht erneut gekoppelt werden.
 5. Gruppen im Dashboard auswählen oder bereits beim Einlesen mit `WA_GROUP_ALLOWLIST` begrenzen.
 
@@ -134,12 +136,12 @@ eigentliche Verarbeitung eingehender Nachrichten erfolgt nur für Gruppen, die
 in der Datenbank als ausgewählt markiert sind. Die Auswahl kann jederzeit im
 Dashboard geändert werden.
 
-Bei der ersten Aktivierung eines WhatsApp-Konnektors wird automatisch ein
-History-Sync gestartet. Es werden nur Nachrichten innerhalb des Zeitfensters
-`WA_BACKFILL_DAYS` (Standard: drei Tage) persistiert und an die Medien-/KI-
-Pipeline weitergegeben. Der Backfill wird in `connector_states` als erledigt
-gespeichert und bei späteren Reconnects nicht erneut ausgeführt. Ein erneuter
-Backfill kann über den Status der Connector-Session nachvollzogen werden.
+Bei der ersten Aktivierung und bei jedem Systemneustart eines WhatsApp-
+Konnektors werden nur Nachrichten innerhalb des Zeitfensters
+`WA_BACKFILL_DAYS` (Standard: sieben Tage) persistiert und an die Medien-/KI-
+Pipeline weitergegeben. `WA_BACKFILL_THROTTLE_MS` pausiert zwischen einzelnen
+Nachrichten, `WA_BACKFILL_GROUP_DELAY_MS` zwischen Gruppen. Beide Werte sind
+konfigurierbar und begrenzen die Belastung der WhatsApp-Schnittstelle.
 
 Die WhatsApp-Gruppenliste wird nach jeder erfolgreichen Verbindung und danach
 regelmäßig aktualisiert. Das Intervall wird über
@@ -177,7 +179,9 @@ TG_PHONE=+491701234567
 TG_SESSION=
 TG_GROUP_ALLOWLIST=
 TG_STATE_DIR=./data/tg-state
-TG_BACKFILL_DAYS=3
+TG_BACKFILL_DAYS=7
+TG_BACKFILL_THROTTLE_MS=500
+TG_BACKFILL_GROUP_DELAY_MS=2000
 TG_CONNECTION_RETRIES=12
 TG_REQUEST_RETRIES=8
 TG_DOWNLOAD_RETRIES=8
@@ -201,10 +205,13 @@ entdeckt; keine Gruppe wird automatisch aktiviert. Die Liste wird nach dem
 Verbindungsaufbau und anschließend regelmäßig mit
 `GROUP_REFRESH_INTERVAL_MS` (Standard: 60 Sekunden, mindestens 30 Sekunden)
 aktualisiert. Supergroup-Topics werden bei der Synchronisierung als
-Untergruppen geführt. Beim Aktivieren eines
-Eintrags lädt der Connector höchstens die letzten `TG_BACKFILL_DAYS` (Standard:
-drei) Tage nach und empfängt anschließend neue Nachrichten über MTProto-
-Events. Das gilt auch für später neu entdeckte Gruppen und Channels.
+Untergruppen geführt. Beim Aktivieren eines Eintrags und bei jedem Neustart
+lädt der Connector höchstens die letzten `TG_BACKFILL_DAYS` (Standard:
+sieben) Tage nach und empfängt anschließend neue Nachrichten über MTProto-
+Events. Der Neustart-Backfill pausiert standardmäßig 500 ms zwischen
+Nachrichten und 2 Sekunden zwischen Gruppen; die Werte lassen sich über
+`TG_BACKFILL_THROTTLE_MS` und `TG_BACKFILL_GROUP_DELAY_MS` anpassen. Das gilt
+auch für später neu entdeckte Gruppen und Channels.
 
 Wenn ein Nutzer eine Gruppe, einen Channel oder ein Topic verlässt, wird der
 Eintrag nach einem erfolgreichen Telegram-Snapshot aus der Auswahl und dem
@@ -232,7 +239,7 @@ TG_BOT_TOKEN=123456789:replace-with-token-from-botfather
 TG_GROUP_ALLOWLIST=
 TG_STATE_DIR=./data/tg-state
 TG_POLL_TIMEOUT=25
-TG_BACKFILL_DAYS=3
+TG_BACKFILL_DAYS=7
 TG_CONNECTION_RETRIES=12
 TG_REQUEST_RETRIES=8
 TG_DOWNLOAD_RETRIES=8
@@ -246,7 +253,7 @@ Einrichtung des optionalen Bot-Fallbacks:
 2. Den Bot zu den gewünschten Gruppen, Supergroups oder Channels hinzufügen.
 3. In Gruppen den Bot als Administrator setzen oder beim BotFather mit `/setprivacy` den Privacy Mode deaktivieren, damit normale Gruppennachrichten zugestellt werden.
 4. In Channels den Bot als Mitglied hinzufügen; für administrative Bot-Aktionen sind passende Rechte erforderlich.
-5. Den Konnektor starten: `docker-compose -f infra/docker/docker-compose.yml up -d --build tg-connector`.
+5. Den Konnektor starten: `docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build tg-connector`.
 6. Unter `http://localhost:3000` den Telegram-Status prüfen; `http://localhost:3002/bot` und `http://localhost:3002/readyz` bleiben als technische Status-Endpunkte verfügbar.
 
 Mit `TG_GROUP_ALLOWLIST` kann die Verarbeitung begrenzt werden. Unterstützt
@@ -280,13 +287,72 @@ externer LLM-Provider ist noch nicht angeschlossen; Provider, API-Key,
 Prompt-Versionen und Modellwahl werden später hinter einem AI-Adapter ergänzt.
 Der Worker verbindet sich in Compose automatisch mit PostgreSQL und NATS.
 
-Die Knowledge-Base verwendet im MVP die präzisere Heuristik `precision-v2`.
+Die Knowledge-Base verwendet im MVP ein Hybridmodell `hierarchy-v3`: strenge
+Evidenzregeln, mehrsprachige Embeddings mit pgvector und optional eine Prüfung
+über einen entfernten Hermes-Agent.
 Ein einzelnes kurzes Posting, eine reine Terminzeile, ein einzelner Karten-Pin
 oder ein zufällig großgeschriebenes Wort erzeugt keinen Knowledge-Base-Eintrag.
 Ein Thema benötigt konkrete Detailbegriffe, technische/inhaltliche Evidenz oder
 wiederholte Ortsinformationen. Beim ersten Start dieser Heuristik wird die
 bisherige Knowledge-Base einmalig aus den ausgewählten Nachrichten neu erzeugt;
 die Version wird über `AI_KNOWLEDGE_VERSION` markiert.
+
+Beiträge desselben erkannten Themas werden hierarchisch gespeichert: Ein
+übergeordneter Zusammenfassungs-Knoten bündelt die Quellen, darunter liegen
+die einzelnen Detailbeiträge. API und Web-Oberfläche sortieren Themen und
+Beiträge jeweils mit den neuesten Aktualisierungen zuerst; Unterbeiträge
+können im Dashboard ein- und ausgeblendet werden. Die dafür benötigte
+Migration liegt in `infra/migrations/004_knowledge_hierarchy.sql`.
+
+Jeder Knowledge-Knoten liefert zusätzlich die vollständigen Quellnachrichten
+mit Originaltext und – sofern vorhanden – Bild beziehungsweise Thumbnail. Die
+Nachrichten werden nicht mehr auf eine feste Zeichenanzahl gekürzt; eine
+geänderte Knowledge-Version löst die einmalige Neubewertung bestehender
+Nachrichten aus.
+
+Die semantische Stufe verwendet standardmäßig
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384 Dimensionen)
+lokal und speichert die Vektoren in pgvector. Das Modell wird
+beim ersten Start geladen und im Compose-Volume `ai_models` zwischengespeichert.
+Die Schwellenwerte lassen sich über `AI_SEMANTIC_DISCOVERY_THRESHOLD` und
+`AI_SEMANTIC_MERGE_THRESHOLD` anpassen.
+
+Für den Download des Embedding-Modells kann ein Hugging-Face-Token in `.env`
+hinterlegt werden. Der Compose-Stack reicht ihn ausschließlich an den
+AI-Worker weiter:
+
+```dotenv
+HF_TOKEN=hf_...
+AI_EMBEDDING_CACHE_DIR=/root/.cache/fastembed
+AI_HF_MODEL_LOAD_INTERVAL_SECONDS=86400
+```
+
+Das Modell wird in einem persistenten Compose-Volume gecacht, pro Worker nur
+einmal geladen und die Embedding-Berechnung läuft danach lokal. Der Standard
+von 24 Stunden verhindert unnötige erneute Hub-Abfragen und ist bewusst
+konservativ für einen kostenlosen Hugging-Face-Account gewählt. Die genaue
+Rate-Limit-Grenze kann Hugging Face ändern; falls `HF_TOKEN` leer bleibt, ist
+der Download weiterhin möglich, aber die Anfrage bleibt unauthentifiziert.
+
+Optional kann der Hermes-Agent als strenger Verifier zugeschaltet werden. Der
+Hermes-Agent stellt eine OpenAI-kompatible `/v1/chat/completions`-Schnittstelle
+bereit; `AI_HERMES_URL` kann entweder auf die Basis-URL, `/v1` oder direkt auf
+`/chat/completions` zeigen. Der Worker ruft Hermes nur für unsichere Kandidaten
+auf und verwirft sie bei einer expliziten Ablehnung:
+
+```dotenv
+AI_HERMES_ENABLED=true
+AI_HERMES_URL=https://hermes.example.invalid/v1
+AI_HERMES_API_KEY=replace-with-hermes-api-key
+AI_HERMES_MODEL=hermes-agent
+AI_HERMES_REVIEW_ALL=false
+AI_HERMES_MIN_CONFIDENCE=0.78
+```
+
+Bei nicht gesetzter Hermes-URL oder einem temporären Hermes-Fehler bleibt die
+lokale, nachvollziehbare Verarbeitung aktiv. Die Nachrichten werden für den
+Verifier an den konfigurierten Remote-Dienst übertragen; die URL und der API-
+Key müssen daher bewusst gesetzt werden.
 
 Audiotranskriptionen laufen lokal mit `whisper.cpp` und dem multilingualen
 `medium`-Modell. Die relevanten Einstellungen sind:
@@ -297,6 +363,8 @@ WHISPER_MODEL=medium
 WHISPER_LANGUAGE=auto
 WHISPER_LANGUAGES=es,ca,de,en,fr
 WHISPER_THREADS=4
+MEDIA_MAX_RETRIES=3
+MEDIA_STALE_PROCESSING_SECONDS=900
 ```
 
 `WHISPER_LANGUAGE=auto` aktiviert die automatische Spracherkennung. Für eine
@@ -305,6 +373,10 @@ zusätzlich in `WHISPER_LANGUAGES` stehen; weitere Sprachen lassen sich so
 freischalten, zum Beispiel `WHISPER_LANGUAGES=es,ca,de,en,fr,it,pt`.
 `WHISPER_THREADS` steuert die CPU-Parallelität. Das Modell wird im persistenten
 Compose-Speicher `whisper_models` abgelegt und beim ersten Start geladen.
+Fehlgeschlagene Audiojobs werden bis zu `MEDIA_MAX_RETRIES`-mal erneut
+eingeplant. Jobs, die länger als `MEDIA_STALE_PROCESSING_SECONDS` (Standard:
+15 Minuten) im Status `processing` hängen, werden nach einem Worker-Neustart
+automatisch wieder eingeplant oder als fehlgeschlagen markiert.
 
 Mit `WHISPER_ENABLED=false` bleibt die Audio-Pipeline aktiv, verwendet aber
 nur das MVP-Platzhalterergebnis. Im aktuellen MVP wird das eigentliche
@@ -350,7 +422,8 @@ Die API und Worker werden primär über Compose gestartet. Die Datenbankmigratio
 - `GET /healthz` und `GET /readyz`
 - `GET /api/v1/groups`
 - `PUT /api/v1/groups/{groupId}/select` mit `{ "selected": true|false }`
-- `GET /api/v1/messages?limit=100`
+- `GET /api/v1/messages?limit=100` (alle Nachrichten) oder mit
+  `&relevant=true` (nur relevante Nachrichten)
 - `GET /api/v1/knowledge` oder `GET /api/v1/knowledge?groupId=<selected-group>`
 - `POST /api/v1/audio/jobs` mit `messageId`, `mediaKey`, optional `mediaMime`
 - `GET /metrics`

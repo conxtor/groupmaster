@@ -44,26 +44,31 @@ type group struct {
 }
 
 type message struct {
-	ID           string          `json:"id"`
-	GroupID      string          `json:"groupId"`
-	GroupSubject string          `json:"groupSubject"`
-	SenderJID    string          `json:"senderJid"`
-	SenderName   *string         `json:"senderName,omitempty"`
-	Kind         string          `json:"kind"`
-	Text         *string         `json:"text,omitempty"`
-	ReplyToWAID  *string         `json:"replyToWaMessageId,omitempty"`
-	Platform     string          `json:"platform"`
-	ImageURL     string          `json:"imageUrl,omitempty"`
-	MediaURL     string          `json:"mediaUrl,omitempty"`
-	ThumbnailURL string          `json:"thumbnailUrl,omitempty"`
-	Transcript   *string         `json:"transcript,omitempty"`
-	AudioStatus  *string         `json:"audioStatus,omitempty"`
-	MediaStatus  string          `json:"mediaStatus,omitempty"`
-	OCRText      *string         `json:"ocrText,omitempty"`
-	DeletedAt    *time.Time      `json:"deletedAt,omitempty"`
-	ReceivedAt   time.Time       `json:"receivedAt"`
-	HasMedia     bool            `json:"hasMedia"`
-	Analysis     json.RawMessage `json:"analysis,omitempty"`
+	ID                 string          `json:"id"`
+	GroupID            string          `json:"groupId"`
+	GroupSubject       string          `json:"groupSubject"`
+	WAMessageID        string          `json:"waMessageId"`
+	SenderJID          string          `json:"senderJid"`
+	SenderName         *string         `json:"senderName,omitempty"`
+	Kind               string          `json:"kind"`
+	Text               *string         `json:"text,omitempty"`
+	ReplyToWAID        *string         `json:"replyToWaMessageId,omitempty"`
+	Platform           string          `json:"platform"`
+	ImageURL           string          `json:"imageUrl,omitempty"`
+	MediaURL           string          `json:"mediaUrl,omitempty"`
+	ThumbnailURL       string          `json:"thumbnailUrl,omitempty"`
+	Transcript         *string         `json:"transcript,omitempty"`
+	AudioStatus        *string         `json:"audioStatus,omitempty"`
+	AudioJobID         *string         `json:"audioJobId,omitempty"`
+	AudioAttempts      int             `json:"audioAttempts,omitempty"`
+	AudioError         *string         `json:"audioError,omitempty"`
+	AudioNextAttemptAt *time.Time      `json:"audioNextAttemptAt,omitempty"`
+	MediaStatus        string          `json:"mediaStatus,omitempty"`
+	OCRText            *string         `json:"ocrText,omitempty"`
+	DeletedAt          *time.Time      `json:"deletedAt,omitempty"`
+	ReceivedAt         time.Time       `json:"receivedAt"`
+	HasMedia           bool            `json:"hasMedia"`
+	Analysis           json.RawMessage `json:"analysis,omitempty"`
 }
 
 type audioJobRequest struct {
@@ -72,12 +77,53 @@ type audioJobRequest struct {
 	MediaMime string `json:"mediaMime"`
 }
 
+type audioTranscriptRequest struct {
+	Transcript string   `json:"transcript"`
+	Language   string   `json:"language,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+}
+
+type audioJobView struct {
+	ID            string     `json:"id"`
+	MessageID     string     `json:"messageId"`
+	GroupID       string     `json:"groupId"`
+	GroupSubject  string     `json:"groupSubject"`
+	MediaKey      string     `json:"mediaKey"`
+	MediaMime     *string    `json:"mediaMime,omitempty"`
+	Status        string     `json:"status"`
+	Transcript    *string    `json:"transcript,omitempty"`
+	Language      *string    `json:"language,omitempty"`
+	Confidence    *float64   `json:"confidence,omitempty"`
+	Attempts      int        `json:"attempts"`
+	Error         *string    `json:"error,omitempty"`
+	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
+}
+
+type connectorStatusView struct {
+	Connector string    `json:"connector"`
+	Status    string    `json:"status"`
+	Detail    *string   `json:"detail,omitempty"`
+	LastError *string   `json:"lastError,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type serviceStatusView struct {
+	Connectors        []connectorStatusView `json:"connectors"`
+	AudioJobs         map[string]int        `json:"audioJobs"`
+	RecentAudioErrors []audioJobView        `json:"recentAudioErrors"`
+}
+
 type knowledgeItem struct {
-	ID               string          `json:"id"`
-	ItemType         string          `json:"itemType"`
-	Content          string          `json:"content"`
-	Confidence       float64         `json:"confidence"`
-	SourceMessageIDs json.RawMessage `json:"sourceMessageIds"`
+	ID               string                   `json:"id"`
+	ItemType         string                   `json:"itemType"`
+	ItemRole         string                   `json:"itemRole"`
+	Content          string                   `json:"content"`
+	Confidence       float64                  `json:"confidence"`
+	SourceMessageIDs []string                 `json:"sourceMessageIds"`
+	SourceMessages   []knowledgeSourceMessage `json:"sourceMessages,omitempty"`
+	UpdatedAt        time.Time                `json:"updatedAt"`
+	Children         []knowledgeItem          `json:"children,omitempty"`
 }
 
 type knowledgeTopic struct {
@@ -88,9 +134,25 @@ type knowledgeTopic struct {
 	Title            string          `json:"title"`
 	Summary          string          `json:"summary"`
 	Confidence       float64         `json:"confidence"`
-	SourceMessageIDs json.RawMessage `json:"sourceMessageIds"`
-	Items            json.RawMessage `json:"items"`
+	SourceMessageIDs []string        `json:"sourceMessageIds"`
+	Items            []knowledgeItem `json:"items"`
 	UpdatedAt        time.Time       `json:"updatedAt"`
+}
+
+type knowledgeSourceMessage struct {
+	ID           string    `json:"id"`
+	GroupID      string    `json:"groupId"`
+	SenderJID    string    `json:"senderJid"`
+	SenderName   *string   `json:"senderName,omitempty"`
+	Kind         string    `json:"kind"`
+	Text         *string   `json:"text,omitempty"`
+	MediaMime    *string   `json:"mediaMime,omitempty"`
+	MediaStatus  string    `json:"mediaStatus,omitempty"`
+	ReceivedAt   time.Time `json:"receivedAt"`
+	HasMedia     bool      `json:"hasMedia"`
+	ImageURL     string    `json:"imageUrl,omitempty"`
+	MediaURL     string    `json:"mediaUrl,omitempty"`
+	ThumbnailURL string    `json:"thumbnailUrl,omitempty"`
 }
 
 func env(key, fallback string) string {
@@ -185,6 +247,12 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("relevant") == "true" {
 		conditions = append(conditions, "COALESCE(a.relevant, FALSE) = TRUE")
 	}
+	if r.URL.Query().Get("event") == "true" {
+		conditions = append(conditions, "COALESCE(jsonb_array_length(a.events), 0) > 0")
+	}
+	if r.URL.Query().Get("place") == "true" {
+		conditions = append(conditions, "COALESCE(jsonb_array_length(a.places), 0) > 0")
+	}
 	if value := strings.TrimSpace(r.URL.Query().Get("from")); value != "" {
 		conditions = append(conditions, "m.received_at >= "+arg(value))
 	}
@@ -194,17 +262,21 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 	args = append(args, limit)
 	limitArg := fmt.Sprintf("$%d", len(args))
 	rows, err := a.db.Query(r.Context(), fmt.Sprintf(`
-		SELECT m.id, m.group_id, g.subject, m.sender_jid, m.sender_name, m.kind, m.text,
-		       COALESCE(NULLIF(m.raw #>> '{message,extendedTextMessage,contextInfo,stanzaId}', ''),
-		                CASE WHEN m.raw ? 'reply_to_message' THEN m.group_id || ':' || (m.raw #>> '{reply_to_message,message_id}') END),
+		SELECT m.id, m.group_id, g.subject, m.wa_message_id, m.sender_jid, m.sender_name, m.kind,
+		       COALESCE(NULLIF(aj.transcript, ''), m.text),
+		       COALESCE(
+		         CASE WHEN NULLIF(m.raw #>> '{message,extendedTextMessage,contextInfo,stanzaId}', '') IS NOT NULL
+		              THEN m.group_id || ':' || (m.raw #>> '{message,extendedTextMessage,contextInfo,stanzaId}') END,
+		         CASE WHEN m.raw ? 'reply_to_message'
+		              THEN m.group_id || ':' || (m.raw #>> '{reply_to_message,message_id}') END),
 		       COALESCE(m.platform, CASE WHEN m.group_id LIKE 'tg:%%' THEN 'telegram' ELSE 'whatsapp' END),
 		       m.received_at, m.has_media, m.media_status, m.deleted_at,
-		       mo.object_path, mo.thumbnail_path, mo.ocr_text, aj.transcript, aj.status,
+		       mo.object_path, mo.thumbnail_path, mo.ocr_text, aj.id::text, aj.transcript, aj.status, aj.attempts, aj.error, aj.next_attempt_at,
 		       COALESCE(jsonb_build_object('relevant', a.relevant, 'score', a.relevance_score, 'summary', a.summary, 'facts', a.facts, 'entities', a.entities, 'events', a.events, 'places', a.places, 'model', a.model, 'schemaVersion', a.schema_version, 'promptVersion', a.prompt_version, 'provenance', a.provenance, 'conflicts', a.conflicts), '{}'::jsonb)
 		FROM messages m JOIN wa_groups g ON g.id = m.group_id
 		LEFT JOIN message_analyses a ON a.message_id = m.id
 		LEFT JOIN LATERAL (SELECT object_path, thumbnail_path, ocr_text FROM media_objects WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) mo ON TRUE
-		LEFT JOIN LATERAL (SELECT transcript, status FROM audio_jobs WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) aj ON TRUE
+		LEFT JOIN LATERAL (SELECT id, transcript, status, attempts, error, next_attempt_at FROM audio_jobs WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) aj ON TRUE
 		WHERE %s ORDER BY m.received_at DESC LIMIT %s`, strings.Join(conditions, " AND "), limitArg), args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
@@ -215,12 +287,16 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var item message
 		var objectPath, thumbnailPath *string
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.SenderJID, &item.SenderName, &item.Kind, &item.Text, &item.ReplyToWAID, &item.Platform, &item.ReceivedAt, &item.HasMedia, &item.MediaStatus, &item.DeletedAt, &objectPath, &thumbnailPath, &item.OCRText, &item.Transcript, &item.AudioStatus, &item.Analysis); err != nil {
+		var audioAttempts *int
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.WAMessageID, &item.SenderJID, &item.SenderName, &item.Kind, &item.Text, &item.ReplyToWAID, &item.Platform, &item.ReceivedAt, &item.HasMedia, &item.MediaStatus, &item.DeletedAt, &objectPath, &thumbnailPath, &item.OCRText, &item.AudioJobID, &item.Transcript, &item.AudioStatus, &audioAttempts, &item.AudioError, &item.AudioNextAttemptAt, &item.Analysis); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
+		if audioAttempts != nil {
+			item.AudioAttempts = *audioAttempts
+		}
 		item.ImageURL = mockImageURL(item.GroupID, item.Text)
-		if item.Kind == "image" && item.HasMedia && (item.Platform == "telegram" || !strings.HasPrefix(item.GroupID, "120363mock")) {
+		if (item.Kind == "image" || item.Kind == "video") && item.HasMedia && (item.Platform == "telegram" || !strings.HasPrefix(item.GroupID, "120363mock")) {
 			item.MediaURL = a.signedMediaURL(item.ID, false)
 			item.ThumbnailURL = a.signedMediaURL(item.ID, true)
 		} else if objectPath != nil && *objectPath != "" {
@@ -266,19 +342,19 @@ func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "media URL expired or invalid"})
 		return
 	}
-	var mediaKey, mediaMime, kind string
+	var mediaKey, mediaMime, platform, waMessageID, kind string
 	var objectPath, thumbnailPath *string
 	var storedMime *string
 	err := a.db.QueryRow(r.Context(), `
-		SELECT COALESCE(m.media_key, ''), COALESCE(m.media_mime, ''), m.kind, mo.object_path, mo.thumbnail_path, mo.mime
+		SELECT COALESCE(m.media_key, ''), COALESCE(m.media_mime, ''), COALESCE(m.platform, ''), COALESCE(m.wa_message_id, ''), m.kind, mo.object_path, mo.thumbnail_path, mo.mime
 		FROM messages m
 		JOIN wa_groups g ON g.id = m.group_id AND g.is_selected = TRUE
 		LEFT JOIN LATERAL (
 			SELECT object_path, thumbnail_path, mime FROM media_objects
 			WHERE message_id = m.id ORDER BY updated_at DESC LIMIT 1
 		) mo ON TRUE
-		WHERE m.id = $1::uuid AND m.has_media = TRUE AND m.kind = 'image'`, messageID).
-		Scan(&mediaKey, &mediaMime, &kind, &objectPath, &thumbnailPath, &storedMime)
+		WHERE m.id = $1::uuid AND m.has_media = TRUE AND m.kind IN ('image', 'video')`, messageID).
+		Scan(&mediaKey, &mediaMime, &platform, &waMessageID, &kind, &objectPath, &thumbnailPath, &storedMime)
 	if err == pgx.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "media not found"})
 		return
@@ -292,12 +368,19 @@ func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
 		requestedPath = thumbnailPath
 	}
 	if requestedPath == nil || *requestedPath == "" {
+		fallbackKey := mediaKey
+		// WhatsApp stores the downloaded source as <waMessageID>.<extension>.
+		// The media key contains the group JID as a prefix and therefore cannot
+		// be used to reconstruct that local path.
+		if platform == "whatsapp" && waMessageID != "" {
+			fallbackKey = waMessageID
+		}
 		safeKey := strings.Map(func(value rune) rune {
 			if (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == '_' || value == '-' {
 				return value
 			}
 			return '_'
-		}, mediaKey)
+		}, fallbackKey)
 		extension := "jpeg"
 		mediaType := strings.Split(mediaMime, ";")[0]
 		if slash := strings.Index(mediaType, "/"); slash >= 0 && slash+1 < len(mediaType) {
@@ -353,6 +436,11 @@ func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
 	if contentType == "" {
 		contentType = mime.TypeByExtension(filepath.Ext(filePath))
 	}
+	if contentType == "" && kind == "video" {
+		// Telegram can store an MP4 with a generic .video filename and no MIME
+		// metadata. Keep the native video player usable in that case.
+		contentType = "video/mp4"
+	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -370,16 +458,34 @@ func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := a.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT kt.id::text, kt.group_id, g.subject, kt.topic_key, kt.title, kt.summary, kt.confidence,
-		       kt.source_message_ids, COALESCE(jsonb_agg(jsonb_build_object(
-		         'id', ki.id::text, 'itemType', ki.item_type, 'content', ki.content,
-		         'confidence', ki.confidence, 'sourceMessageIds', ki.source_message_ids
-		       ) ORDER BY ki.updated_at DESC) FILTER (WHERE ki.id IS NOT NULL), '[]'::jsonb), kt.updated_at
+		       kt.source_message_ids,
+		       COALESCE(jsonb_agg(jsonb_build_object(
+		         'id', parent.id::text,
+		         'itemType', parent.item_type,
+		         'itemRole', parent.item_role,
+		         'content', parent.content,
+		         'confidence', parent.confidence,
+		         'sourceMessageIds', parent.source_message_ids,
+		         'updatedAt', parent.updated_at,
+		         'children', COALESCE((
+		           SELECT jsonb_agg(jsonb_build_object(
+		             'id', child.id::text,
+		             'itemType', child.item_type,
+		             'itemRole', child.item_role,
+		             'content', child.content,
+		             'confidence', child.confidence,
+		             'sourceMessageIds', child.source_message_ids,
+		             'updatedAt', child.updated_at
+		           ) ORDER BY child.updated_at DESC)
+		           FROM knowledge_items child WHERE child.parent_item_id = parent.id
+		         ), '[]'::jsonb)
+		       ) ORDER BY parent.updated_at DESC) FILTER (WHERE parent.id IS NOT NULL), '[]'::jsonb), kt.updated_at
 		FROM knowledge_topics kt
 		JOIN wa_groups g ON g.id = kt.group_id
-		LEFT JOIN knowledge_items ki ON ki.topic_id = kt.id
+		LEFT JOIN knowledge_items parent ON parent.topic_id = kt.id AND parent.parent_item_id IS NULL
 		WHERE %s
 		GROUP BY kt.id, kt.group_id, g.subject, kt.topic_key, kt.title, kt.summary, kt.confidence, kt.source_message_ids, kt.updated_at
-		ORDER BY g.subject, kt.updated_at DESC`, strings.Join(conditions, " AND ")), args...)
+		ORDER BY kt.updated_at DESC, g.subject`, strings.Join(conditions, " AND ")), args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -388,13 +494,107 @@ func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 	result := make([]knowledgeTopic, 0)
 	for rows.Next() {
 		var item knowledgeTopic
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.TopicKey, &item.Title, &item.Summary, &item.Confidence, &item.SourceMessageIDs, &item.Items, &item.UpdatedAt); err != nil {
+		var topicSourceIDs json.RawMessage
+		var itemsJSON json.RawMessage
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.TopicKey, &item.Title, &item.Summary, &item.Confidence, &topicSourceIDs, &itemsJSON, &item.UpdatedAt); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := json.Unmarshal(topicSourceIDs, &item.SourceMessageIDs); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := json.Unmarshal(itemsJSON, &item.Items); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
 		result = append(result, item)
 	}
+	if err := a.hydrateKnowledgeTopics(r.Context(), result); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
 	writeJSON(w, 200, result)
+}
+
+func collectKnowledgeSourceIDs(items []knowledgeItem, ids map[string]struct{}) {
+	for _, item := range items {
+		for _, sourceID := range item.SourceMessageIDs {
+			if sourceID != "" {
+				ids[sourceID] = struct{}{}
+			}
+		}
+		collectKnowledgeSourceIDs(item.Children, ids)
+	}
+}
+
+func (a *app) hydrateKnowledgeItems(items []knowledgeItem, sources map[string]knowledgeSourceMessage) {
+	for index := range items {
+		item := &items[index]
+		item.SourceMessages = make([]knowledgeSourceMessage, 0, len(item.SourceMessageIDs))
+		for _, sourceID := range item.SourceMessageIDs {
+			source, ok := sources[sourceID]
+			if !ok {
+				continue
+			}
+			if source.Kind == "image" || source.Kind == "video" {
+				source.ImageURL = mockImageURL(source.GroupID, source.Text)
+				if source.HasMedia && !strings.HasPrefix(source.GroupID, "120363mock") {
+					source.MediaURL = a.signedMediaURL(source.ID, false)
+					source.ThumbnailURL = a.signedMediaURL(source.ID, true)
+				}
+			}
+			item.SourceMessages = append(item.SourceMessages, source)
+		}
+		a.hydrateKnowledgeItems(item.Children, sources)
+	}
+}
+
+func (a *app) hydrateKnowledgeTopics(ctx context.Context, topics []knowledgeTopic) error {
+	ids := make(map[string]struct{})
+	for _, topic := range topics {
+		collectKnowledgeSourceIDs(topic.Items, ids)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	sourceIDs := make([]string, 0, len(ids))
+	for sourceID := range ids {
+		sourceIDs = append(sourceIDs, sourceID)
+	}
+	rows, err := a.db.Query(ctx, `
+		SELECT m.id::text, m.group_id, m.sender_jid, m.sender_name, m.kind,
+		       COALESCE(NULLIF(aj.transcript, ''), m.text),
+		       m.media_mime, m.media_status, m.received_at, m.has_media
+		FROM messages m
+		LEFT JOIN LATERAL (
+			SELECT transcript
+			FROM audio_jobs
+			WHERE message_id = m.id AND NULLIF(transcript, '') IS NOT NULL
+			ORDER BY updated_at DESC
+			LIMIT 1
+		) aj ON TRUE
+		WHERE m.id::text = ANY($1::text[])`, sourceIDs)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	sources := make(map[string]knowledgeSourceMessage, len(sourceIDs))
+	for rows.Next() {
+		var source knowledgeSourceMessage
+		if err := rows.Scan(&source.ID, &source.GroupID, &source.SenderJID, &source.SenderName, &source.Kind, &source.Text, &source.MediaMime, &source.MediaStatus, &source.ReceivedAt, &source.HasMedia); err != nil {
+			return err
+		}
+		sources[source.ID] = source
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for index := range topics {
+		a.hydrateKnowledgeItems(topics[index].Items, sources)
+	}
+	return nil
 }
 
 func mockImageURL(groupID string, text *string) string {
@@ -455,7 +655,52 @@ func (a *app) selectGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, item)
 }
 
-func (a *app) audioJob(w http.ResponseWriter, r *http.Request) {
+func (a *app) audioJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		a.listAudioJobs(w, r)
+		return
+	}
+	if r.Method == http.MethodPost {
+		a.createAudioJob(w, r)
+		return
+	}
+	w.Header().Set("allow", "GET, POST")
+	writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+}
+
+func (a *app) listAudioJobs(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 500 {
+			limit = parsed
+		}
+	}
+	rows, err := a.db.Query(r.Context(), `
+		SELECT aj.id::text, aj.message_id::text, m.group_id, g.subject, aj.media_key, aj.media_mime,
+		       aj.status, aj.transcript, aj.language, aj.confidence, aj.attempts, aj.error,
+		       aj.next_attempt_at, aj.updated_at
+		FROM audio_jobs aj
+		JOIN messages m ON m.id = aj.message_id
+		JOIN wa_groups g ON g.id = m.group_id AND g.is_selected = TRUE
+		ORDER BY aj.updated_at DESC LIMIT $1`, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audio jobs unavailable"})
+		return
+	}
+	defer rows.Close()
+	result := make([]audioJobView, 0)
+	for rows.Next() {
+		var item audioJobView
+		if err := rows.Scan(&item.ID, &item.MessageID, &item.GroupID, &item.GroupSubject, &item.MediaKey, &item.MediaMime, &item.Status, &item.Transcript, &item.Language, &item.Confidence, &item.Attempts, &item.Error, &item.NextAttemptAt, &item.UpdatedAt); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audio jobs unavailable"})
+			return
+		}
+		result = append(result, item)
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *app) createAudioJob(w http.ResponseWriter, r *http.Request) {
 	var request audioJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.MessageID == "" || request.MediaKey == "" {
 		writeJSON(w, 400, map[string]string{"error": "messageId and mediaKey are required"})
@@ -474,6 +719,144 @@ func (a *app) audioJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 202, map[string]any{"jobId": jobID, "status": "queued"})
+}
+
+func (a *app) audioJobAction(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/audio/jobs/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[0] == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "audio job action not found"})
+		return
+	}
+	jobID := parts[0]
+	switch {
+	case parts[1] == "retry" && r.Method == http.MethodPost:
+		a.retryAudioJob(w, r, jobID)
+	case parts[1] == "transcript" && r.Method == http.MethodPut:
+		a.updateAudioTranscript(w, r, jobID)
+	default:
+		w.Header().Set("allow", "POST, PUT")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
+}
+
+func (a *app) retryAudioJob(w http.ResponseWriter, r *http.Request, jobID string) {
+	var item audioJobView
+	var objectPath *string
+	err := a.db.QueryRow(r.Context(), `
+		UPDATE audio_jobs aj
+		SET status='queued', attempts=0, error=NULL, next_attempt_at=NOW(), updated_at=NOW()
+		FROM messages m JOIN wa_groups g ON g.id=m.group_id AND g.is_selected=TRUE
+		WHERE aj.id=$1::uuid AND aj.message_id=m.id
+		RETURNING aj.id::text, aj.message_id::text, m.group_id, g.subject, aj.media_key, aj.media_mime,
+		          aj.status, aj.transcript, aj.language, aj.confidence, aj.attempts, aj.error,
+		          aj.next_attempt_at, aj.updated_at, aj.object_path`, jobID).
+		Scan(&item.ID, &item.MessageID, &item.GroupID, &item.GroupSubject, &item.MediaKey, &item.MediaMime, &item.Status, &item.Transcript, &item.Language, &item.Confidence, &item.Attempts, &item.Error, &item.NextAttemptAt, &item.UpdatedAt, &objectPath)
+	if err == pgx.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "audio job not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audio job could not be queued"})
+		return
+	}
+	event := map[string]any{"id": uuid.NewString(), "type": "media.audio.requested", "occurredAt": time.Now().UTC(), "source": "api", "data": map[string]any{"jobId": item.ID, "messageId": item.MessageID, "mediaKey": item.MediaKey, "mediaMime": item.MediaMime, "objectPath": objectPath}}
+	payload, _ := json.Marshal(event)
+	if _, err := a.js.Publish("media.audio.requested", payload); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "event bus unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, item)
+}
+
+func (a *app) updateAudioTranscript(w http.ResponseWriter, r *http.Request, jobID string) {
+	var request audioTranscriptRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || strings.TrimSpace(request.Transcript) == "" || len(request.Transcript) > 200000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "transcript must contain between 1 and 200000 characters"})
+		return
+	}
+	var item audioJobView
+	var objectPath *string
+	err := a.db.QueryRow(r.Context(), `
+		UPDATE audio_jobs aj
+		SET status='completed', transcript=$2, language=NULLIF($3,''), confidence=$4, error=NULL, next_attempt_at=NULL, updated_at=NOW()
+		FROM messages m JOIN wa_groups g ON g.id=m.group_id AND g.is_selected=TRUE
+		WHERE aj.id=$1::uuid AND aj.message_id=m.id
+		RETURNING aj.id::text, aj.message_id::text, m.group_id, g.subject, aj.media_key, aj.media_mime,
+		          aj.status, aj.transcript, aj.language, aj.confidence, aj.attempts, aj.error,
+		          aj.next_attempt_at, aj.updated_at, aj.object_path`, jobID, strings.TrimSpace(request.Transcript), strings.TrimSpace(request.Language), request.Confidence).
+		Scan(&item.ID, &item.MessageID, &item.GroupID, &item.GroupSubject, &item.MediaKey, &item.MediaMime, &item.Status, &item.Transcript, &item.Language, &item.Confidence, &item.Attempts, &item.Error, &item.NextAttemptAt, &item.UpdatedAt, &objectPath)
+	if err == pgx.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "audio job not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "transcript could not be saved"})
+		return
+	}
+	event := map[string]any{"id": uuid.NewString(), "type": "media.audio.transcribed", "occurredAt": time.Now().UTC(), "source": "api", "data": map[string]any{"jobId": item.ID, "messageId": item.MessageID, "mediaKey": item.MediaKey, "transcript": strings.TrimSpace(request.Transcript), "language": request.Language, "confidence": request.Confidence, "provider": "user-correction", "objectPath": objectPath}}
+	payload, _ := json.Marshal(event)
+	if _, err := a.js.Publish("media.audio.transcribed", payload); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "event bus unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (a *app) status(w http.ResponseWriter, r *http.Request) {
+	result := serviceStatusView{Connectors: make([]connectorStatusView, 0), AudioJobs: map[string]int{}, RecentAudioErrors: make([]audioJobView, 0)}
+	connectorRows, err := a.db.Query(r.Context(), `SELECT connector, status, detail, last_error, updated_at FROM connector_states ORDER BY connector`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+		return
+	}
+	for connectorRows.Next() {
+		var item connectorStatusView
+		if err := connectorRows.Scan(&item.Connector, &item.Status, &item.Detail, &item.LastError, &item.UpdatedAt); err != nil {
+			connectorRows.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+			return
+		}
+		result.Connectors = append(result.Connectors, item)
+	}
+	connectorRows.Close()
+	jobRows, err := a.db.Query(r.Context(), `SELECT status, COUNT(*) FROM audio_jobs aj JOIN messages m ON m.id=aj.message_id JOIN wa_groups g ON g.id=m.group_id AND g.is_selected=TRUE GROUP BY status`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+		return
+	}
+	for jobRows.Next() {
+		var status string
+		var count int
+		if err := jobRows.Scan(&status, &count); err != nil {
+			jobRows.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+			return
+		}
+		result.AudioJobs[status] = count
+	}
+	jobRows.Close()
+	errorRows, err := a.db.Query(r.Context(), `
+		SELECT aj.id::text, aj.message_id::text, m.group_id, g.subject, aj.media_key, aj.media_mime,
+		       aj.status, aj.transcript, aj.language, aj.confidence, aj.attempts, aj.error,
+		       aj.next_attempt_at, aj.updated_at
+		FROM audio_jobs aj JOIN messages m ON m.id=aj.message_id JOIN wa_groups g ON g.id=m.group_id AND g.is_selected=TRUE
+		WHERE aj.status='failed' ORDER BY aj.updated_at DESC LIMIT 10`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+		return
+	}
+	for errorRows.Next() {
+		var item audioJobView
+		if err := errorRows.Scan(&item.ID, &item.MessageID, &item.GroupID, &item.GroupSubject, &item.MediaKey, &item.MediaMime, &item.Status, &item.Transcript, &item.Language, &item.Confidence, &item.Attempts, &item.Error, &item.NextAttemptAt, &item.UpdatedAt); err != nil {
+			errorRows.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+			return
+		}
+		result.RecentAudioErrors = append(result.RecentAudioErrors, item)
+	}
+	errorRows.Close()
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *app) metrics(w http.ResponseWriter, _ *http.Request) {
@@ -521,12 +904,14 @@ func main() {
 	mux.HandleFunc("/healthz", a.health)
 	mux.HandleFunc("/readyz", a.ready)
 	mux.HandleFunc("/metrics", a.metrics)
+	mux.HandleFunc("/api/v1/status", a.status)
 	mux.HandleFunc("/api/v1/groups", a.groups)
 	mux.HandleFunc("/api/v1/groups/", a.selectGroup)
 	mux.HandleFunc("/api/v1/messages", a.messages)
 	mux.HandleFunc("/api/v1/media/", a.mediaImage)
 	mux.HandleFunc("/api/v1/knowledge", a.knowledge)
-	mux.HandleFunc("/api/v1/audio/jobs", a.audioJob)
+	mux.HandleFunc("/api/v1/audio/jobs", a.audioJobs)
+	mux.HandleFunc("/api/v1/audio/jobs/", a.audioJobAction)
 	port := env("PORT", "8080")
 	log.Printf("wagi api listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, cors(mux)))

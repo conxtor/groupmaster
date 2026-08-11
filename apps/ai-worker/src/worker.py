@@ -1,13 +1,17 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Literal
 
 import asyncpg
 import nats
+import httpx
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -16,12 +20,29 @@ log = logging.getLogger("wagi-ai-worker")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgres://wagi_app:app@localhost:5432/app")
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
 MODEL = os.getenv("AI_MODEL", "heuristic-mvp")
-AI_PROVIDER = os.getenv("AI_PROVIDER", "heuristic").lower()
+AI_PROVIDER = os.getenv("AI_PROVIDER", "hybrid").lower()
 PROMPT_VERSION = os.getenv("AI_PROMPT_VERSION", "phase1-v2-precision")
 SCHEMA_VERSION = "1.1"
 SUPPORTED_GROUP_LANGUAGES = ("de", "es", "ca", "en", "fr")
-KNOWLEDGE_REBUILD_VERSION = os.getenv("AI_KNOWLEDGE_VERSION", "precision-v3")
+_HERMES_CONFIGURED = os.getenv("AI_HERMES_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+_CONFIGURED_KNOWLEDGE_VERSION = os.getenv("AI_KNOWLEDGE_VERSION", "hierarchy-v3")
+KNOWLEDGE_REBUILD_VERSION = _CONFIGURED_KNOWLEDGE_VERSION + ("-hermes" if _HERMES_CONFIGURED and not _CONFIGURED_KNOWLEDGE_VERSION.endswith("-hermes") else "")
 KNOWLEDGE_STATE_CONNECTOR = "ai-worker-knowledge"
+EMBEDDING_DIMENSIONS = 384
+EMBEDDINGS_ENABLED = os.getenv("AI_EMBEDDINGS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+EMBEDDING_MODEL = os.getenv("AI_EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+EMBEDDING_CACHE_DIR = os.getenv("AI_EMBEDDING_CACHE_DIR", "/root/.cache/fastembed")
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+HF_MODEL_LOAD_INTERVAL_SECONDS = max(3600.0, float(os.getenv("AI_HF_MODEL_LOAD_INTERVAL_SECONDS", "86400")))
+SEMANTIC_DISCOVERY_THRESHOLD = float(os.getenv("AI_SEMANTIC_DISCOVERY_THRESHOLD", "0.84"))
+SEMANTIC_MERGE_THRESHOLD = float(os.getenv("AI_SEMANTIC_MERGE_THRESHOLD", "0.18"))
+HERMES_ENABLED = _HERMES_CONFIGURED
+HERMES_URL = os.getenv("AI_HERMES_URL", "").strip() or os.getenv("AI_ENDPOINT", "").strip()
+HERMES_API_KEY = os.getenv("AI_HERMES_API_KEY", "").strip() or os.getenv("AI_API_KEY", "").strip()
+HERMES_MODEL = os.getenv("AI_HERMES_MODEL", "hermes-agent").strip()
+HERMES_TIMEOUT_SECONDS = max(5.0, float(os.getenv("AI_HERMES_TIMEOUT_MS", "30000")) / 1000)
+HERMES_REVIEW_ALL = os.getenv("AI_HERMES_REVIEW_ALL", "false").lower() in {"1", "true", "yes", "on"}
+HERMES_MIN_CONFIDENCE = float(os.getenv("AI_HERMES_MIN_CONFIDENCE", "0.78"))
 
 LANGUAGE_MARKERS = {
     "de": {"der", "die", "das", "und", "für", "nicht", "mit", "ist", "sind", "auf", "von", "eine", "einer", "morgen", "heute", "treffen", "danke", "bitte", "auch", "wird", "straße"},
@@ -170,6 +191,176 @@ class Analysis(BaseModel):
     conflicts: list[Conflict] = Field(default_factory=list)
 
 
+class HermesDecision(BaseModel):
+    decision: Literal["accept", "reject", "review"]
+    topicKey: str | None = None
+    confidence: float = Field(ge=0, le=1)
+    reason: str = ""
+
+
+class EmbeddingProvider:
+    """Lazy multilingual embedding provider with a safe lexical fallback."""
+
+    def __init__(self):
+        self.enabled = EMBEDDINGS_ENABLED
+        self._model = None
+        self._failed = False
+        self._cache: dict[str, list[float]] = {}
+        self._load_lock = threading.Lock()
+        self._last_load_attempt = 0.0
+
+    def _load(self):
+        if self._model is not None or self._failed or not self.enabled:
+            return
+        with self._load_lock:
+            if self._model is not None or self._failed:
+                return
+            now = time.monotonic()
+            if now - self._last_load_attempt < HF_MODEL_LOAD_INTERVAL_SECONDS:
+                return
+            self._last_load_attempt = now
+            try:
+                from fastembed import TextEmbedding
+
+                self._model = TextEmbedding(model_name=EMBEDDING_MODEL, cache_dir=EMBEDDING_CACHE_DIR)
+                log.info(
+                    "loaded embedding model %s from persistent cache %s (HF token=%s)",
+                    EMBEDDING_MODEL,
+                    EMBEDDING_CACHE_DIR,
+                    "configured" if HF_TOKEN else "not configured",
+                )
+            except Exception:
+                # Keep the provider retryable, but never retry the Hub on
+                # every incoming message. The next attempt is gated by the
+                # configured interval above; inference errors remain
+                # permanently disabled for this worker instance.
+                log.exception(
+                    "could not load embedding model %s; retrying after %.0f seconds",
+                    EMBEDDING_MODEL,
+                    HF_MODEL_LOAD_INTERVAL_SECONDS,
+                )
+
+    def _embed_sync(self, text: str) -> list[float] | None:
+        self._load()
+        if self._model is None:
+            return None
+        try:
+            input_text = f"passage: {text}" if "e5" in EMBEDDING_MODEL.casefold() else text
+            values = list(self._model.embed([input_text]))[0]
+            vector = [float(value) for value in values]
+            if len(vector) != EMBEDDING_DIMENSIONS or not all(math.isfinite(value) for value in vector):
+                raise ValueError(f"embedding dimension must be {EMBEDDING_DIMENSIONS}")
+            norm = math.sqrt(sum(value * value for value in vector))
+            return [value / norm for value in vector] if norm else None
+        except Exception:
+            self._failed = True
+            log.exception("embedding inference failed; semantic stage disabled")
+            return None
+
+    async def embed(self, text: str) -> list[float] | None:
+        normalized = " ".join(text.split()).strip()
+        if not normalized or not self.enabled or self._failed:
+            return None
+        if normalized not in self._cache:
+            vector = await asyncio.to_thread(self._embed_sync, normalized)
+            if vector is not None:
+                self._cache[normalized] = vector
+        return self._cache.get(normalized)
+
+
+class HermesReviewer:
+    """Optional strict verifier for uncertain knowledge candidates."""
+
+    def __init__(self):
+        self.enabled = HERMES_ENABLED and bool(HERMES_URL)
+        self.endpoint = self._normalize_endpoint(HERMES_URL) if self.enabled else ""
+        if self.enabled:
+            log.info("Hermes knowledge verifier enabled at %s", self.endpoint)
+
+    @staticmethod
+    def _normalize_endpoint(url: str) -> str:
+        normalized = url.rstrip("/")
+        if normalized.endswith("/chat/completions"):
+            return normalized
+        if normalized.endswith("/v1"):
+            return f"{normalized}/chat/completions"
+        return f"{normalized}/v1/chat/completions"
+
+    @staticmethod
+    def _extract_json(content: str) -> dict:
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        try:
+            parsed = json.loads(cleaned)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+            if not match:
+                return {}
+            try:
+                parsed = json.loads(match.group(0))
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+
+    async def review(self, item: KnowledgeItem, message_text: str, language: str) -> HermesDecision | None:
+        if not self.enabled:
+            return None
+        system = (
+            "You are a strict multilingual knowledge-base verifier. "
+            "Accept only durable, concrete information that would be useful later in the group. "
+            "Reject casual conversation, greetings, short plans, transient status updates, duplicate wording, "
+            "unsupported guesses and generic named entities. Return JSON only."
+        )
+        user = {
+            "language": language,
+            "candidate": {
+                "topicKey": item.topicKey,
+                "content": item.content,
+                "sourceMessageIds": item.sourceMessageIds,
+            },
+            "message": message_text[:2000],
+            "allowedTopicKeys": ["travel", "technology", "radio", "shopping", "people", "places"],
+            "responseSchema": {
+                "decision": "accept|reject|review",
+                "topicKey": "one allowed key or null",
+                "confidence": "number 0..1",
+                "reason": "short explanation",
+            },
+        }
+        headers = {"content-type": "application/json"}
+        if HERMES_API_KEY:
+            headers["authorization"] = f"Bearer {HERMES_API_KEY}"
+        try:
+            async with httpx.AsyncClient(timeout=HERMES_TIMEOUT_SECONDS) as client:
+                request_body = {
+                    "model": HERMES_MODEL,
+                    "temperature": 0,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+                    ],
+                    "response_format": {"type": "json_object"},
+                }
+                response = await client.post(self.endpoint, headers=headers, json=request_body)
+                # Some OpenAI-compatible Hermes deployments do not expose
+                # response_format; the strict JSON instruction remains active.
+                if response.status_code == 400:
+                    request_body.pop("response_format", None)
+                    response = await client.post(self.endpoint, headers=headers, json=request_body)
+                response.raise_for_status()
+                payload = response.json()
+            content = payload["choices"][0]["message"]["content"]
+            decision = HermesDecision.model_validate(self._extract_json(content))
+            if decision.topicKey not in {"travel", "technology", "radio", "shopping", "people", "places", None}:
+                decision.topicKey = None
+            return decision
+        except Exception:
+            log.exception("Hermes knowledge verification failed; keeping deterministic result")
+            return None
+
+
 def as_object(value) -> dict:
     if isinstance(value, dict):
         return value
@@ -230,13 +421,14 @@ def is_event_anchor(text: str) -> bool:
     normalized = text.lower()
     return any(word in normalized for word in (
         "morgen", "heute", "samstag", "sonntag", "treffen", "wanderung", "meeting", "termin",
-        "event", "fahren", "fahrt", "domingo", "dimanche", "reunion",
+        "event", "fahren", "fahrt", "domingo", "dimanche", "reunion", "mañana", "hoy", "sábado", "domingo",
+        "demà", "avui", "dissabte", "diumenge", "tomorrow", "today", "saturday", "sunday", "rendez-vous",
     ))
 
 
 def starts_at(text: str) -> str | None:
     match = re.search(
-        r"\b(morgen|heute|samstag|sonntag|domingo|dimanche)\b(?:\s+\w+){0,3}\s+(\d{1,2})(?::(\d{2}))?\s*(?:uhr|h)?",
+        r"\b(morgen|heute|samstag|sonntag|domingo|dimanche|mañana|hoy|sábado|demà|avui|dissabte|diumenge|tomorrow|today|saturday|sunday)\b(?:\s+\w+){0,4}\s+(\d{1,2})(?::(\d{2}))?\s*(?:uhr|h|hrs?)?",
         text,
         flags=re.IGNORECASE,
     )
@@ -290,7 +482,7 @@ def multi_message_events(message_id: str, context: list[dict]) -> list[Event]:
 
 def heuristic_analysis(message_id: str, text: str, context: list[dict], language: str = "de") -> Analysis:
     normalized = text.strip()
-    keywords = ("morgen", "heute", "treffen", "termin", "event", "wichtig", "ort", "straße", "bahnhof", "meeting", "samstag", "sonntag", "costa", "montserrat")
+    keywords = ("morgen", "heute", "treffen", "termin", "event", "wichtig", "ort", "straße", "bahnhof", "meeting", "samstag", "sonntag", "costa", "montserrat", "mañana", "hoy", "reunión", "estación", "lugar", "demà", "avui", "trobem", "estació", "lloc", "tomorrow", "today", "saturday", "sunday", "meeting", "station", "place", "rendez-vous", "demain", "aujourd", "gare", "lieu")
     hits = sum(1 for word in keywords if word in normalized.lower())
     score = min(0.25 + hits * 0.12, 0.98)
     events = multi_message_events(message_id, context)
@@ -313,14 +505,15 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
             continue
         entities.append(Entity(name=candidate, type="mention", confidence=0.55))
     event = {}
-    if any(word in normalized.lower() for word in ("morgen", "heute", "termin", "treffen")):
+    event_signal = any(word in normalized.lower() for word in ("morgen", "heute", "termin", "treffen", "mañana", "hoy", "reunión", "demà", "avui", "trobem", "tomorrow", "today", "meeting", "rendez-vous", "demain", "aujourd"))
+    if event_signal:
         event = {"title": normalized[:120], "confidence": 0.58}
     current = next((item for item in context if str(item.get("id")) == message_id), {})
     location = location_details(current)
     place = {}
     if location:
         place = {"name": location["name"], "latitude": location["latitude"], "longitude": location["longitude"], "confidence": 0.9}
-    elif any(word in normalized.lower() for word in ("ort", "bahnhof", "straße")):
+    elif any(word in normalized.lower() for word in ("ort", "bahnhof", "straße", "lugar", "estación", "lloc", "estació", "place", "station", "lieu", "gare", "restaurant", "office", "oficina", "bureau")):
         place = {"name": normalized[:80], "confidence": 0.45}
     provenance = [Provenance(field="summary", sourceMessageIds=[message_id], confidence=0.64)]
     if events:
@@ -355,11 +548,58 @@ def deduplicate_events(events: list[Event]) -> list[Event]:
 
 
 def find_conflicts(context: list[dict]) -> list[Conflict]:
-    candidates = [(str(item["id"]), starts_at(str(item.get("text") or ""))) for item in context if item.get("id") and starts_at(str(item.get("text") or ""))]
-    dates = {value for _, value in candidates if value}
-    if len(dates) <= 1:
-        return []
-    return [Conflict(field="startsAt", messageIds=[item_id for item_id, _ in candidates], description="Mehrere Nachrichten nennen unterschiedliche Zeitangaben für denselben Gesprächskontext.", confidence=0.72)]
+	items = [item for item in context if item.get("id")]
+	anchors = [item for item in items if is_event_anchor(str(item.get("text") or ""))]
+	anchor_ids = {str(item.get("waMessageId")) for item in anchors if item.get("waMessageId")}
+
+	def related(item: dict) -> bool:
+		if item in anchors or location_details(item) is not None:
+			return True
+		target = reply_target(item)
+		return bool(target and target in anchor_ids)
+
+	scoped = [item for item in items if related(item)]
+	if len(scoped) < 2:
+		return []
+	conflicts: list[Conflict] = []
+	time_candidates = [(str(item["id"]), starts_at(str(item.get("text") or ""))) for item in scoped]
+	time_values = {value for _, value in time_candidates if value}
+	if len(time_values) > 1:
+		ids = [item_id for item_id, value in time_candidates if value]
+		conflicts.append(Conflict(
+			field="startsAt",
+			messageIds=ids,
+			description=f"Widersprüchliche Terminzeiten: {', '.join(sorted(time_values))}.",
+			confidence=0.82,
+		))
+
+	location_candidates: list[tuple[str, str]] = []
+	for item in scoped:
+		location = location_details(item)
+		if not location:
+			continue
+		name = str(location.get("name") or location.get("label") or "").strip()
+		latitude = location.get("latitude")
+		longitude = location.get("longitude")
+		key = f"{name.casefold()}|{latitude}|{longitude}"
+		location_candidates.append((str(item["id"]), key))
+	location_values = {value for _, value in location_candidates}
+	if len(location_values) > 1:
+		ids = [item_id for item_id, _ in location_candidates]
+		labels = []
+		for item in scoped:
+			location = location_details(item)
+			if location:
+				label = str(location.get("label") or location.get("name") or "").strip()
+				if label and label not in labels:
+					labels.append(label)
+		conflicts.append(Conflict(
+			field="location",
+			messageIds=ids,
+			description=f"Widersprüchliche Ortsangaben: {', '.join(labels)}.",
+			confidence=0.78,
+		))
+	return conflicts
 
 
 KNOWLEDGE_TOPIC_RULES = {
@@ -485,11 +725,107 @@ def knowledge_items_for_message(message_id: str, text: str, context: list[dict],
             topicTitle=topic_title,
             itemKey=item_key,
             itemType="insight" if len(source_ids) > 1 else "fact",
-            content=normalized[:280],
+            content=normalized,
             confidence=round(confidence, 4),
             sourceMessageIds=source_ids,
         ))
     return result
+
+
+SEMANTIC_TOPIC_DESCRIPTIONS = {
+    "travel": "durable travel information: trip planning, route, accommodation, opening hours, travel recommendation or cost",
+    "technology": "durable technical information: software, server, configuration, error, deployment, network or API explanation",
+    "radio": "durable amateur radio information: radio equipment, antenna, frequency, repeater, APRS, signal or network configuration",
+    "shopping": "durable purchase information: product, model, price, availability, delivery or recommendation",
+    "people": "durable contact information: person, organization, role, address, email or responsible contact",
+    "places": "durable place information: named venue, address, location details, opening hours or meeting place",
+}
+
+
+def vector_to_pg(vector: list[float] | None) -> str | None:
+    if vector is None:
+        return None
+    return "[" + ",".join(f"{value:.8f}" for value in vector) + "]"
+
+
+async def semantic_topic_match(encoder: EmbeddingProvider, text: str) -> tuple[str, float] | None:
+    vector = await encoder.embed(text)
+    if vector is None:
+        return None
+    best: tuple[str, float] | None = None
+    for topic_key, description in SEMANTIC_TOPIC_DESCRIPTIONS.items():
+        prototype = await encoder.embed(description)
+        if prototype is None:
+            continue
+        similarity = sum(left * right for left, right in zip(vector, prototype))
+        if best is None or similarity > best[1]:
+            best = (topic_key, similarity)
+    return best
+
+
+async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: str | None, message_id: str, text: str, language: str, items: list[KnowledgeItem]) -> list[KnowledgeItem]:
+    normalized = " ".join(text.split()).strip()
+    if not group_id or not is_informative_text(normalized):
+        return items
+    vector = await encoder.embed(normalized)
+    if vector is None:
+        return items
+
+    existing = await db.fetchrow(
+        """SELECT kt.topic_key, kt.title, (ki.embedding <=> $2::vector) AS distance
+           FROM knowledge_items ki JOIN knowledge_topics kt ON kt.id=ki.topic_id
+           WHERE kt.group_id=$1 AND ki.parent_item_id IS NULL AND ki.embedding IS NOT NULL
+           ORDER BY ki.embedding <=> $2::vector LIMIT 1""",
+        group_id, vector_to_pg(vector),
+    )
+    topic_key = None
+    score = 0.0
+    if existing and float(existing["distance"]) <= SEMANTIC_MERGE_THRESHOLD:
+        topic_key = str(existing["topic_key"])
+        score = 1.0 - float(existing["distance"])
+    else:
+        prototype = await semantic_topic_match(encoder, normalized)
+        if prototype and prototype[1] >= SEMANTIC_DISCOVERY_THRESHOLD:
+            topic_key, score = prototype
+
+    if not topic_key or any(item.topicKey == topic_key for item in items):
+        return items
+    return [
+        *items,
+        KnowledgeItem(
+            topicKey=topic_key,
+            topicTitle=localized_topic_title(topic_key, language),
+            itemKey=re.sub(r"[^a-z0-9äöüß]+", "-", normalized.casefold(), flags=re.IGNORECASE).strip("-")[:180] or message_id,
+            itemType="insight" if existing else "fact",
+            content=normalized,
+            confidence=round(min(0.95, max(0.78, score)), 4),
+            sourceMessageIds=[message_id],
+        ),
+    ]
+
+
+async def verify_knowledge_items(reviewer: HermesReviewer, text: str, language: str, items: list[KnowledgeItem]) -> list[KnowledgeItem]:
+    if not reviewer.enabled:
+        return items
+    verified: list[KnowledgeItem] = []
+    for item in items:
+        if not HERMES_REVIEW_ALL and item.confidence >= 0.9:
+            verified.append(item)
+            continue
+        decision = await reviewer.review(item, text, language)
+        # A network or provider failure must not stop ingestion. Only a valid
+        # explicit rejection removes a deterministic candidate.
+        if decision is None:
+            verified.append(item)
+            continue
+        if decision.decision == "reject" or (decision.decision != "accept" and decision.confidence < HERMES_MIN_CONFIDENCE):
+            continue
+        if decision.topicKey in SEMANTIC_TOPIC_DESCRIPTIONS:
+            item.topicKey = decision.topicKey
+            item.topicTitle = localized_topic_title(decision.topicKey, language)
+        item.confidence = round(max(item.confidence, decision.confidence), 4)
+        verified.append(item)
+    return verified
 
 
 class AIAdapter:
@@ -505,7 +841,7 @@ class HeuristicAdapter(AIAdapter):
 
 
 def build_adapter() -> AIAdapter:
-    if AI_PROVIDER != "heuristic":
+    if AI_PROVIDER not in {"heuristic", "hybrid"}:
         log.warning("AI_PROVIDER=%s ist in dieser Beta lokal nicht aktiviert; benutze HeuristicAdapter", AI_PROVIDER)
     return HeuristicAdapter()
 
@@ -521,10 +857,21 @@ async def publish(js, subject: str, event_type: str, data: dict):
     await js.publish(subject, json.dumps(event).encode())
 
 
-async def upsert_knowledge(db, group_id: str | None, items: list[KnowledgeItem]):
+def source_id_list(value) -> list[str]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = []
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+async def upsert_knowledge(db, group_id: str | None, items: list[KnowledgeItem], encoder: EmbeddingProvider | None = None):
     if not group_id or not items:
         return
     for item in items:
+        embedding = await encoder.embed(item.content) if encoder else None
+        embedding_pg = vector_to_pg(embedding)
         topic = await db.fetchrow(
             """INSERT INTO knowledge_topics (group_id, topic_key, title, summary, confidence, source_message_ids)
                VALUES ($1,$2,$3,$4,$5,$6::jsonb)
@@ -536,15 +883,101 @@ async def upsert_knowledge(db, group_id: str | None, items: list[KnowledgeItem])
                RETURNING id""",
             group_id, item.topicKey, item.topicTitle, item.content, item.confidence, json.dumps(item.sourceMessageIds),
         )
+        # Exact keys update the existing node. This is important when a
+        # transcript or OCR result causes the same source message to be
+        # analysed again: it must not create another child below the topic.
+        exact_match = await db.fetchrow(
+            """SELECT id, parent_item_id, item_role, content, item_type, confidence, source_message_ids
+               FROM knowledge_items WHERE topic_id=$1 AND item_key=$2""",
+            topic["id"], item.itemKey,
+        )
+        semantic_match = None
+        if embedding_pg:
+            semantic_match = await db.fetchrow(
+                """SELECT id, item_key, content, item_type, source_message_ids, confidence
+                   FROM knowledge_items
+                   WHERE topic_id=$1 AND parent_item_id IS NULL AND embedding IS NOT NULL
+                     AND (embedding <=> $2::vector) <= $3
+                   ORDER BY embedding <=> $2::vector LIMIT 1""",
+                topic["id"], embedding_pg, SEMANTIC_MERGE_THRESHOLD,
+            )
+        # A topic is itself a meaningful semantic boundary. If a new post is
+        # clearly about the same classified topic but is not close enough to
+        # the current summary vector, keep it as a child of the newest topic
+        # summary instead of creating another flat entry.
+        if not semantic_match:
+            semantic_match = await db.fetchrow(
+                """SELECT id, item_key, content, item_type, source_message_ids, confidence
+                   FROM knowledge_items
+                   WHERE topic_id=$1 AND parent_item_id IS NULL
+                   ORDER BY updated_at DESC LIMIT 1""",
+                topic["id"],
+            )
+
+        if exact_match:
+            existing_sources = source_id_list(exact_match["source_message_ids"])
+            merged_sources = list(dict.fromkeys([*existing_sources, *item.sourceMessageIds]))[:50]
+            merged_content = max((str(exact_match["content"] or ""), item.content), key=len)
+            merged_type = "insight" if len(merged_sources) > 1 else item.itemType
+            await db.execute(
+                """UPDATE knowledge_items
+                   SET item_type=$1, content=$2, confidence=GREATEST(confidence, $3),
+                       source_message_ids=$4::jsonb, embedding=COALESCE($5::vector, embedding),
+                       item_role=CASE WHEN parent_item_id IS NULL THEN 'summary' ELSE 'detail' END,
+                       updated_at=NOW()
+                   WHERE id=$6""",
+                merged_type, merged_content, item.confidence, json.dumps(merged_sources), embedding_pg, exact_match["id"],
+            )
+            if exact_match["parent_item_id"]:
+                await db.execute(
+                    """UPDATE knowledge_items
+                       SET source_message_ids=(SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
+                           FROM jsonb_array_elements(source_message_ids || $1::jsonb) AS merged(value)),
+                           updated_at=NOW()
+                       WHERE id=$2""",
+                    json.dumps(item.sourceMessageIds), exact_match["parent_item_id"],
+                )
+            continue
+
+        if semantic_match:
+            parent_sources = list(dict.fromkeys([*source_id_list(semantic_match["source_message_ids"]), *item.sourceMessageIds]))[:50]
+            merged_content = max((str(semantic_match["content"] or ""), item.content), key=len)
+            merged_type = "insight" if len(parent_sources) > 1 else str(semantic_match["item_type"] or item.itemType)
+            await db.execute(
+                """UPDATE knowledge_items
+                   SET item_role='summary', item_type=$1, content=$2, confidence=GREATEST(confidence, $3),
+                       source_message_ids=$4::jsonb, embedding=COALESCE($5::vector, embedding), updated_at=NOW()
+                   WHERE id=$6""",
+                merged_type, merged_content, item.confidence, json.dumps(parent_sources), embedding_pg, semantic_match["id"],
+            )
+            await db.execute(
+                """INSERT INTO knowledge_items
+                       (topic_id, item_key, item_type, content, confidence, source_message_ids,
+                        embedding, parent_item_id, item_role)
+                   VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::vector,$8,'detail')
+                   ON CONFLICT (topic_id, item_key) DO UPDATE SET
+                       item_type=EXCLUDED.item_type, content=EXCLUDED.content,
+                       confidence=GREATEST(knowledge_items.confidence, EXCLUDED.confidence),
+                       source_message_ids=(SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
+                           FROM jsonb_array_elements(knowledge_items.source_message_ids || EXCLUDED.source_message_ids) AS merged(value)),
+                       embedding=COALESCE(EXCLUDED.embedding, knowledge_items.embedding),
+                       parent_item_id=COALESCE(knowledge_items.parent_item_id, EXCLUDED.parent_item_id),
+                       item_role=CASE WHEN COALESCE(knowledge_items.parent_item_id, EXCLUDED.parent_item_id) IS NULL THEN 'summary' ELSE 'detail' END,
+                       updated_at=NOW()""",
+                topic["id"], item.itemKey, item.itemType, item.content, item.confidence,
+                json.dumps(item.sourceMessageIds), embedding_pg, semantic_match["id"],
+            )
+            continue
         await db.execute(
-            """INSERT INTO knowledge_items (topic_id, item_key, item_type, content, confidence, source_message_ids)
-               VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+            """INSERT INTO knowledge_items
+                   (topic_id, item_key, item_type, content, confidence, source_message_ids, embedding, item_role)
+               VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::vector,'summary')
                ON CONFLICT (topic_id, item_key) DO UPDATE SET item_type=EXCLUDED.item_type, content=EXCLUDED.content,
                confidence=GREATEST(knowledge_items.confidence, EXCLUDED.confidence),
                source_message_ids=(SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
                                    FROM jsonb_array_elements(knowledge_items.source_message_ids || EXCLUDED.source_message_ids) AS merged(value)),
-               updated_at=NOW()""",
-            topic["id"], item.itemKey, item.itemType, item.content, item.confidence, json.dumps(item.sourceMessageIds),
+               embedding=COALESCE(EXCLUDED.embedding, knowledge_items.embedding), item_role='summary', updated_at=NOW()""",
+            topic["id"], item.itemKey, item.itemType, item.content, item.confidence, json.dumps(item.sourceMessageIds), embedding_pg,
         )
 
 
@@ -604,6 +1037,8 @@ async def main():
     nc = await nats.connect(NATS_URL)
     js = nc.jetstream()
     adapter = build_adapter()
+    encoder = EmbeddingProvider()
+    hermes_reviewer = HermesReviewer()
     try:
         await js.stream_info("WAGI_EVENTS")
     except Exception:
@@ -648,6 +1083,16 @@ async def main():
         analysis = await adapter.analyze(message_id, text, context, group_language)
         analysis.events = deduplicate_events(analysis.events)
         analysis.conflicts = find_conflicts(context)
+        if analysis.conflicts:
+            analysis.provenance.append(Provenance(
+                field="conflicts",
+                sourceMessageIds=list(dict.fromkeys(source_id for conflict in analysis.conflicts for source_id in conflict.messageIds)),
+                confidence=min(conflict.confidence for conflict in analysis.conflicts if conflict.confidence is not None),
+            ))
+        analysis.knowledge = await semantic_enrich_knowledge(db, encoder, group_id, message_id, text, group_language, analysis.knowledge)
+        analysis.knowledge = await verify_knowledge_items(hermes_reviewer, text, group_language, analysis.knowledge)
+        if analysis.knowledge and hermes_reviewer.enabled:
+            analysis.provenance.append(Provenance(field="knowledge", sourceMessageIds=[message_id], confidence=max(item.confidence for item in analysis.knowledge)))
         serialized_analysis = analysis.model_dump(mode="json")
         await db.execute(
             """INSERT INTO message_analyses (message_id, relevant, relevance_score, summary, facts, entities, events, places, model, schema_version, prompt_version, provenance, conflicts)
@@ -661,7 +1106,7 @@ async def main():
             json.dumps(serialized_analysis["events"]), json.dumps(serialized_analysis["places"]), analysis.model,
             analysis.schemaVersion, analysis.promptVersion, json.dumps(serialized_analysis["provenance"]), json.dumps(serialized_analysis["conflicts"]),
         )
-        await upsert_knowledge(db, group_id, analysis.knowledge)
+        await upsert_knowledge(db, group_id, analysis.knowledge, encoder)
         await publish(js, "ai.messages.analyzed", "ai.messages.analyzed", serialized_analysis)
 
     async def on_message(message):

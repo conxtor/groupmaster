@@ -22,11 +22,13 @@ type Place = { name: string; latitude?: number; longitude?: number };
 type Event = { title: string; startsAt?: string; location?: string; sourceMessageIds?: string[] };
 type Analysis = { relevant?: boolean; score?: number; summary?: string; places?: Place[]; events?: Event[] };
 type Group = { id: string; subject: string; participantCount: number; isSelected: boolean; discoveredAt: string; platform?: "whatsapp" | "telegram"; chatType?: "group" | "supergroup" | "channel" | "topic"; language?: "de" | "es" | "ca" | "en" | "fr"; parentGroupId?: string; topicId?: number };
-type Message = { id: string; groupId: string; groupSubject: string; senderJid: string; senderName?: string; kind: string; text?: string; replyToWaMessageId?: string; platform?: string; imageUrl?: string; mediaUrl?: string; thumbnailUrl?: string; receivedAt: string; hasMedia: boolean; analysis?: Analysis };
+type Message = { id: string; groupId: string; groupSubject: string; waMessageId?: string; senderJid: string; senderName?: string; kind: string; text?: string; replyToWaMessageId?: string; platform?: string; imageUrl?: string; mediaUrl?: string; thumbnailUrl?: string; transcript?: string; audioStatus?: string; audioJobId?: string; audioAttempts?: number; audioError?: string; audioNextAttemptAt?: string; receivedAt: string; hasMedia: boolean; analysis?: Analysis };
+type MessageNode = Message & { children: MessageNode[] };
 type EventVersion = { event: Event; place?: Place; updatedAt: string; sourceMessageIds: string[]; updateMessage?: Message };
 type EventRecord = { key: string; groupId: string; groupSubject: string; groupPlatform?: string; versions: EventVersion[] };
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
 type ConnectorSnapshot = { connector: string; status: string; mode?: string; connected?: boolean; qr?: string | null; qrExpiresAt?: number | null; qrLoginActive?: boolean; lastError?: string | null };
+type ServiceStatus = { connectors: Array<{ connector: string; status: string; detail?: string; lastError?: string; updatedAt: string }>; audioJobs: Record<string, number>; recentAudioErrors: Array<{ id: string; error?: string; attempts: number; groupSubject: string }> };
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 const waConnectorBase = process.env.NEXT_PUBLIC_WA_CONNECTOR_URL ?? "http://localhost:3001";
@@ -106,6 +108,28 @@ function ConnectorSetup({ locale }: { locale: Locale }) {
   </section>;
 }
 
+function jobStatusLabel(status: string, t: Translator) {
+  if (status === "queued") return t("jobQueued");
+  if (status === "processing") return t("jobProcessing");
+  if (status === "completed") return t("jobCompleted");
+  if (status === "failed") return t("jobFailed");
+  return status;
+}
+
+function ProcessingStatus({ locale, status }: { locale: Locale; status: ServiceStatus | null }) {
+  const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
+  if (!status) return null;
+  const jobEntries = Object.entries(status.audioJobs);
+  return <section className="statusPanel panel">
+    <div className="panelHead"><div><p className="eyebrow">{t("processingStatus")}</p><h2>{t("connectionStatus")}</h2></div><span className="count">{status.connectors.length}</span></div>
+    <div className="statusPanelBody">
+      <div className="statusGroup"><strong>{t("connectionStatus")}</strong>{status.connectors.length ? status.connectors.map((connector) => <div className="statusLine" key={connector.connector}><span className={`statusBadge ${connector.status === "ready" ? "ok" : connector.status === "error" || connector.status === "reauth_required" ? "error" : "pending"}`}>{connector.status}</span><span>{connector.connector}</span>{connector.lastError && <small>{t("lastError", { error: connector.lastError })}</small>}</div>) : <p className="muted">{t("noConnectorStatus")}</p>}</div>
+      <div className="statusGroup"><strong>{t("audioStatus")}</strong>{jobEntries.length ? jobEntries.map(([jobStatus, count]) => <span className="jobCount" key={jobStatus}>{count} · {jobStatusLabel(jobStatus, t)}</span>) : <p className="muted">{t("noConnectorStatus")}</p>}</div>
+      {status.recentAudioErrors.length > 0 && <div className="statusErrors"><strong>{t("audioFailed")}</strong>{status.recentAudioErrors.slice(0, 3).map((job) => <p key={job.id}>{job.groupSubject} · {t("audioAttempts", { count: job.attempts })}{job.error ? ` · ${job.error}` : ""}</p>)}</div>}
+    </div>
+  </section>;
+}
+
 function time(value: string, locale: Locale) {
   return new Intl.DateTimeFormat(localeCodes[locale], { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Madrid" }).format(new Date(value));
 }
@@ -113,6 +137,32 @@ function time(value: string, locale: Locale) {
 function kindLabel(kind: string, locale: Locale) {
   const key = kind === "audio" ? "audio" : kind === "image" ? "image" : kind === "location" ? "location" : kind === "video" ? "video" : "text";
   return translate(locale, key);
+}
+
+function messageIdentity(message: Message) {
+  if (!message.waMessageId) return message.id;
+  return message.waMessageId.startsWith(`${message.groupId}:`) ? message.waMessageId : `${message.groupId}:${message.waMessageId}`;
+}
+
+function buildMessageHierarchy(messages: Message[]) {
+  const nodes = messages.map((message) => ({ ...message, children: [] as MessageNode[] }));
+  const byIdentity = new Map<string, MessageNode>();
+  for (const node of nodes) {
+    byIdentity.set(node.id, node);
+    byIdentity.set(messageIdentity(node), node);
+  }
+  const roots: MessageNode[] = [];
+  for (const node of nodes) {
+    const parent = node.replyToWaMessageId ? byIdentity.get(node.replyToWaMessageId) : undefined;
+    if (parent && parent.id !== node.id) parent.children.push(node);
+    else roots.push(node);
+  }
+  const sort = (items: MessageNode[]) => {
+    items.sort((left, right) => right.receivedAt.localeCompare(left.receivedAt));
+    for (const item of items) sort(item.children);
+  };
+  sort(roots);
+  return roots;
 }
 
 function resolveMediaUrl(value?: string) {
@@ -123,6 +173,10 @@ function resolveMediaUrl(value?: string) {
 
 function imageSource(message: Message) {
   return resolveMediaUrl(message.thumbnailUrl ?? message.mediaUrl ?? message.imageUrl);
+}
+
+function videoSource(message: Message) {
+  return resolveMediaUrl(message.mediaUrl);
 }
 
 function messageGroupSubject(message: Message, t: Translator) {
@@ -223,7 +277,15 @@ function eventDate(value: string, locale: Locale) {
   return new Intl.DateTimeFormat(localeCodes[locale], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Madrid" }).format(new Date(value));
 }
 
-function EventBoard({ events, locale }: { events: EventRecord[]; locale: Locale }) {
+function audioStatusLabel(status: string | undefined, t: Translator) {
+  if (status === "queued") return t("audioQueued");
+  if (status === "processing") return t("audioProcessing");
+  if (status === "completed") return t("audioCompleted");
+  if (status === "failed") return t("audioFailed");
+  return status ?? t("audioStatus");
+}
+
+function EventBoard({ events, messages, locale }: { events: EventRecord[]; messages: Message[]; locale: Locale }) {
   const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
   if (!events.length) return null;
   return (
@@ -235,6 +297,7 @@ function EventBoard({ events, locale }: { events: EventRecord[]; locale: Locale 
         return <article className="eventCard" key={record.key}>
           <div className="eventCardHead"><div><p className="eventGroup">{record.groupPlatform === "whatsapp" && record.groupSubject === record.groupId ? t("whatsappGroup") : record.groupSubject}</p><h3>{eventTitle(current.event)}</h3><p className="eventMeta">{location}{current.event.startsAt ? ` · ${current.event.startsAt}` : ""}</p></div><span className="eventState">{record.versions.length > 1 ? t("updated") : t("new")}</span></div>
           <div className="eventSourceLine">{t("sourceMessages", { count: current.sourceMessageIds.length, date: eventDate(current.updatedAt, locale) })}</div>
+          <details className="eventSources"><summary>{t("viewSourceMessages")}</summary><div className="eventSourceFeed">{current.sourceMessageIds.map((sourceID) => messages.find((message) => message.id === sourceID)).filter((message): message is Message => Boolean(message)).map((message) => <MessageCard key={`${record.key}-${message.id}`} message={{ ...message, children: [] }} locale={locale} t={t} />)}{current.sourceMessageIds.every((sourceID) => !messages.some((message) => message.id === sourceID)) && <p className="muted">{t("noSourceMessages")}</p>}</div></details>
           {current.place ? <EventMap latitude={current.place.latitude!} longitude={current.place.longitude!} label={location} mapLabel={t("mapFor", { label: location })} /> : <div className="mapMissing">{t("noCoordinates")}</div>}
           {record.versions.length > 1 && <div className="eventHistory"><div className="eventHistoryHead"><strong>{t("changeHistory")}</strong><span>{t("versions", { count: record.versions.length })}</span></div><ol>{[...record.versions].reverse().map((version, index, newestFirst) => { const chronologicalIndex = record.versions.indexOf(version); return <li key={`${record.key}-${version.updatedAt}-${index}`} className={index === 0 ? "current" : ""}><div className="historyMeta"><time dateTime={version.updatedAt}>{eventDate(version.updatedAt, locale)}</time><strong>{index === 0 ? t("current") : t("version", { number: chronologicalIndex + 1 })}</strong></div>{index < newestFirst.length - 1 && <p className="historyChange">{versionChange(newestFirst[index + 1], version, locale)}</p>}<p>{eventLocation(version, t)}{version.event.startsAt ? ` · ${version.event.startsAt}` : ""}</p>{version.updateMessage?.text && <small>{t("source", { text: version.updateMessage.text })}</small>}</li>; })}</ol></div>}
         </article>;
@@ -243,13 +306,71 @@ function EventBoard({ events, locale }: { events: EventRecord[]; locale: Locale 
   );
 }
 
+function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscriptSaved }: { message: MessageNode; locale: Locale; t: Translator; depth?: number; onRetryAudio?: (message: Message) => Promise<void>; onTranscriptSaved?: (messageId: string, transcript: string) => Promise<void> }) {
+  const source = imageSource(message);
+  const original = resolveMediaUrl(message.mediaUrl) ?? source;
+  const video = videoSource(message);
+  const displayText = message.kind === "audio" && message.transcript ? message.transcript : message.text ?? message.transcript ?? t("noText");
+  const [imageOpen, setImageOpen] = useState(false);
+  const [transcriptDraft, setTranscriptDraft] = useState(message.transcript ?? "");
+  const [savingTranscript, setSavingTranscript] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => setTranscriptDraft(message.transcript ?? ""), [message.transcript]);
+
+  useEffect(() => {
+    if (!imageOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") setImageOpen(false); };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", onKeyDown);
+    return () => { document.body.style.overflow = previousOverflow; document.removeEventListener("keydown", onKeyDown); };
+  }, [imageOpen]);
+
+  return <>
+    <article className={`message ${depth > 0 ? "messageReply" : ""}`}>
+      <div className="messageMeta"><span className="avatar small">{(message.senderName ?? "?").slice(0, 1)}</span><span><strong>{message.senderName ?? message.senderJid}</strong><small>{message.platform === "telegram" ? "Telegram" : "WhatsApp"} · {messageGroupSubject(message, t)} · {time(message.receivedAt, locale)}</small></span><span className={`kind ${message.kind}`}>{kindLabel(message.kind, locale)}</span></div>
+      {message.replyToWaMessageId && <p className="replyRef">{t("replyTo", { id: message.replyToWaMessageId })}</p>}
+      <p className="messageText">{displayText}</p>
+      {(message.kind === "audio" || message.audioStatus || message.transcript) && <div className={`audioJobPanel ${message.audioStatus === "failed" ? "failed" : ""}`}>
+        <div className="audioJobHead"><strong>{t("audioStatus")}</strong><span>{audioStatusLabel(message.audioStatus, t)}</span></div>
+        {typeof message.audioAttempts === "number" && <small>{t("audioAttempts", { count: message.audioAttempts })}</small>}
+        {message.audioError && <p className="audioJobError">{t("audioError", { error: message.audioError })}</p>}
+        {actionError && <p className="audioJobError">{actionError}</p>}
+        {message.audioStatus === "failed" && message.audioJobId && onRetryAudio && <button className="textButton" type="button" onClick={async () => { setActionError(null); try { await onRetryAudio(message); } catch (error) { setActionError(error instanceof Error ? error.message : t("connectorError")); } }}>{t("retryAudio")}</button>}
+        {(message.transcript || message.audioJobId) && <details className="transcriptReview" open={Boolean(message.transcript)}><summary>{t("reviewTranscript")}</summary><textarea value={transcriptDraft} onChange={(event) => setTranscriptDraft(event.target.value)} placeholder={t("transcriptPlaceholder")} /><button className="primaryButton" type="button" disabled={!onTranscriptSaved || !transcriptDraft.trim() || savingTranscript} onClick={async () => { if (!onTranscriptSaved) return; setActionError(null); setSavingTranscript(true); try { await onTranscriptSaved(message.id, transcriptDraft.trim()); } catch (error) { setActionError(error instanceof Error ? error.message : t("connectorError")); } finally { setSavingTranscript(false); } }}>{savingTranscript ? t("retryingAudio") : t("saveTranscript")}</button></details>}
+      </div>}
+      {message.kind === "image" && source && <figure className="imagePreview"><button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}><img src={source} alt={message.text ?? (message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageAlt"))} loading="lazy" /></button><figcaption>{message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageCaption")}</figcaption></figure>}
+      {message.kind === "video" && video && <figure className="videoPreview"><video controls preload="metadata" poster={source || undefined} src={video}>{t("videoUnsupported")}</video><figcaption>{t("embeddedVideo")}</figcaption></figure>}
+      {message.analysis?.summary && <div className="analysis"><span className="signal">● {message.analysis.relevant === false ? t("lowRelevance") : t("relevant")}</span><span>{message.analysis.summary}</span></div>}
+      {message.children.length > 0 && <div className="messageReplies">{message.children.map((child) => <MessageCard key={child.id} message={child} locale={locale} t={t} depth={depth + 1} onRetryAudio={onRetryAudio} onTranscriptSaved={onTranscriptSaved} />)}</div>}
+    </article>
+    {imageOpen && original && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={message.text ?? t("mockImageAlt")} onClick={() => setImageOpen(false)}>
+      <div className="imageModal" onClick={(event) => event.stopPropagation()}>
+        <button className="imageModalClose" type="button" onClick={() => setImageOpen(false)} aria-label={t("closeImage")}>×</button>
+        <img className="imageModalImage" src={original} alt={message.text ?? t("mockImageAlt")} />
+      </div>
+    </div>}
+  </>;
+}
+
 export default function Dashboard() {
   const [groups, setGroups] = useState<Group[]>(sampleGroups);
   const [messages, setMessages] = useState<Message[]>(sampleMessages);
+  const [eventSourceMessages, setEventSourceMessages] = useState<Message[]>(sampleMessages);
   const [selectedGroup, setSelectedGroup] = useState<string>("all");
+  const [groupFilter, setGroupFilter] = useState<string>("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState("all");
+  const [fromFilter, setFromFilter] = useState("");
+  const [toFilter, setToFilter] = useState("");
+  const [eventOnly, setEventOnly] = useState(false);
+  const [placeOnly, setPlaceOnly] = useState(false);
+  const [showAllMessages, setShowAllMessages] = useState(false);
   const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [locale, setLocale] = useState<Locale>("de");
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
 
   const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
 
@@ -269,19 +390,34 @@ export default function Dashboard() {
     let active = true;
     async function loadDashboard() {
       try {
-        const [groupsResponse, messagesResponse] = await Promise.all([fetch(`${apiBase}/api/v1/groups`), fetch(`${apiBase}/api/v1/messages?limit=100&relevant=true`)]);
+        const filters = new URLSearchParams();
+        filters.set("limit", "100");
+        if (!showAllMessages) filters.set("relevant", "true");
+        if (searchQuery.trim()) filters.set("q", searchQuery.trim());
+        if (groupFilter !== "all") filters.set("groupId", groupFilter);
+        if (kindFilter !== "all") filters.set("kind", kindFilter);
+        if (fromFilter) filters.set("from", new Date(fromFilter).toISOString());
+        if (toFilter) filters.set("to", new Date(toFilter).toISOString());
+        if (eventOnly) filters.set("event", "true");
+        if (placeOnly) filters.set("place", "true");
+        const sourceFilters = new URLSearchParams({ limit: "300" });
+        if (groupFilter !== "all") sourceFilters.set("groupId", groupFilter);
+        const [groupsResponse, messagesResponse, sourceMessagesResponse, statusResponse] = await Promise.all([fetch(`${apiBase}/api/v1/groups`), fetch(`${apiBase}/api/v1/messages?${filters.toString()}`), fetch(`${apiBase}/api/v1/messages?${sourceFilters.toString()}`), fetch(`${apiBase}/api/v1/status`)]);
         if (!groupsResponse.ok || !messagesResponse.ok) throw new Error("API nicht erreichbar");
         const nextGroups = await groupsResponse.json() as Group[];
         const nextMessages = await messagesResponse.json() as Message[];
-        if (active) { setGroups(nextGroups); setMessages(nextMessages); setLive(true); setError(null); }
+        const nextSourceMessages = sourceMessagesResponse.ok ? await sourceMessagesResponse.json() as Message[] : nextMessages;
+        const nextStatus = statusResponse.ok ? await statusResponse.json() as ServiceStatus : null;
+        if (active) { setGroups(nextGroups); setMessages(nextMessages); setEventSourceMessages(nextSourceMessages); setServiceStatus(nextStatus); setLive(true); setError(null); }
       } catch { if (active) setError(t("demoNotice")); }
     }
     void loadDashboard();
     const timer = window.setInterval(() => void loadDashboard(), 5000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [locale]);
+  }, [locale, showAllMessages, searchQuery, groupFilter, kindFilter, fromFilter, toFilter, eventOnly, placeOnly]);
 
   const visibleMessages = useMemo(() => selectedGroup === "all" ? messages : messages.filter((message) => message.groupId === selectedGroup), [messages, selectedGroup]);
+  const messageThreads = useMemo(() => buildMessageHierarchy(visibleMessages), [visibleMessages]);
   const eventRecords = useMemo(() => eventVersions(visibleMessages), [visibleMessages]);
   const selectedGroups = useMemo(() => groups.filter((group) => group.isSelected), [groups]);
   const dashboardGroupIds = useMemo(() => {
@@ -304,6 +440,31 @@ export default function Dashboard() {
     document.cookie = `wagi_locale=${value}; Max-Age=31536000; Path=/; SameSite=Lax`;
   }
 
+  function clearFilters() {
+    setGroupFilter("all");
+    setSearchQuery("");
+    setKindFilter("all");
+    setFromFilter("");
+    setToFilter("");
+    setEventOnly(false);
+    setPlaceOnly(false);
+  }
+
+  async function retryAudio(message: Message) {
+    if (!message.audioJobId) return;
+    const response = await fetch(`${apiBase}/api/v1/audio/jobs/${message.audioJobId}/retry`, { method: "POST" });
+    if (!response.ok) throw new Error(t("connectorError"));
+    setMessages((current) => current.map((item) => item.id === message.id ? { ...item, audioStatus: "queued", audioError: undefined } : item));
+  }
+
+  async function saveTranscript(messageID: string, transcript: string) {
+    const message = messages.find((item) => item.id === messageID);
+    if (!message?.audioJobId) return;
+    const response = await fetch(`${apiBase}/api/v1/audio/jobs/${message.audioJobId}/transcript`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ transcript }) });
+    if (!response.ok) throw new Error(t("connectorError"));
+    setMessages((current) => current.map((item) => item.id === messageID ? { ...item, transcript, audioStatus: "completed", audioError: undefined } : item));
+  }
+
   const scope = selectedGroup === "all" ? t("allSelectedGroups") : t("selectedGroup");
 
   return (
@@ -315,9 +476,11 @@ export default function Dashboard() {
       <section className="hero"><div><p className="eyebrow">{t("signalCheck")}</p><p className="heroNumber">{visibleMessages.filter((item) => item.analysis?.relevant).length || 1}</p><p className="muted">{t("relevantSignals", { scope })}</p></div><div className="heroNote"><span>✦</span><p>{t("heroNote")}</p></div></section>
       {error && <div className="notice">{error}</div>}
       <ConnectorSetup locale={locale} />
+      <ProcessingStatus locale={locale} status={serviceStatus} />
+      <section className="panel filterPanel"><div className="panelHead"><div><p className="eyebrow">{t("searchMessages")}</p><h2>{t("messageStream")}</h2></div><button className="textButton" type="button" onClick={clearFilters}>{t("clearFilters")}</button></div><div className="filterGrid"><label><span>{t("searchMessages")}</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={t("searchMessages")} /></label><label><span>{t("filterGroup")}</span><select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="all">{t("allSelected")}</option>{selectedGroups.map((group) => <option key={group.id} value={group.id}>{group.subject}</option>)}</select></label><label><span>{t("filterKind")}</span><select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">{t("allKinds")}</option>{["text", "audio", "image", "video", "location", "document"].map((kind) => <option key={kind} value={kind}>{kindLabel(kind, locale)}</option>)}</select></label><label><span>{t("filterFrom")}</span><input type="datetime-local" value={fromFilter} onChange={(event) => setFromFilter(event.target.value)} /></label><label><span>{t("filterTo")}</span><input type="datetime-local" value={toFilter} onChange={(event) => setToFilter(event.target.value)} /></label><label className="filterCheck"><input type="checkbox" checked={eventOnly} onChange={(event) => setEventOnly(event.target.checked)} /><span>{t("filterEvents")}</span></label><label className="filterCheck"><input type="checkbox" checked={placeOnly} onChange={(event) => setPlaceOnly(event.target.checked)} /><span>{t("filterPlaces")}</span></label></div></section>
       <div className="grid">
         <aside className="panel groupsPanel"><div className="panelHead"><div><h2>{t("selectedGroupsOnly")}</h2><p className="muted groupSelectionHint">{t("groupSelectionHint")}</p></div><span className="count">{selectedGroups.length}</span></div><Link className="manageGroupsLink" href="/groups">{t("manageGroups")}</Link><button className={`groupRow ${selectedGroup === "all" ? "active" : ""}`} onClick={() => setSelectedGroup("all")}><span className="avatar all">✦</span><span><strong>{t("allSelected")}</strong><small>{t("liveOverview")}</small></span></button>{dashboardHierarchy.map((node) => <DashboardGroupBranch key={node.group.id} node={node} selectedGroup={selectedGroup} onSelect={setSelectedGroup} t={t} />)}</aside>
-        <section className="panel feedPanel"><EventBoard events={eventRecords} locale={locale} /><div className="panelHead"><div><h2>{t("relevantMessages")}</h2><p className="muted">{t("relevantMessagesSubtitle")}</p></div><span className="count">{visibleMessages.length}</span></div><div className="feed">{visibleMessages.map((message) => { const source = imageSource(message); const original = resolveMediaUrl(message.mediaUrl) ?? source; return <article className="message" key={message.id}><div className="messageMeta"><span className="avatar small">{(message.senderName ?? "?").slice(0, 1)}</span><span><strong>{message.senderName ?? message.senderJid}</strong><small>{message.platform === "telegram" ? "Telegram" : "WhatsApp"} · {messageGroupSubject(message, t)} · {time(message.receivedAt, locale)}</small></span><span className={`kind ${message.kind}`}>{kindLabel(message.kind, locale)}</span></div>{message.replyToWaMessageId && <p className="replyRef">{t("replyTo", { id: message.replyToWaMessageId })}</p>}<p className="messageText">{message.text ?? t("noText")}</p>{message.kind === "image" && source && <figure className="imagePreview"><a href={original} target="_blank" rel="noreferrer"><img src={source} alt={message.text ?? t("mockImageAlt")} loading="lazy" /></a><figcaption>{t("mockImageCaption")}</figcaption></figure>}{message.analysis?.summary && <div className="analysis"><span className="signal">● {t("relevant")}</span><span>{message.analysis.summary}</span></div>}</article>; })}</div></section>
+        <section className="panel feedPanel"><EventBoard events={eventRecords} messages={eventSourceMessages} locale={locale} /><div className="panelHead"><div><h2>{showAllMessages ? t("allMessages") : t("relevantMessages")}</h2><p className="muted">{showAllMessages ? t("allMessagesSubtitle") : t("relevantMessagesSubtitle")}</p></div><div className="feedControls"><button className={`textButton ${!showAllMessages ? "active" : ""}`} type="button" aria-pressed={!showAllMessages} onClick={() => setShowAllMessages(false)}>{t("relevantOnly")}</button><button className={`textButton ${showAllMessages ? "active" : ""}`} type="button" aria-pressed={showAllMessages} onClick={() => setShowAllMessages(true)}>{t("allMessages")}</button><span className="count">{visibleMessages.length}</span></div></div><div className="feed">{messageThreads.map((message) => <MessageCard key={message.id} message={message} locale={locale} t={t} onRetryAudio={retryAudio} onTranscriptSaved={saveTranscript} />)}</div></section>
       </div>
       <footer><span>{t("footer")}</span><span>{t("build")}</span></footer>
     </main>

@@ -1,2 +1,236 @@
 Extrahiere nicht nur Events aus den Daten / Chats sondern gruppiere und sammle auch Erkentnisse / Daten zu bestimmten Themen die automatisch erkannt und gruppiert werden sollen. Wenn eine Gruppe oder ein Kanal ausgewählt ist, soll diese "knowledge base" einen separaten Menüpunkt haben. Events und "knowledge base" und die relevanten nachrichten sollen separat gehalten und angezeigt werden und nicht vermischt. 
 
+========================================================================================================================================================
+
+media-worker-1  | ERROR:nats.aio.client:nats: encountered error
+media-worker-1  | Traceback (most recent call last):
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 2285, in _flusher
+media-worker-1  |     await self._transport.drain()
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/transport.py", line 172, in drain
+media-worker-1  |     return await self._io_writer.drain()
+media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/streams.py", line 392, in drain
+media-worker-1  |     await self._protocol._drain_helper()
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/streams.py", line 166, in _drain_helper
+media-worker-1  |     raise ConnectionResetError('Connection lost')
+media-worker-1  | ConnectionResetError: Connection lost
+media-worker-1  | ERROR:nats.aio.client:nats: encountered error
+media-worker-1  | Traceback (most recent call last):
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1594, in _attempt_reconnect
+media-worker-1  |     await self._transport.wait_closed()
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/transport.py", line 176, in wait_closed
+media-worker-1  |     return await self._io_writer.wait_closed()
+media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/streams.py", line 364, in wait_closed
+media-worker-1  |     await self._protocol._get_close_waiter(self)
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/selector_events.py", line 1075, in write
+media-worker-1  |     n = self._sock.send(data)
+media-worker-1  |         ^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  | BrokenPipeError: [Errno 32] Broken pipe
+media-worker-1  | ERROR:nats.aio.client:nats: encountered error
+media-worker-1  | Traceback (most recent call last):
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+media-worker-1  |     return await fut
+media-worker-1  |            ^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/streams.py", line 48, in open_connection
+media-worker-1  |     transport, _ = await loop.create_connection(
+media-worker-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/base_events.py", line 1107, in create_connection
+media-worker-1  |     sock = await self._connect_sock(
+media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/base_events.py", line 1010, in _connect_sock
+media-worker-1  |     await self.sock_connect(sock, address)
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/selector_events.py", line 651, in sock_connect
+media-worker-1  |     return await fut
+media-worker-1  |            ^^^^^^^^^
+media-worker-1  | asyncio.exceptions.CancelledError
+media-worker-1  | 
+media-worker-1  | The above exception was the direct cause of the following exception:
+media-worker-1  | 
+media-worker-1  | Traceback (most recent call last):
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1501, in _select_next_server
+media-worker-1  |     await self._connect_to_server(s)
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1470, in _connect_to_server
+media-worker-1  |     await self._transport.connect(
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/transport.py", line 117, in connect
+media-worker-1  |     r, w = await asyncio.wait_for(
+media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
+media-worker-1  |     async with timeouts.timeout(timeout):
+media-worker-1  |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
+media-worker-1  |     raise TimeoutError from exc_val
+media-worker-1  | TimeoutError
+media-worker-1  | ERROR:wagi-media-worker:audio job failed
+media-worker-1  | Traceback (most recent call last):
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+media-worker-1  |     return await fut
+media-worker-1  |            ^^^^^^^^^
+media-worker-1  | asyncio.exceptions.CancelledError
+media-worker-1  | 
+media-worker-1  | The above exception was the direct cause of the following exception:
+media-worker-1  | 
+media-worker-1  | Traceback (most recent call last):
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1103, in _request_new_style
+media-worker-1  |     return await asyncio.wait_for(future, timeout)
+media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
+media-worker-1  |     async with timeouts.timeout(timeout):
+media-worker-1  |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
+media-worker-1  |     raise TimeoutError from exc_val
+media-worker-1  | TimeoutError
+media-worker-1  | 
+media-worker-1  | During handling of the above exception, another exception occurred:
+media-worker-1  | 
+media-worker-1  | Traceback (most recent call last):
+media-worker-1  |   File "/app/src/worker.py", line 282, in on_audio
+media-worker-1  |     await publish(js, {"jobId": job_id, "messageId": data["messageId"], "transcript": transcript, "language": language, "confidence": confidence, "provider": provider})
+media-worker-1  |   File "/app/src/worker.py", line 109, in publish
+media-worker-1  |     await js.publish(subject, json.dumps(event, default=str).encode())
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/js/client.py", line 208, in publish
+media-worker-1  |     msg = await self._nc.request(
+media-worker-1  |           ^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1068, in request
+media-worker-1  |     msg = await self._request_new_style(subject, payload, timeout=timeout, headers=headers)
+media-worker-1  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1105, in _request_new_style
+media-worker-1  |     raise errors.TimeoutError
+media-worker-1  | nats.errors.TimeoutError: nats: timeout
+
+========================================================================================================================================================
+
+
+
+Ich möchte die Anwendung nun mit docker-compose auf einem server mit Dockge deployen. 
+
+Erzeuge zuerst einen GitHub Actions workflow der bei Manueller Ausführung des workflow die notwendigen images in ghcr erzeugt.
+
+Hier ist ein beispiel für das deployment. Reverse-proxy ist traefik: 
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    shm_size: ${POSTGRES_SHM_SIZE:-256MB}
+    command:
+- postgres
+- -c
+- max_connections=${POSTGRES_MAX_CONNECTIONS:-120}
+- -c
+- shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+- -c
+- effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-1GB}
+- -c
+- work_mem=${POSTGRES_WORK_MEM:-8MB}
+- -c
+- maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-128MB}
+- -c
+- max_wal_size=${POSTGRES_MAX_WAL_SIZE:-2GB}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+- ./django_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+- CMD-SHELL
+- pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+  
+  web:
+    image: ghcr.io/${GHCR_IMAGE_OWNER:-ea7klk}/bminfo-new:latest
+    environment:
+      APP_SECRET_KEY: ${APP_SECRET_KEY}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-*}
+      APP_CSRF_TRUSTED_ORIGINS: ${APP_CSRF_TRUSTED_ORIGINS:-}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_CONN_MAX_AGE: ${DB_CONN_MAX_AGE:-60}
+      APP_WORKERS: ${APP_WORKERS:-3}
+      APP_TIMEOUT_SECONDS: ${APP_TIMEOUT_SECONDS:-120}
+      APP_GRACEFUL_TIMEOUT_SECONDS: ${APP_GRACEFUL_TIMEOUT_SECONDS:-30}
+      APP_KEEPALIVE_SECONDS: ${APP_KEEPALIVE_SECONDS:-5}
+      APP_COLLECTOR_ENABLED: ${APP_COLLECTOR_ENABLED:-true}
+      ADMIN_CALLSIGN: ${ADMIN_CALLSIGN:-ADMIN}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL}
+      APP_LANGUAGE_CODE: ${APP_LANGUAGE_CODE:-en-us}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      SMTP_ENABLED: ${SMTP_ENABLED:-true}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-BrandMeister Lastheard}
+      SMTP_REPLY_TO: ${SMTP_REPLY_TO}
+      SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-20}
+      EMAIL_VERIFICATION_HOURS: ${EMAIL_VERIFICATION_HOURS:-48}
+      PASSWORD_RESET_HOURS: ${PASSWORD_RESET_HOURS:-1}
+      MATOMO_ENABLED: ${MATOMO_ENABLED:-false}
+      MATOMO_URL: ${MATOMO_URL:-}
+      MATOMO_SITE_ID: ${MATOMO_SITE_ID:-}
+      BM_URL: ${BM_URL}
+      BM_SOCKETIO_PATH: ${BM_SOCKETIO_PATH:-/lh/socket.io}
+      BM_JOIN: ${BM_JOIN:-everything}
+      TALKGROUPS_URL: ${TALKGROUPS_URL}
+      TALKGROUPS_SYNC_HOURS: ${TALKGROUPS_SYNC_HOURS:-24}
+      EXCLUDE_LOCAL_TALKGROUP: ${EXCLUDE_LOCAL_TALKGROUP:-9}
+      KERCHUNK_THRESHOLD_SECONDS: ${KERCHUNK_THRESHOLD_SECONDS:-3}
+      RAW_EVENT_KERCHUNK_THRESHOLD_SECONDS: ${RAW_EVENT_KERCHUNK_THRESHOLD_SECONDS:-3}
+      COLLECTOR_HEARTBEAT_SECONDS: ${COLLECTOR_HEARTBEAT_SECONDS:-30}
+    labels:
+- traefik.enable=true
+- traefik.http.services.${TRAEFIK_SERVICE_NAME}.loadbalancer.server.port=8000
+- traefik.http.routers.${TRAEFIK_ROUTER_NAME}.rule=Host(`${TRAEFIK_HOST}`)
+- traefik.http.routers.${TRAEFIK_ROUTER_NAME}.entrypoints=${TRAEFIK_ENTRYPOINT}
+- traefik.http.routers.${TRAEFIK_ROUTER_NAME}.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+- traefik.http.routers.${TRAEFIK_ROUTER_NAME}.service=${TRAEFIK_SERVICE_NAME}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+- CMD
+- python
+- -c
+- import urllib.request;
+  urllib.request.urlopen('http://127.0.0.1:8000/health/', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+networks: {}
+
+Der Hostname für das web-interface soll www.conxtor.com sein. Soweit möglich sollen alle anderen Dienste intern sein und nicht öffentlich zugänglich. Falls notwendig, benutze einen zusätzlichen Reverse-proxy in diesem deployment. 
+
+Erzeuge hierfür spezielle docker-compose.yaml, .env und .env.example dateien mit dem suffix -dockge
+Die Lokale testumgebung soll wie bisher funktionieren, ändere hier nichts. 
+
+
+HF_TOKEN: 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 
+
+Nein. Die aktuellen Konnektoren sind nicht mehrbenutzerfähig:
+WhatsApp verwendet eine einzige gemeinsame Baileys-Session unter WA_AUTH_DIR und den globalen Connector-State connector='whatsapp'.
+Telegram verwendet eine einzige gemeinsame StringSession unter TG_STATE_DIR/direct-session.txt.
+Gruppen, Nachrichten und Auswahlen sind nicht mit user_id oder tenant_id verknüpft. Alle Nutzer würden daher dieselben Daten und Konten sehen.
+Belege: [WhatsApp-Konnektor](/Users/Volker_Kerkhoff/Projects/Personal/wa-group-intelligence/apps/wa-connector/src/index.ts), [Telegram-Authentifizierung](/Users/Volker_Kerkhoff/Projects/Personal/wa-group-intelligence/apps/tg-connector/src/auth.ts), [Migrationen](/Users/Volker_Kerkhoff/Projects/Personal/wa-group-intelligence/infra/migrations/001_init.sql).
+Empfohlene Lösung:
+Benutzer-/Mandantenmodell mit users, connector_accounts, connector_sessions, group_memberships und group_selections.
+Pro WhatsApp-Konto ein eigener Connector-Prozess mit eigenem Auth-Verzeichnis.
+Pro Telegram-Konto eine eigene MTProto-StringSession; TG_API_ID und TG_API_HASH bleiben global, die Session ist benutzerspezifisch.
+NATS-Nachrichten um userId beziehungsweise accountId ergänzen.
+Datenbank- und Medienpfade strikt nach Konto/Mandant isolieren.
+Benutzeranmeldung im Web-UI, beispielsweise über OIDC.
+Für klassische WhatsApp-Gruppen bleibt damit nur die separate Linked-Device-Session pro Nutzer. Die offizielle WhatsApp-Business-API unterstützt diesen Consumer-Gruppenfall nicht. Telegram-Bots wären mehrbenutzertechnisch einfacher, entsprechen aber nicht der gewünschten direkten Telegram-Verbindung.
