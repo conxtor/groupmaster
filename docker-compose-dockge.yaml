@@ -71,6 +71,21 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+  minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+      MINIO_BUCKET: ${MINIO_BUCKET:-wa-media}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set minio http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        until mc ready minio; do sleep 2; done
+        mc mb --ignore-existing "minio/$${MINIO_BUCKET}"
+    depends_on:
+      minio: {condition: service_started}
   api:
     image: ghcr.io/${GHCR_IMAGE_OWNER:-conxtor}/wagi-api:${GHCR_IMAGE_TAG:-latest}
     restart: unless-stopped
@@ -99,6 +114,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       nats: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
     labels:
@@ -352,6 +368,7 @@ services:
       postgres: {condition: service_healthy}
       nats: {condition: service_healthy}
       minio: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
   web:
@@ -375,6 +392,7 @@ services:
       - traefik.http.routers.wagi-web.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
       - traefik.http.routers.wagi-web.tls=true
       - traefik.http.routers.wagi-web.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.wagi-web.tls.domains[0].main=${TRAEFIK_HOST:-conxtor.com}
       - traefik.http.routers.wagi-web.service=wagi-web
       - traefik.http.routers.wagi-web.priority=10
 

@@ -65,6 +65,21 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+  minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-wa-media}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set minio http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        until mc ready minio; do sleep 2; done
+        mc mb --ignore-existing "minio/$${MINIO_BUCKET}"
+    depends_on:
+      minio: {condition: service_started}
 
   api:
     build:
@@ -95,6 +110,7 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 
@@ -138,6 +154,7 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 
@@ -184,6 +201,7 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 
@@ -363,6 +381,7 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 

@@ -2,7 +2,7 @@
 name = "wagi-ai-worker"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["asyncpg>=0.29.0", "nats-py>=2.9.0", "pydantic>=2.8.0", "fastembed>=0.4.0", "httpx>=0.27.0"]
+dependencies = ["asyncpg>=0.29.0", "nats-py>=2.9.0", "pydantic>=2.8.0", "fastembed==0.5.1", "httpx>=0.27.0"]
 
 [project.optional-dependencies]
 llm = ["httpx>=0.27.0"]

@@ -35,6 +35,10 @@ EMBEDDINGS_ENABLED = os.getenv("AI_EMBEDDINGS_ENABLED", "true").lower() in {"1",
 EMBEDDING_MODEL = os.getenv("AI_EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 EMBEDDING_CACHE_DIR = os.getenv("AI_EMBEDDING_CACHE_DIR", "/root/.cache/fastembed")
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+# The default embedding model is public. If no explicit token is configured,
+# avoid silently reusing an expired token from the Hugging Face cache.
+if not HF_TOKEN:
+    os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 HF_MODEL_LOAD_INTERVAL_SECONDS = max(3600.0, float(os.getenv("AI_HF_MODEL_LOAD_INTERVAL_SECONDS", "86400")))
 SEMANTIC_DISCOVERY_THRESHOLD = float(os.getenv("AI_SEMANTIC_DISCOVERY_THRESHOLD", "0.84"))
 SEMANTIC_MERGE_THRESHOLD = float(os.getenv("AI_SEMANTIC_MERGE_THRESHOLD", "0.18"))
@@ -242,16 +246,26 @@ class EmbeddingProvider:
                     EMBEDDING_CACHE_DIR,
                     "configured" if HF_TOKEN else "not configured",
                 )
-            except Exception:
+            except Exception as exc:
                 # Keep the provider retryable, but never retry the Hub on
                 # every incoming message. The next attempt is gated by the
                 # configured interval above; inference errors remain
                 # permanently disabled for this worker instance.
-                log.exception(
-                    "could not load embedding model %s; retrying after %.0f seconds",
-                    EMBEDDING_MODEL,
-                    HF_MODEL_LOAD_INTERVAL_SECONDS,
-                )
+                error_text = str(exc)
+                if any(marker in error_text.casefold() for marker in ("401", "unauthorized", "expired", "repository not found")):
+                    log.error(
+                        "could not download embedding model %s from Hugging Face: the configured HF_TOKEN is invalid or expired; "
+                        "create a new read token or clear HF_TOKEN for the public model. Retrying after %.0f seconds",
+                        EMBEDDING_MODEL,
+                        HF_MODEL_LOAD_INTERVAL_SECONDS,
+                        exc_info=True,
+                    )
+                else:
+                    log.exception(
+                        "could not load embedding model %s; retrying after %.0f seconds",
+                        EMBEDDING_MODEL,
+                        HF_MODEL_LOAD_INTERVAL_SECONDS,
+                    )
 
     def _embed_sync(self, text: str) -> list[float] | None:
         self._load()

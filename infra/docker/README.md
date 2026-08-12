@@ -16,6 +16,20 @@ Für den produktionsnahen Betrieb gibt es die getrennte Datei `docker-compose-do
 
 Das Dockge-Migrations-Image enthält den SQL-Migrationsrunner und alle Migrationen. Dadurch benötigt der Dockge-Stack keine relativen Mounts auf `infra/migration-runner` oder `infra/migrations`; der Fehler `/runner/run.sh: not found` tritt auch dann nicht auf, wenn Dockge nur die Compose- und Env-Datei verwaltet.
 
-Traefik veröffentlicht nur `https://conxtor.com` und routet ausschließlich zur Web-Anwendung. Next.js leitet `/api/...` serverseitig über `API_INTERNAL_URL` an die interne Go-API weiter. PostgreSQL, NATS, MinIO, die Go-API, die Connectoren und die Worker haben keine veröffentlichten Ports und die API ist ausdrücklich für Traefik deaktiviert. Die Compose-Datei deklariert keine eigenen oder externen Docker-Netzwerke; alle Dienste verwenden das von Compose automatisch bereitgestellte Standardnetzwerk. Traefik muss dieses Stack-Netzwerk in der vorhandenen Serverkonfiguration erreichen können. Weil Frontend und API für den Browser denselben Host verwenden, bleibt `WAGI_CORS_ORIGIN` leer; CORS ist für den normalen Browserzugriff nicht erforderlich. `WAGI_COOKIE_SECURE=true` setzt sichere Session-Cookies für HTTPS.
+Traefik veröffentlicht nur `https://conxtor.com` und routet ausschließlich zur Web-Anwendung. Die Web-Route fordert über `tls.domains[0].main` ausdrücklich ein Zertifikat für `conxtor.com` beim Resolver aus `TRAEFIK_CERTRESOLVER` an. Next.js leitet `/api/...` serverseitig über `API_INTERNAL_URL` an die interne Go-API weiter. PostgreSQL, NATS, MinIO, die Go-API, die Connectoren und die Worker haben keine veröffentlichten Ports und die API ist ausdrücklich für Traefik deaktiviert. Die Compose-Datei deklariert keine eigenen oder externen Docker-Netzwerke; alle Dienste verwenden das von Compose automatisch bereitgestellte Standardnetzwerk. Traefik muss dieses Stack-Netzwerk in der vorhandenen Serverkonfiguration erreichen können. Weil Frontend und API für den Browser denselben Host verwenden, bleibt `WAGI_CORS_ORIGIN` leer; CORS ist für den normalen Browserzugriff nicht erforderlich. `WAGI_COOKIE_SECURE=true` setzt sichere Session-Cookies für HTTPS.
 
-Die Dockge-Variante verwendet eigene, benannte Volumes (`wagi_dockge_*`) für Datenbank, JetStream, MinIO, Medien, Connector-Sessions und Modelle. Dadurch werden lokale Testdaten nicht verwendet und ein Stack-Neustart löscht keine persistenten Daten.
+Wenn weiterhin `TRAEFIK DEFAULT CERT` angezeigt wird, ist der im Label eingetragene Resolvername in der laufenden Traefik-Instanz nicht definiert oder ACME ist dort nicht erfolgreich konfiguriert. Für den Standardwert `TRAEFIK_CERTRESOLVER=letsencrypt` muss Traefik statisch beispielsweise Folgendes enthalten:
+
+```yaml
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: admin@example.com
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: web
+```
+
+Außerdem müssen `conxtor.com` (A und gegebenenfalls AAAA) auf den Server zeigen und die Ports 80 und 443 den Traefik-EntryPoints `web` und `websecure` zugeordnet sein. Bei einem anderen Resolvernamen muss ausschließlich `TRAEFIK_CERTRESOLVER` in `.env-dockge` angepasst werden. Nach Änderung der Traefik- oder Stack-Konfiguration den Stack neu deployen und die Traefik-Logs auf eine erfolgreiche ACME-Ausstellung prüfen.
+
+Die Compose-Varianten enthalten einen idempotenten `minio-init`-Dienst. Er legt den in `MINIO_BUCKET` konfigurierten Bucket beim Start automatisch an, falls er noch nicht existiert. Ein Neustart löscht weder den Bucket noch vorhandene Objekte. Die Dockge-Variante verwendet eigene, benannte Volumes (`wagi_dockge_*`) für Datenbank, JetStream, MinIO, Medien, Connector-Sessions und Modelle. Dadurch werden lokale Testdaten nicht verwendet und ein Stack-Neustart löscht keine persistenten Daten.

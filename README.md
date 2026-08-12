@@ -398,6 +398,13 @@ von 24 Stunden verhindert unnötige erneute Hub-Abfragen und ist bewusst
 konservativ für einen kostenlosen Hugging-Face-Account gewählt. Die genaue
 Rate-Limit-Grenze kann Hugging Face ändern; falls `HF_TOKEN` leer bleibt, ist
 der Download weiterhin möglich, aber die Anfrage bleibt unauthentifiziert.
+Bei einem Logeintrag mit `401`, `Unauthorized` oder `User Access Token ... is expired`
+ist der Token ungültig: entweder einen neuen Hugging-Face-Token mit mindestens
+Leserechten in `.env-dockge` eintragen oder `HF_TOKEN` leeren, weil das öffentliche
+Embedding-Modell auch ohne Authentifizierung geladen werden kann. Nach einer
+Änderung den AI-Worker neu erstellen, damit der Token übernommen wird.
+Wenn `HF_TOKEN` leer ist, verhindert der Worker außerdem die implizite Nutzung
+eines alten Tokens aus dem Hugging-Face-Cache.
 
 Optional kann der Hermes-Agent als strenger Verifier zugeschaltet werden. Der
 Hermes-Agent stellt eine OpenAI-kompatible `/v1/chat/completions`-Schnittstelle
