@@ -14,6 +14,8 @@ import nats
 import httpx
 from pydantic import BaseModel, Field
 
+from reliability import claim_event, mark_processed, payload_id, retry_or_dead_letter
+
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("wagi-ai-worker")
 
@@ -854,7 +856,7 @@ async def publish(js, subject: str, event_type: str, data: dict):
         "source": "ai-worker",
         "data": data,
     }
-    await js.publish(subject, json.dumps(event).encode())
+    await js.publish(subject, json.dumps(event, default=str).encode())
 
 
 def source_id_list(value) -> list[str]:
@@ -1032,6 +1034,72 @@ async def mark_knowledge_rebuild_complete(db):
     )
 
 
+AI_MAX_RETRIES = max(1, int(os.getenv("AI_MAX_RETRIES", "5")))
+AI_STALE_PROCESSING_SECONDS = max(60, int(os.getenv("AI_STALE_PROCESSING_SECONDS", "900")))
+
+
+async def claim_ai_job(db, message_id: str, force: bool = False) -> bool:
+    await db.execute(
+        """INSERT INTO ai_jobs (message_id, status, next_attempt_at)
+           VALUES ($1,'queued',NOW())
+           ON CONFLICT (message_id) DO UPDATE SET
+             status=CASE WHEN $2 AND ai_jobs.status <> 'processing' THEN 'queued' ELSE ai_jobs.status END,
+             next_attempt_at=CASE WHEN $2 AND ai_jobs.status <> 'processing' THEN NOW() ELSE ai_jobs.next_attempt_at END,
+             error=CASE WHEN $2 THEN NULL ELSE ai_jobs.error END,
+             updated_at=NOW()""",
+        message_id, force,
+    )
+    row = await db.fetchrow(
+        """UPDATE ai_jobs SET status='processing', attempts=attempts+1,
+                 next_attempt_at=NULL, updated_at=NOW()
+           WHERE message_id=$1 AND status='queued'
+             AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+           RETURNING id""",
+        message_id,
+    )
+    return bool(row)
+
+
+async def complete_ai_job(db, message_id: str):
+    await db.execute(
+        "UPDATE ai_jobs SET status='completed', error=NULL, next_attempt_at=NULL, updated_at=NOW() WHERE message_id=$1",
+        message_id,
+    )
+
+
+async def fail_ai_job(db, message_id: str, error: Exception):
+    await db.execute(
+        """UPDATE ai_jobs
+           SET status=CASE WHEN attempts < $2 THEN 'queued' ELSE 'failed' END,
+               error=$3,
+               next_attempt_at=CASE WHEN attempts < $2 THEN NOW() + INTERVAL '30 seconds' ELSE NULL END,
+               updated_at=NOW()
+           WHERE message_id=$1""",
+        message_id, AI_MAX_RETRIES, str(error)[:4000],
+    )
+
+
+async def process_analysis(db, analyzer, payload: dict, trigger: str, force: bool = False):
+    data = payload.get("data", payload)
+    message_id = str(data.get("messageId") or "")
+    if not message_id or not await claim_ai_job(db, message_id, force=force):
+        return False
+    try:
+        await analyzer(payload)
+        await complete_ai_job(db, message_id)
+        return True
+    except Exception as error:
+        await fail_ai_job(db, message_id, error)
+        raise
+
+
+async def publish_ai_job(js, row):
+    await publish(
+        js, "wa.messages.received", "wa.messages.received",
+        {"messageId": str(row["message_id"]), "groupId": row["group_id"], "text": row["text"] or "", "receivedAt": row["received_at"].isoformat(), "force": True},
+    )
+
+
 async def main():
     db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=4)
     nc = await nats.connect(NATS_URL)
@@ -1043,7 +1111,7 @@ async def main():
         await js.stream_info("WAGI_EVENTS")
     except Exception:
         try:
-            await js.add_stream(name="WAGI_EVENTS", subjects=["wa.>", "media.>", "ai.>"])
+            await js.add_stream(name="WAGI_EVENTS", subjects=["wa.>", "media.>", "ai.>", "connector.>", "replay.>"])
         except Exception:
             await js.stream_info("WAGI_EVENTS")
 
@@ -1110,32 +1178,126 @@ async def main():
         await publish(js, "ai.messages.analyzed", "ai.messages.analyzed", serialized_analysis)
 
     async def on_message(message):
+        payload = {}
         try:
-            await analyze_message(json.loads(message.data))
+            payload = json.loads(message.data)
+            event_id = payload_id(payload, message.data)
+            if not await claim_event(db, "ai.messages", event_id, message.subject, payload):
+                await message.ack()
+                return
+            await process_analysis(db, analyze_message, payload, "message")
+            await mark_processed(db, "ai.messages", event_id)
             await message.ack()
-        except Exception:
+        except Exception as error:
             log.exception("failed to analyze message")
+            await retry_or_dead_letter(db, js, message, payload, "ai.messages", error)
 
     async def on_transcript(message):
+        payload = {}
         try:
             payload = json.loads(message.data)
             data = payload.get("data", payload)
+            event_id = payload_id(payload, message.data)
+            if not await claim_event(db, "ai.transcripts", event_id, message.subject, payload):
+                await message.ack()
+                return
             await db.execute("UPDATE audio_jobs SET status='completed', transcript=$1, language=$2, confidence=$3, updated_at=NOW() WHERE id=$4", data.get("transcript", ""), data.get("language"), data.get("confidence"), data.get("jobId"))
-            await analyze_message({"data": {"messageId": data.get("messageId"), "text": data.get("transcript", "")}})
+            await process_analysis(db, analyze_message, {"data": {"messageId": data.get("messageId"), "text": data.get("transcript", ""), "force": True}}, "transcript", force=True)
+            await mark_processed(db, "ai.transcripts", event_id)
             await message.ack()
-        except Exception:
+        except Exception as error:
             log.exception("failed to consume transcript")
+            await retry_or_dead_letter(db, js, message, payload, "ai.transcripts", error)
 
     async def on_image(message):
+        payload = {}
         try:
             payload = json.loads(message.data)
             data = payload.get("data", payload)
+            event_id = payload_id(payload, message.data)
+            if not await claim_event(db, "ai.images", event_id, message.subject, payload):
+                await message.ack()
+                return
             current = await db.fetchval("SELECT COALESCE(text, '') FROM messages WHERE id=$1", data.get("messageId"))
             ocr = data.get("ocrText") or ""
-            await analyze_message({"data": {"messageId": data.get("messageId"), "text": f"{current or ''}\n[OCR] {ocr}".strip()}})
+            await process_analysis(db, analyze_message, {"data": {"messageId": data.get("messageId"), "text": f"{current or ''}\n[OCR] {ocr}".strip(), "force": True}}, "image", force=True)
+            await mark_processed(db, "ai.images", event_id)
             await message.ack()
-        except Exception:
+        except Exception as error:
             log.exception("failed to consume image analysis")
+            await retry_or_dead_letter(db, js, message, payload, "ai.images", error)
+
+    async def on_document(message):
+        payload = {}
+        try:
+            payload = json.loads(message.data)
+            data = payload.get("data", payload)
+            event_id = payload_id(payload, message.data)
+            if not await claim_event(db, "ai.documents", event_id, message.subject, payload):
+                await message.ack()
+                return
+            current = await db.fetchval("SELECT COALESCE(text, '') FROM messages WHERE id=$1", data.get("messageId"))
+            extracted = data.get("text") or data.get("ocrText") or ""
+            await process_analysis(db, analyze_message, {"data": {"messageId": data.get("messageId"), "text": f"{current or ''}\n[Dokument] {extracted}".strip(), "force": True}}, "document", force=True)
+            await mark_processed(db, "ai.documents", event_id)
+            await message.ack()
+        except Exception as error:
+            log.exception("failed to consume document analysis")
+            await retry_or_dead_letter(db, js, message, payload, "ai.documents", error)
+
+    async def on_replay(message):
+        payload = {}
+        replay_id = None
+        try:
+            payload = json.loads(message.data)
+            data = payload.get("data", payload)
+            replay_id = str(data["replayId"])
+            event_id = payload_id(payload, message.data)
+            if not await claim_event(db, "ai.replays", event_id, message.subject, payload):
+                await message.ack()
+                return
+            group_ids = [str(value) for value in data.get("groupIds", [])]
+            from_at = data["fromAt"]
+            to_at = data["toAt"]
+            await db.execute("UPDATE replay_jobs SET status='running', started_at=COALESCE(started_at,NOW()), updated_at=NOW() WHERE id=$1::uuid", replay_id)
+            rows = await db.fetch(
+                """SELECT m.id::text AS \"messageId\", m.group_id AS \"groupId\", COALESCE(m.text,'') AS text,
+                          m.received_at AS \"receivedAt\", m.kind, m.media_key AS \"mediaKey\", m.media_mime AS \"mediaMime\",
+                          mo.object_path AS \"objectPath\", aj.id::text AS \"jobId\"
+                   FROM messages m
+                   LEFT JOIN LATERAL (SELECT object_path FROM media_objects WHERE message_id=m.id AND status='completed' ORDER BY updated_at DESC LIMIT 1) mo ON TRUE
+                   LEFT JOIN LATERAL (SELECT id FROM audio_jobs WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) aj ON TRUE
+                   WHERE m.group_id = ANY($1::text[]) AND m.received_at >= $2::timestamptz AND m.received_at < $3::timestamptz
+                   ORDER BY m.received_at ASC""",
+                group_ids, from_at, to_at,
+            )
+            await db.execute("UPDATE replay_jobs SET total_count=$2, updated_at=NOW() WHERE id=$1::uuid", replay_id, len(rows))
+            processed = 0
+            failed = 0
+            for row in rows:
+                try:
+                    await process_analysis(db, analyze_message, {"data": {"messageId": row["messageId"], "groupId": row["groupId"], "text": row["text"], "force": True}}, "replay", force=True)
+                    if data.get("includeMedia") and row["objectPath"]:
+                        subject = "media.audio.requested" if row["kind"] == "audio" else "media.objects.requested"
+                        event_data = {"messageId": row["messageId"], "mediaKey": row["mediaKey"], "mediaMime": row["mediaMime"], "objectPath": row["objectPath"]}
+                        if row["kind"] == "audio":
+                            event_data["jobId"] = row["jobId"]
+                            if row["jobId"]:
+                                await db.execute("UPDATE audio_jobs SET status='queued', attempts=0, transcript=NULL, language=NULL, confidence=NULL, error=NULL, next_attempt_at=NOW(), updated_at=NOW() WHERE id=$1", row["jobId"])
+                        await publish(js, subject, subject, event_data)
+                    processed += 1
+                except Exception:
+                    failed += 1
+                    log.exception("replay item failed: %s", row["messageId"])
+                await db.execute("UPDATE replay_jobs SET processed_count=$2, failed_count=$3, updated_at=NOW() WHERE id=$1::uuid", replay_id, processed, failed)
+            await db.execute("UPDATE replay_jobs SET status=CASE WHEN failed_count > 0 AND processed_count=0 THEN 'failed' ELSE 'completed' END, completed_at=NOW(), updated_at=NOW() WHERE id=$1::uuid", replay_id)
+            await mark_processed(db, "ai.replays", event_id)
+            await message.ack()
+        except Exception as error:
+            log.exception("replay failed")
+            if replay_id:
+                await db.execute("UPDATE replay_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", replay_id, str(error)[:4000])
+            await retry_or_dead_letter(db, js, message, payload, "ai.replays", error)
 
     async def backfill_existing_knowledge(force: bool = False):
         if force:
@@ -1157,7 +1319,38 @@ async def main():
             return
         log.info("backfilling knowledge base for %d existing selected messages", len(rows))
         for row in rows:
-            await analyze_message({"data": dict(row)})
+            await process_analysis(db, analyze_message, {"data": dict(row)}, "startup-backfill", force=force)
+
+    async def recover_ai_jobs():
+        """Requeue stale AI work and publish queued jobs after a restart."""
+        while True:
+            try:
+                await db.execute(
+                    """UPDATE ai_jobs
+                       SET status=CASE WHEN attempts < $1 THEN 'queued' ELSE 'failed' END,
+                           error=COALESCE(error, 'AI worker restarted while processing'),
+                           next_attempt_at=CASE WHEN attempts < $1 THEN NOW() ELSE NULL END,
+                           updated_at=NOW()
+                       WHERE status='processing' AND updated_at < NOW() - ($2 * INTERVAL '1 second')""",
+                    AI_MAX_RETRIES, AI_STALE_PROCESSING_SECONDS,
+                )
+                rows = await db.fetch(
+                    """SELECT aj.id::text, aj.message_id::text, m.group_id, COALESCE(m.text,'') AS text, m.received_at
+                       FROM ai_jobs aj JOIN messages m ON m.id=aj.message_id
+                       WHERE aj.status='queued' AND (aj.next_attempt_at IS NULL OR aj.next_attempt_at <= NOW())
+                       ORDER BY COALESCE(aj.next_attempt_at, aj.created_at), aj.created_at LIMIT 20"""
+                )
+                for row in rows:
+                    claimed = await db.execute(
+                        """UPDATE ai_jobs SET next_attempt_at=NOW()+INTERVAL '2 minutes', updated_at=NOW()
+                           WHERE id=$1 AND status='queued' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())""",
+                        row["id"],
+                    )
+                    if claimed == "UPDATE 1":
+                        await publish_ai_job(js, row)
+            except Exception:
+                log.exception("AI recovery scheduler failed")
+            await asyncio.sleep(5)
 
     knowledge_rebuild_required = await prepare_knowledge_rebuild(db)
     await refresh_knowledge_topic_titles(db)
@@ -1167,7 +1360,10 @@ async def main():
     await js.subscribe("wa.messages.received", durable="WAGI_AI_MESSAGES", stream="WAGI_EVENTS", cb=on_message)
     await js.subscribe("media.audio.transcribed", durable="WAGI_AI_TRANSCRIPTS", stream="WAGI_EVENTS", cb=on_transcript)
     await js.subscribe("media.image.analyzed", durable="WAGI_AI_IMAGES", stream="WAGI_EVENTS", cb=on_image)
-    log.info("AI worker listening on wa.messages.received, media.audio.transcribed and media.image.analyzed (provider=%s, prompt=%s)", AI_PROVIDER, PROMPT_VERSION)
+    await js.subscribe("media.document.analyzed", durable="WAGI_AI_DOCUMENTS", stream="WAGI_EVENTS", cb=on_document)
+    await js.subscribe("replay.requested", durable="WAGI_AI_REPLAY", stream="WAGI_EVENTS", cb=on_replay)
+    asyncio.create_task(recover_ai_jobs())
+    log.info("AI worker listening with durable consumers for messages, audio, images, documents and replay (provider=%s, prompt=%s)", AI_PROVIDER, PROMPT_VERSION)
     await asyncio.Event().wait()
 
 

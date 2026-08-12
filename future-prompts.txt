@@ -1,104 +1,6 @@
-Extrahiere nicht nur Events aus den Daten / Chats sondern gruppiere und sammle auch Erkentnisse / Daten zu bestimmten Themen die automatisch erkannt und gruppiert werden sollen. Wenn eine Gruppe oder ein Kanal ausgewählt ist, soll diese "knowledge base" einen separaten Menüpunkt haben. Events und "knowledge base" und die relevanten nachrichten sollen separat gehalten und angezeigt werden und nicht vermischt. 
 
-========================================================================================================================================================
 
-media-worker-1  | ERROR:nats.aio.client:nats: encountered error
-media-worker-1  | Traceback (most recent call last):
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 2285, in _flusher
-media-worker-1  |     await self._transport.drain()
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/transport.py", line 172, in drain
-media-worker-1  |     return await self._io_writer.drain()
-media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/streams.py", line 392, in drain
-media-worker-1  |     await self._protocol._drain_helper()
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/streams.py", line 166, in _drain_helper
-media-worker-1  |     raise ConnectionResetError('Connection lost')
-media-worker-1  | ConnectionResetError: Connection lost
-media-worker-1  | ERROR:nats.aio.client:nats: encountered error
-media-worker-1  | Traceback (most recent call last):
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1594, in _attempt_reconnect
-media-worker-1  |     await self._transport.wait_closed()
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/transport.py", line 176, in wait_closed
-media-worker-1  |     return await self._io_writer.wait_closed()
-media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/streams.py", line 364, in wait_closed
-media-worker-1  |     await self._protocol._get_close_waiter(self)
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/selector_events.py", line 1075, in write
-media-worker-1  |     n = self._sock.send(data)
-media-worker-1  |         ^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  | BrokenPipeError: [Errno 32] Broken pipe
-media-worker-1  | ERROR:nats.aio.client:nats: encountered error
-media-worker-1  | Traceback (most recent call last):
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
-media-worker-1  |     return await fut
-media-worker-1  |            ^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/streams.py", line 48, in open_connection
-media-worker-1  |     transport, _ = await loop.create_connection(
-media-worker-1  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/base_events.py", line 1107, in create_connection
-media-worker-1  |     sock = await self._connect_sock(
-media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/base_events.py", line 1010, in _connect_sock
-media-worker-1  |     await self.sock_connect(sock, address)
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/selector_events.py", line 651, in sock_connect
-media-worker-1  |     return await fut
-media-worker-1  |            ^^^^^^^^^
-media-worker-1  | asyncio.exceptions.CancelledError
-media-worker-1  | 
-media-worker-1  | The above exception was the direct cause of the following exception:
-media-worker-1  | 
-media-worker-1  | Traceback (most recent call last):
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1501, in _select_next_server
-media-worker-1  |     await self._connect_to_server(s)
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1470, in _connect_to_server
-media-worker-1  |     await self._transport.connect(
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/transport.py", line 117, in connect
-media-worker-1  |     r, w = await asyncio.wait_for(
-media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
-media-worker-1  |     async with timeouts.timeout(timeout):
-media-worker-1  |                ^^^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
-media-worker-1  |     raise TimeoutError from exc_val
-media-worker-1  | TimeoutError
-media-worker-1  | ERROR:wagi-media-worker:audio job failed
-media-worker-1  | Traceback (most recent call last):
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
-media-worker-1  |     return await fut
-media-worker-1  |            ^^^^^^^^^
-media-worker-1  | asyncio.exceptions.CancelledError
-media-worker-1  | 
-media-worker-1  | The above exception was the direct cause of the following exception:
-media-worker-1  | 
-media-worker-1  | Traceback (most recent call last):
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1103, in _request_new_style
-media-worker-1  |     return await asyncio.wait_for(future, timeout)
-media-worker-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 519, in wait_for
-media-worker-1  |     async with timeouts.timeout(timeout):
-media-worker-1  |                ^^^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/asyncio/timeouts.py", line 115, in __aexit__
-media-worker-1  |     raise TimeoutError from exc_val
-media-worker-1  | TimeoutError
-media-worker-1  | 
-media-worker-1  | During handling of the above exception, another exception occurred:
-media-worker-1  | 
-media-worker-1  | Traceback (most recent call last):
-media-worker-1  |   File "/app/src/worker.py", line 282, in on_audio
-media-worker-1  |     await publish(js, {"jobId": job_id, "messageId": data["messageId"], "transcript": transcript, "language": language, "confidence": confidence, "provider": provider})
-media-worker-1  |   File "/app/src/worker.py", line 109, in publish
-media-worker-1  |     await js.publish(subject, json.dumps(event, default=str).encode())
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/js/client.py", line 208, in publish
-media-worker-1  |     msg = await self._nc.request(
-media-worker-1  |           ^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1068, in request
-media-worker-1  |     msg = await self._request_new_style(subject, payload, timeout=timeout, headers=headers)
-media-worker-1  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-media-worker-1  |   File "/usr/local/lib/python3.12/site-packages/nats/aio/client.py", line 1105, in _request_new_style
-media-worker-1  |     raise errors.TimeoutError
-media-worker-1  | nats.errors.TimeoutError: nats: timeout
-
-========================================================================================================================================================
+=========================================================================================================================================
 
 
 
@@ -218,12 +120,18 @@ Der Hostname für das web-interface soll www.conxtor.com sein. Soweit möglich s
 Erzeuge hierfür spezielle docker-compose.yaml, .env und .env.example dateien mit dem suffix -dockge
 Die Lokale testumgebung soll wie bisher funktionieren, ändere hier nichts. 
 
-
+=========================================================================================================================================
 HF_TOKEN: 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 
+=========================================================================================================================================
 
-- Nutzer sollen alle eigenen Gruppen sehen und verwalten können wie im single-user MVP
-- Wenn der jeweils abgearbeitete user auf dem neuesten Nachrichtenstand ist, soll der Konnektor wieder in das Pool freigegeben werden und vom nächsten User verwendet werden können
-- implementiere ein vollständig nutzergebundenes QR-Routing
-- Die grösse der pools für Whatsapp und Telegram soll in .env konfigurierbar sein.
-- Wenn die Anwendung bereits eine gewisse Zeit läuft ist kein Telegram-QR sichtbar und es kann auch kein Telegram-QR erzeugt werden
-- Im pool soll stets ein dedizierter Konnektor freigehalten werden damit neue Nutzer die Verbindung mit Whatsapp und Telegram via QR-Code herstellen können. Dieser Konnektor soll jedoch keine Nachrichten lesen oder verarbeiten, er soll unmittelbar nachdem die Verbindung hergestellt nur die Gruppen des users einlesen und wieder freigegeben werden. Die Nachrichtenverarbeitung und Backlog-Verarbeitung für den User soll dann turnusmässig stattfinden. 
+
+
+
+=========================================================================================================================================
+
+Videos sollen in einem Modal, ähnlich zu Bilddateien öffnen
+Bei Audionachrichten soll neben der Transkription auch das original-Audio abhörbar sein. 
+Evtl. ist hierfür der Eintrag
+client_max_body_size 32m;
+in der NGINX-Konfiguration zu knapp bemessen. 
+

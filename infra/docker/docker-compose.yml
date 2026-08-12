@@ -16,14 +16,42 @@ services:
       timeout: 5s
       retries: 20
 
+  migrate:
+    image: postgres:15-alpine
+    environment:
+      DB_HOST: db
+      DB_USER: ${POSTGRES_USER:-supabase_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+    volumes:
+      - ../migrations:/migrations:ro
+      - ../migration-runner:/runner:ro
+    command: ["/bin/sh", "/runner/run.sh"]
+    depends_on:
+      db: {condition: service_healthy}
+
   nats:
     image: nats:2.10-alpine
-    command: ["-js", "-m", "8222"]
+    command: ["-js", "-sd", "/data/jetstream", "-m", "8222"]
+    volumes:
+      - nats_data:/data/jetstream
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/healthz >/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 20
+
+  nats-provisioner:
+    build:
+      context: ../nats-provisioner
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_EVENT_MAX_AGE_DAYS: ${NATS_EVENT_MAX_AGE_DAYS:-30}
+      NATS_DLQ_MAX_AGE_DAYS: ${NATS_DLQ_MAX_AGE_DAYS:-90}
+      NATS_MAX_DELIVERIES: ${NATS_MAX_DELIVERIES:-5}
+    depends_on:
+      nats: {condition: service_healthy}
 
   minio:
     image: minio/minio:RELEASE.2025-07-23T15-54-02Z
@@ -62,6 +90,8 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      nats-provisioner: {condition: service_completed_successfully}
 
   wa-connector:
     build:
@@ -103,6 +133,8 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      nats-provisioner: {condition: service_completed_successfully}
 
   tg-connector:
     build:
@@ -147,6 +179,8 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      nats-provisioner: {condition: service_completed_successfully}
 
   # Additional pool workers intentionally do not publish a host port. The
   # first service above remains the local QR/status control endpoint; these
@@ -195,6 +229,8 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      nats-provisioner: {condition: service_completed_successfully}
 
   tg-connector-worker:
     # See wa-connector-worker above: this service intentionally has no host
@@ -243,6 +279,8 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      nats-provisioner: {condition: service_completed_successfully}
 
   ai-worker:
     build:
@@ -251,6 +289,9 @@ services:
     environment:
       DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
       NATS_URL: nats://nats:4222
+      NATS_MAX_DELIVERIES: ${NATS_MAX_DELIVERIES:-5}
+      NATS_RETRY_BASE_SECONDS: ${NATS_RETRY_BASE_SECONDS:-5}
+      NATS_RETRY_MAX_SECONDS: ${NATS_RETRY_MAX_SECONDS:-300}
       AI_MODEL: ${AI_MODEL:-heuristic-mvp}
       AI_PROVIDER: ${AI_PROVIDER:-hybrid}
       AI_ENDPOINT: ${AI_ENDPOINT:-}
@@ -273,11 +314,15 @@ services:
       AI_HERMES_TIMEOUT_MS: ${AI_HERMES_TIMEOUT_MS:-30000}
       AI_HERMES_REVIEW_ALL: ${AI_HERMES_REVIEW_ALL:-false}
       AI_HERMES_MIN_CONFIDENCE: ${AI_HERMES_MIN_CONFIDENCE:-0.78}
+      AI_MAX_RETRIES: ${AI_MAX_RETRIES:-5}
+      AI_STALE_PROCESSING_SECONDS: ${AI_STALE_PROCESSING_SECONDS:-900}
     volumes:
       - ai_models:/root/.cache/fastembed
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      nats-provisioner: {condition: service_completed_successfully}
 
   media-worker:
     build:
@@ -286,6 +331,9 @@ services:
     environment:
       DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
       NATS_URL: nats://nats:4222
+      NATS_MAX_DELIVERIES: ${NATS_MAX_DELIVERIES:-5}
+      NATS_RETRY_BASE_SECONDS: ${NATS_RETRY_BASE_SECONDS:-5}
+      NATS_RETRY_MAX_SECONDS: ${NATS_RETRY_MAX_SECONDS:-300}
       WHISPER_ENABLED: ${WHISPER_ENABLED:-true}
       WHISPER_MODEL: ${WHISPER_MODEL:-medium}
       WHISPER_CPP_BIN: /usr/local/bin/whisper-cli
@@ -307,6 +355,8 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      nats-provisioner: {condition: service_completed_successfully}
 
   web:
     build:
@@ -330,6 +380,7 @@ services:
 
 volumes:
   postgres_data:
+  nats_data:
   minio_data:
   wa_auth:
   tg_state:

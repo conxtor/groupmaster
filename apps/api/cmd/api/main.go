@@ -194,7 +194,7 @@ func ensureEventStream(js nats.JetStreamContext) error {
 	}
 	_, err := js.AddStream(&nats.StreamConfig{
 		Name:     "WAGI_EVENTS",
-		Subjects: []string{"wa.>", "media.>", "ai.>"},
+		Subjects: []string{"wa.>", "media.>", "ai.>", "connector.>", "replay.>"},
 		Storage:  nats.FileStorage,
 		MaxMsgs:  -1,
 	})
@@ -1104,6 +1104,7 @@ func main() {
 	mux.HandleFunc("/api/v1/auth/register", a.authRegister)
 	mux.HandleFunc("/api/v1/admin/users", requireAdmin(a, a.adminUsers))
 	mux.HandleFunc("/api/v1/admin/users/", requireAdmin(a, a.adminUsers))
+	mux.HandleFunc("/api/v1/admin/observability", requireAdmin(a, a.adminObservability))
 	mux.HandleFunc("/api/v1/connectors/accounts", requireAuthenticated(a, a.connectorAccounts))
 	mux.HandleFunc("/api/v1/connectors/accounts/", requireAuthenticated(a, a.connectorAccountAction))
 	mux.HandleFunc("/api/v1/status", requireAuthenticated(a, a.status))
@@ -1114,6 +1115,7 @@ func main() {
 	mux.HandleFunc("/api/v1/knowledge", requireAuthenticated(a, a.knowledge))
 	mux.HandleFunc("/api/v1/audio/jobs", requireAuthenticated(a, a.audioJobs))
 	mux.HandleFunc("/api/v1/audio/jobs/", requireAuthenticated(a, a.audioJobAction))
+	mux.HandleFunc("/api/v1/replays", requireAuthenticated(a, a.replays))
 	port := env("PORT", "8080")
 	log.Printf("wagi api listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, cors(a.corsOrigin, mux)))

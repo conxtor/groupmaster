@@ -5,9 +5,11 @@ export const subjects = {
   audioTranscribed: "media.audio.transcribed",
   mediaRequested: "media.objects.requested",
   imageAnalyzed: "media.image.analyzed",
+  documentAnalyzed: "media.document.analyzed",
   messageAnalyzed: "ai.messages.analyzed",
   connectorStatus: "connector.status.changed",
   groupSelectionChanged: "connector.group.selection.changed",
+  replayRequested: "replay.requested",
 } as const;
 
 export type EventSubject = (typeof subjects)[keyof typeof subjects];
@@ -81,6 +83,13 @@ export interface ImageAnalyzed {
   provider: string;
 }
 
+export interface DocumentAnalyzed {
+  messageId: string;
+  text?: string;
+  provider: string;
+  mime?: string;
+}
+
 export type ConnectorLifecycleStatus = "starting" | "pairing" | "connecting" | "syncing" | "ready" | "degraded" | "error" | "reauth_required" | "stopped";
 
 export interface ConnectorStatus {
@@ -107,6 +116,14 @@ export interface AudioTranscribed {
   language?: string;
   confidence?: number;
   provider: string;
+}
+
+export interface ReplayRequested {
+  replayId: string;
+  groupIds: string[];
+  fromAt: string;
+  toAt: string;
+  includeMedia: boolean;
 }
 
 export interface MessageAnalysis {

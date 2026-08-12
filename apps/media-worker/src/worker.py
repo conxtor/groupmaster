@@ -3,8 +3,10 @@ import hmac
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,6 +15,8 @@ import boto3
 import nats
 from botocore.client import Config
 from PIL import Image
+
+from reliability import claim_event, mark_processed, payload_id, retry_or_dead_letter
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("wagi-media-worker")
@@ -208,6 +212,33 @@ def extract_ocr(source: Path) -> str:
         return ""
 
 
+def extract_document_text(source: Path, mime: str) -> str:
+    """Extract searchable text from common documents without sending them remotely."""
+    AUDIO_WORK_DIR.mkdir(parents=True, exist_ok=True)
+    normalized = mime.split(";", 1)[0].lower()
+    suffix = source.suffix.lower()
+    if normalized == "application/pdf" or suffix == ".pdf":
+        run = subprocess.run(["pdftotext", "-layout", str(source), "-"], capture_output=True, text=True, check=False, timeout=120)
+        text = run.stdout.strip() if run.returncode == 0 else ""
+        if text:
+            return text
+        with tempfile.TemporaryDirectory(prefix="pdf-pages-", dir=AUDIO_WORK_DIR) as temp_dir:
+            prefix = str(Path(temp_dir) / "page")
+            subprocess.run(["pdftoppm", "-f", "1", "-l", "5", "-r", "150", "-png", str(source), prefix], capture_output=True, check=False, timeout=180)
+            pages = sorted(Path(temp_dir).glob("page-*.png"))
+            return "\n".join(filter(None, (extract_ocr(page) for page in pages))).strip()
+    if normalized in {"text/plain", "text/markdown", "text/csv", "text/html", "application/json", "application/xml"} or suffix in {".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm"}:
+        return source.read_text(encoding="utf-8", errors="replace").strip()[:200_000]
+    if normalized == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or suffix == ".docx":
+        try:
+            with zipfile.ZipFile(source) as archive:
+                xml = archive.read("word/document.xml").decode("utf-8", errors="replace")
+            return re.sub(r"<[^>]+>", " ", xml).replace("&amp;", "&").strip()[:200_000]
+        except (KeyError, zipfile.BadZipFile, OSError):
+            return ""
+    return ""
+
+
 def stage_media(data: dict) -> tuple[str, str | None, str, int, str]:
     source = Path(str(data["objectPath"]))
     if not source.is_file():
@@ -237,29 +268,45 @@ def stage_media(data: dict) -> tuple[str, str | None, str, int, str]:
             ocr_text = extract_ocr(source)
         except Exception as error:
             log.warning("image processing failed for %s: %s", message_id, error)
+    elif mime.startswith("application/") or source.suffix.lower() in {".pdf", ".docx", ".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm"}:
+        try:
+            ocr_text = extract_document_text(source, mime)
+        except Exception as error:
+            log.warning("document analysis failed for %s: %s", message_id, error)
     return object_key, thumbnail_key, thumbnail_path or "", source.stat().st_size, ocr_text
 
 
 async def on_media(db, js, message):
-    data = json.loads(message.data).get("data", json.loads(message.data))
+    payload = json.loads(message.data)
+    data = payload.get("data", payload)
     message_id = data["messageId"]
     media_key = data["mediaKey"]
+    event_id = payload_id(payload, message.data)
+    if not await claim_event(db, "media.objects", event_id, message.subject, payload):
+        await message.ack()
+        return
     try:
         await db.execute("UPDATE messages SET media_status='processing' WHERE id=$1", message_id)
         ocr_text = await stage_and_record_media(db, data)
         await db.execute("UPDATE messages SET media_status='completed' WHERE id=$1", message_id)
+        message_kind = await db.fetchval("SELECT kind FROM messages WHERE id=$1", message_id)
         if ocr_text:
-            await publish(js, {"_subject": "media.image.analyzed", "_type": "media.image.analyzed", "messageId": message_id, "ocrText": ocr_text, "provider": "tesseract"})
+            if message_kind == "image":
+                await publish(js, {"_subject": "media.image.analyzed", "_type": "media.image.analyzed", "messageId": message_id, "ocrText": ocr_text, "provider": "tesseract"})
+            elif message_kind == "document":
+                await publish(js, {"_subject": "media.document.analyzed", "_type": "media.document.analyzed", "messageId": message_id, "text": ocr_text, "mime": data.get("mediaMime"), "provider": "local-document-extractor"})
         if str(data.get("mediaMime", "")).startswith("audio/"):
             await db.execute("UPDATE audio_jobs SET object_path=$1 WHERE message_id=$2 AND media_key=$3", data.get("objectPath"), message_id, media_key)
             job_id = await db.fetchval("SELECT id FROM audio_jobs WHERE message_id=$1 AND media_key=$2 ORDER BY created_at DESC LIMIT 1", message_id, media_key)
             await publish(js, {"_subject": "media.audio.requested", "_type": "media.audio.requested", "jobId": str(job_id) if job_id else None, "messageId": message_id, "mediaKey": media_key, "mediaMime": data.get("mediaMime"), "objectPath": data.get("objectPath")})
+        await mark_processed(db, "media.objects", event_id)
         await message.ack()
     except Exception as error:
-        await db.execute("UPDATE messages SET media_status='failed' WHERE id=$1", message_id)
-        await db.execute("INSERT INTO media_objects (message_id, media_key, status, error, updated_at) VALUES ($1,$2,'failed',$3,NOW()) ON CONFLICT (message_id, media_key) DO UPDATE SET status='failed', error=$3, updated_at=NOW()", message_id, media_key, str(error))
+        deliveries = int(getattr(message.metadata, "num_delivered", 1) or 1) if message.metadata else 1
+        await db.execute("UPDATE messages SET media_status=$2 WHERE id=$1", message_id, "failed" if deliveries >= 5 else "pending")
+        await db.execute("INSERT INTO media_objects (message_id, media_key, status, error, updated_at) VALUES ($1,$2,$3,$4,NOW()) ON CONFLICT (message_id, media_key) DO UPDATE SET status=$3, error=$4, updated_at=NOW()", message_id, media_key, "failed" if deliveries >= 5 else "pending", str(error))
         log.exception("media job failed")
-        await message.ack()
+        await retry_or_dead_letter(db, js, message, payload, "media.objects", error)
 
 
 async def stage_and_record_media(db, data: dict) -> str:
@@ -324,8 +371,12 @@ async def repair_local_media(db, js):
             continue
         data["objectPath"] = str(source)
         try:
-            await stage_and_record_media(db, data)
+            analysis_text = await stage_and_record_media(db, data)
             await db.execute("UPDATE messages SET media_status='completed' WHERE id=$1", data["messageId"])
+            if analysis_text and row["kind"] == "image":
+                await publish(js, {"_subject": "media.image.analyzed", "_type": "media.image.analyzed", "messageId": data["messageId"], "ocrText": analysis_text, "provider": "tesseract"})
+            elif analysis_text and row["kind"] == "document":
+                await publish(js, {"_subject": "media.document.analyzed", "_type": "media.document.analyzed", "messageId": data["messageId"], "text": analysis_text, "mime": row["media_mime"], "provider": "local-document-extractor"})
             repaired += 1
         except Exception:
             log.exception("local media repair failed for %s", data["messageId"])
@@ -358,21 +409,29 @@ async def main():
         await js.stream_info("WAGI_EVENTS")
     except Exception:
         try:
-            await js.add_stream(name="WAGI_EVENTS", subjects=["wa.>", "media.>", "ai.>"])
+            await js.add_stream(name="WAGI_EVENTS", subjects=["wa.>", "media.>", "ai.>", "connector.>", "replay.>"])
         except Exception:
             await js.stream_info("WAGI_EVENTS")
 
     async def on_audio(message):
+        payload = {}
+        job_id = None
         try:
             payload = json.loads(message.data)
             data = payload.get("data", payload)
             job_id = data["jobId"]
+            event_id = payload_id(payload, message.data)
+            if not await claim_event(db, "media.audio", event_id, message.subject, payload):
+                await message.ack()
+                return
             current = await db.fetchrow("SELECT status FROM audio_jobs WHERE id=$1", job_id)
-            if not current or current["status"] == "completed":
+            if not current or current["status"] in {"completed", "failed"}:
+                await mark_processed(db, "media.audio", event_id)
                 await message.ack()
                 return
             if current["status"] == "processing":
                 # A duplicate JetStream delivery must not run whisper.cpp twice.
+                await mark_processed(db, "media.audio", event_id)
                 await message.ack()
                 return
             await db.execute("UPDATE audio_jobs SET status='processing', attempts=attempts+1, next_attempt_at=NULL, updated_at=NOW() WHERE id=$1", job_id)
@@ -390,14 +449,15 @@ async def main():
                 provider = "placeholder-mvp"
             await publish(js, {"jobId": job_id, "messageId": data["messageId"], "transcript": transcript, "language": language, "confidence": confidence, "provider": provider})
             await db.execute("UPDATE audio_jobs SET status='completed', transcript=$1, language=$2, confidence=$3, error=NULL, updated_at=NOW() WHERE id=$4", transcript, language, confidence, job_id)
+            await mark_processed(db, "media.audio", event_id)
             await message.ack()
         except Exception as exc:
             log.exception("audio job failed")
-            if "job_id" in locals():
+            if job_id:
                 attempts = await db.fetchval("SELECT attempts FROM audio_jobs WHERE id=$1", job_id) or MEDIA_MAX_RETRIES
                 next_status = "queued" if attempts < MEDIA_MAX_RETRIES else "failed"
                 await db.execute("UPDATE audio_jobs SET status=$1, error=$2, next_attempt_at=CASE WHEN $1='queued' THEN NOW()+INTERVAL '30 seconds' ELSE NULL END, updated_at=NOW() WHERE id=$3", next_status, str(exc), job_id)
-            await message.ack()
+            await retry_or_dead_letter(db, js, message, payload, "media.audio", exc)
 
     async def republish_due_audio_jobs():
         """Recover queued jobs after a worker restart or a transient failure."""

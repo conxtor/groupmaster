@@ -12,7 +12,7 @@ RUN mkdir -p /tmp/whisper-libs && find /src/whisper.cpp/build -type f -name 'lib
 
 FROM python:3.12-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg libgomp1 libstdc++6 tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu tesseract-ocr-spa tesseract-ocr-fra && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg libgomp1 libstdc++6 poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu tesseract-ocr-spa tesseract-ocr-fra && rm -rf /var/lib/apt/lists/*
 COPY --from=whisper-builder /src/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli
 COPY --from=whisper-builder /tmp/whisper-libs/ /usr/local/lib/
 COPY apps/media-worker/ensure-whisper-model.sh /usr/local/bin/ensure-whisper-model

@@ -358,7 +358,7 @@ export default function Dashboard() {
         const nextSourceMessages = sourceMessagesResponse.ok ? await sourceMessagesResponse.json() as Message[] : nextMessages;
         const nextStatus = statusResponse.ok ? await statusResponse.json() as ServiceStatus : null;
         if (active) { setGroups(nextGroups); setMessages(nextMessages); setEventSourceMessages(nextSourceMessages); setMessagesHasMore(messagesResponse.headers.get("x-has-more") === "true"); setServiceStatus(nextStatus); setLive(true); setError(null); }
-      } catch { if (active) setError(t("demoNotice")); }
+      } catch { if (active) setError(t("liveDataUnavailable")); }
       finally { if (active) setMessagesLoading(false); }
     }
     void loadDashboard();
@@ -427,7 +427,7 @@ export default function Dashboard() {
     <main className="shell">
       <header className="topbar">
         <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("title")}</h1></div>
-        <div className="topbarTools"><nav className="pageNav"><Link href="/" className="pageNavActive">{t("dashboard")}</Link><Link href="/knowledge">{t("knowledge")}</Link><Link href="/connectors">{t("connectors")}</Link><Link href="/groups">{t("manageGroups")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
+        <div className="topbarTools"><nav className="pageNav"><Link href="/" className="pageNavActive">{t("dashboard")}</Link><Link href="/knowledge">{t("knowledge")}</Link><Link href="/connectors">{t("connectors")}</Link><Link href="/groups">{t("manageGroups")}</Link><Link href="/replays">{t("replayBackfill")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
       </header>
       <section className="hero"><div><p className="eyebrow">{t("signalCheck")}</p><p className="heroNumber">{visibleMessages.filter((item) => item.analysis?.relevant).length || 1}</p><p className="muted">{t("relevantSignals", { scope })}</p></div><div className="heroNote"><span>✦</span><p>{t("heroNote")}</p></div></section>
       {error && <div className="notice">{error}</div>}

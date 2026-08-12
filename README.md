@@ -447,21 +447,18 @@ npm run dev --workspace=@wagi/web
 
 Die API und Worker werden primär über Compose gestartet. Die Datenbankmigrationen laufen automatisch beim ersten Start eines frischen `postgres_data`-Volumes. Für einen erneuten lokalen Test kann das Volume gezielt über Compose entfernt werden.
 
-Bei einer bereits bestehenden Datenbank müssen die Auth-/Pool-Migrationen
-einmal manuell ausgeführt werden, weil PostgreSQL Init-Skripte nur für ein
-frisches Volume ausführt:
+Die Datenbankmigrationen werden bei `docker-compose up` vom einmalig
+ausgeführten `migrate`-Dienst eingespielt. Jede Datei unter
+`infra/migrations` wird in `schema_migrations` mit Version und SHA-256-Prüfsumme
+protokolliert; dadurch funktionieren neue Migrationen auch mit bereits
+vorhandenen PostgreSQL-Volumes. Für eine explizite Ausführung ohne Neustart:
 
 ```bash
-docker-compose exec -T db psql -U supabase_admin -d app \
-  -f /docker-entrypoint-initdb.d/006_auth_multitenancy.sql
-docker-compose exec -T db psql -U supabase_admin -d app \
-  -f /docker-entrypoint-initdb.d/007_connector_onboarding_pool.sql
-docker-compose exec -T db psql -U supabase_admin -d app \
-  -f /docker-entrypoint-initdb.d/008_whatsapp_contacts.sql
+docker-compose run --rm migrate
 ```
 
-Danach den API-Dienst neu starten. Er legt den Bootstrap-Administrator beim
-ersten erfolgreichen Start an.
+Die PostgreSQL-Init-Skripte bleiben für ein frisches Volume idempotent. Der
+Bootstrap-Administrator wird beim ersten erfolgreichen API-Start angelegt.
 
 ## API-Endpunkte
 
@@ -477,7 +474,38 @@ ersten erfolgreichen Start an.
   `&relevant=true` (nur relevante Nachrichten)
 - `GET /api/v1/knowledge` oder `GET /api/v1/knowledge?groupId=<selected-group>`
 - `POST /api/v1/audio/jobs` mit `messageId`, `mediaKey`, optional `mediaMime`
+- `GET /api/v1/replays` zeigt die eigenen Replay-Jobs
+- `POST /api/v1/replays` startet einen Replay/Backfill für ausgewählte Gruppen:
+  `{ "groupIds": ["..."], "from": "2026-08-01T00:00:00Z", "to": "2026-08-08T00:00:00Z", "includeMedia": true }`
 - `GET /metrics`
+
+Replay verarbeitet nur Gruppen, auf die der angemeldete Nutzer Zugriff hat und
+die er ausgewählt hat. Der Zeitraum ist auf 366 Tage begrenzt. Nachrichten und
+bereits gespeicherte Medien werden erneut in die Analyse-/Medienpipeline
+eingereiht; `to` ist der exklusive Endzeitpunkt. Der Fortschritt ist über
+`GET /api/v1/replays` und die Seite „Replay / Backfill“ sichtbar.
+
+### Verarbeitung, Wiederanlauf und Dokumente
+
+Der NATS-Provisioner legt den persistenten JetStream-Stream `WAGI_EVENTS`, den
+separaten `WAGI_DLQ`-Stream sowie die expliziten Durable Consumer für Nachrichten,
+Audio, Bilder, Dokumente und Replay an. Die Consumer verwenden explizite ACKs,
+konfigurierbare maximale Zustellungen und exponentielles Backoff. Nach dem
+letzten Versuch wird das Ereignis in `event_failures` protokolliert, in `dlq.*`
+veröffentlicht und quittiert, damit eine einzelne fehlerhafte Nachricht die
+Pipeline nicht blockiert.
+
+Die Worker schreiben vor der Verarbeitung einen Inbox-Eintrag in
+`event_inbox`. Dadurch werden doppelte JetStream-Zustellungen sicher erkannt.
+Audio- und KI-Jobs werden in `audio_jobs` bzw. `ai_jobs` mit Status, Versuchen,
+Fehler und nächstem Versuch gespeichert. Nach einem Neustart werden verwaiste
+`processing`-Jobs zurückgesetzt und automatisch erneut eingereiht.
+
+PDF-, DOCX-, TXT-, Markdown-, CSV-, JSON-, XML- und HTML-Dateien werden lokal
+analysiert. PDF-Text wird mit `pdftotext` extrahiert; wenn kein Text vorhanden
+ist, folgt eine lokale OCR der ersten Seiten. Die extrahierten Inhalte werden
+als `media.document.analyzed` an den KI-Worker übergeben und bleiben auf dem
+lokalen System.
 
 ## Anmeldung, Rollen und Connector-Pool
 

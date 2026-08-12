@@ -33,7 +33,7 @@ Ziel: Ein einzelner vertrauenswürdiger Nutzer kann reale Gruppen sicher verbind
 - [x] Echte WhatsApp-Medien herunterladen und entschlüsseln
 - [x] Telegram- und WhatsApp-Medien dauerhaft in MinIO speichern
 - [x] Bild-Thumbnails und sichere Download-Pfade; Audio-/Videowiedergabe in der UI bleibt offen
-- [x] OCR und erste Bildanalyse für Bilder, Screenshots und Karten; Dokumentanalyse bleibt offen
+- [x] OCR und erste Bildanalyse für Bilder, Screenshots und Karten sowie lokale Dokumentanalyse für PDF/DOCX/Textdateien
 - [x] Audio-Worker so verdrahten, dass reale Quelldateien an whisper.cpp übergeben werden
 - [x] Status, Retry und Fehleranzeige für Audiojobs; Audiojobs werden nach Worker-Neustarts und transienten Fehlern automatisch wieder eingeplant
 
@@ -78,13 +78,13 @@ Ziel: Sicherer und betrieblich belastbarer Einsatz mit mehreren Nutzern und Grup
 
 ### Verarbeitung und Zuverlässigkeit
 
-- [ ] Explizite JetStream-Streams und Consumer provisionieren
-- [ ] Retry-Strategien, Dead-Letter-Queues und Backoff
-- [ ] Idempotente Verarbeitung mit Outbox- oder Inbox-Muster
-- [ ] Wiederanlauf und Recovery für unterbrochene Audio-/KI-Jobs
-- [ ] Dokumentanalyse
-- [ ] Replay und Backfill für ausgewählte Zeiträume
-- [ ] Datenbankmigrationen versioniert und für bestehende Installationen ausführbar machen
+- [x] Explizite JetStream-Streams und Consumer provisionieren
+- [x] Retry-Strategien, Dead-Letter-Queues und Backoff
+- [x] Idempotente Verarbeitung mit Inbox-Muster
+- [x] Wiederanlauf und Recovery für unterbrochene Audio-/KI-Jobs
+- [x] Dokumentanalyse für PDF, DOCX, Text- und strukturierte Dateien mit lokaler Extraktion/OCR
+- [x] Replay und Backfill für ausgewählte Zeiträume über `POST /api/v1/replays`
+- [x] Datenbankmigrationen versioniert und für bestehende Installationen ausführbar machen
 - [ ] Backups, Restore-Tests und Aufbewahrungsregeln
 
 ### Betrieb und Observability
