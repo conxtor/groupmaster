@@ -173,20 +173,22 @@ type knowledgeTopic struct {
 }
 
 type knowledgeSourceMessage struct {
-	ID           string    `json:"id"`
-	GroupID      string    `json:"groupId"`
-	SenderJID    string    `json:"senderJid"`
-	SenderName   *string   `json:"senderName,omitempty"`
-	Kind         string    `json:"kind"`
-	Text         *string   `json:"text,omitempty"`
-	MediaMime    *string   `json:"mediaMime,omitempty"`
-	MediaStatus  string    `json:"mediaStatus,omitempty"`
-	ReceivedAt   time.Time `json:"receivedAt"`
-	HasMedia     bool      `json:"hasMedia"`
-	HasThumbnail bool      `json:"-"`
-	ImageURL     string    `json:"imageUrl,omitempty"`
-	MediaURL     string    `json:"mediaUrl,omitempty"`
-	ThumbnailURL string    `json:"thumbnailUrl,omitempty"`
+	ID              string    `json:"id"`
+	GroupID         string    `json:"groupId"`
+	SenderJID       string    `json:"senderJid"`
+	SenderName      *string   `json:"senderName,omitempty"`
+	Kind            string    `json:"kind"`
+	Text            *string   `json:"text,omitempty"`
+	DocumentSummary *string   `json:"documentSummary,omitempty"`
+	MediaMime       *string   `json:"mediaMime,omitempty"`
+	MediaStatus     string    `json:"mediaStatus,omitempty"`
+	ReceivedAt      time.Time `json:"receivedAt"`
+	HasMedia        bool      `json:"hasMedia"`
+	HasObject       bool      `json:"-"`
+	HasThumbnail    bool      `json:"-"`
+	ImageURL        string    `json:"imageUrl,omitempty"`
+	MediaURL        string    `json:"mediaUrl,omitempty"`
+	ThumbnailURL    string    `json:"thumbnailUrl,omitempty"`
 }
 
 func env(key, fallback string) string {
@@ -439,7 +441,7 @@ func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
 			SELECT object_path, thumbnail_path, mime FROM media_objects
 			WHERE message_id = m.id ORDER BY updated_at DESC LIMIT 1
 		) mo ON TRUE
-		WHERE m.id = $1::uuid AND m.has_media = TRUE AND m.kind IN ('image', 'video', 'audio') AND %s AND %s`, visibility, selection), mediaArgs...).
+		WHERE m.id = $1::uuid AND m.has_media = TRUE AND m.kind IN ('image', 'video', 'audio', 'document') AND %s AND %s`, visibility, selection), mediaArgs...).
 		Scan(&mediaKey, &mediaMime, &platform, &waMessageID, &kind, &objectPath, &thumbnailPath, &storedMime)
 	if err == pgx.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "media not found"})
@@ -723,9 +725,9 @@ func (a *app) hydrateKnowledgeItems(items []knowledgeItem, sources map[string]kn
 			if !ok {
 				continue
 			}
-			if source.Kind == "image" || source.Kind == "video" || source.Kind == "audio" {
+			if source.Kind == "image" || source.Kind == "video" || source.Kind == "audio" || source.Kind == "document" {
 				source.ImageURL = mockImageURL(source.GroupID, source.Text)
-				if source.HasMedia && !strings.HasPrefix(source.GroupID, "120363mock") {
+				if source.HasMedia && source.HasObject && !strings.HasPrefix(source.GroupID, "120363mock") {
 					source.MediaURL = a.signedMediaURL(source.ID, false)
 					if source.Kind == "image" || (source.Kind == "video" && source.HasThumbnail) {
 						source.ThumbnailURL = a.signedMediaURL(source.ID, true)
@@ -753,10 +755,11 @@ func (a *app) hydrateKnowledgeTopics(ctx context.Context, topics []knowledgeTopi
 	}
 	rows, err := a.db.Query(ctx, `
 		SELECT m.id::text, m.group_id, m.sender_jid, m.sender_name, m.kind,
-		       COALESCE(NULLIF(aj.transcript, ''), m.text),
+		       COALESCE(NULLIF(aj.transcript, ''), m.text), a.summary,
 		       m.media_mime, m.media_status, m.received_at, m.has_media,
-		       COALESCE(mo.has_thumbnail, false)
+		       COALESCE(mo.has_object, false), COALESCE(mo.has_thumbnail, false)
 		FROM messages m
+		LEFT JOIN message_analyses a ON a.message_id = m.id
 		LEFT JOIN LATERAL (
 			SELECT transcript
 			FROM audio_jobs
@@ -765,7 +768,8 @@ func (a *app) hydrateKnowledgeTopics(ctx context.Context, topics []knowledgeTopi
 			LIMIT 1
 		) aj ON TRUE
 		LEFT JOIN LATERAL (
-			SELECT NULLIF(thumbnail_path, '') IS NOT NULL AS has_thumbnail
+			SELECT NULLIF(object_path, '') IS NOT NULL AS has_object,
+			       NULLIF(thumbnail_path, '') IS NOT NULL AS has_thumbnail
 			FROM media_objects
 			WHERE message_id = m.id
 			ORDER BY updated_at DESC
@@ -779,7 +783,7 @@ func (a *app) hydrateKnowledgeTopics(ctx context.Context, topics []knowledgeTopi
 	sources := make(map[string]knowledgeSourceMessage, len(sourceIDs))
 	for rows.Next() {
 		var source knowledgeSourceMessage
-		if err := rows.Scan(&source.ID, &source.GroupID, &source.SenderJID, &source.SenderName, &source.Kind, &source.Text, &source.MediaMime, &source.MediaStatus, &source.ReceivedAt, &source.HasMedia, &source.HasThumbnail); err != nil {
+		if err := rows.Scan(&source.ID, &source.GroupID, &source.SenderJID, &source.SenderName, &source.Kind, &source.Text, &source.DocumentSummary, &source.MediaMime, &source.MediaStatus, &source.ReceivedAt, &source.HasMedia, &source.HasObject, &source.HasThumbnail); err != nil {
 			return err
 		}
 		sources[source.ID] = source

@@ -102,8 +102,14 @@ function time(value: string, locale: Locale) {
 }
 
 function kindLabel(kind: string, locale: Locale) {
-  const key = kind === "audio" ? "audio" : kind === "image" ? "image" : kind === "location" ? "location" : kind === "video" ? "video" : "text";
+  const key = kind === "audio" ? "audio" : kind === "image" ? "image" : kind === "location" ? "location" : kind === "video" ? "video" : kind === "document" ? "document" : "text";
   return translate(locale, key);
+}
+
+function shortDocumentSummary(value: string | undefined, fallback: string) {
+  const normalized = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return fallback;
+  return normalized.length > 240 ? `${normalized.slice(0, 237).trimEnd()}…` : normalized;
 }
 
 function messageIdentity(message: Message) {
@@ -277,7 +283,9 @@ function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscript
   const source = imageSource(message);
   const original = resolveMediaUrl(message.mediaUrl) ?? source;
   const video = videoSource(message);
-  const displayText = message.kind === "audio" && message.transcript ? message.transcript : message.text ?? message.transcript ?? t("noText");
+  const displayText = message.kind === "document"
+    ? `${t("documentSummary")}: ${shortDocumentSummary(message.analysis?.summary ?? message.text, t("noText"))}`
+    : message.kind === "audio" && message.transcript ? message.transcript : message.text ?? message.transcript ?? t("noText");
   const [imageOpen, setImageOpen] = useState(false);
   const [videoOpen, setVideoOpen] = useState(false);
   const [transcriptDraft, setTranscriptDraft] = useState(message.transcript ?? "");
@@ -301,6 +309,7 @@ function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscript
       <div className="messageMeta"><span className="avatar small">{(message.senderName ?? "?").slice(0, 1)}</span><span><strong>{message.senderName ?? message.senderJid}</strong><small>{message.platform === "telegram" ? "Telegram" : "WhatsApp"} · {messageGroupSubject(message, t)} · {time(message.receivedAt, locale)}</small></span><span className={`kind ${message.kind}`}>{kindLabel(message.kind, locale)}</span></div>
       {message.replyToWaMessageId && <p className="replyRef">{t("replyTo", { id: message.replyToWaMessageId })}</p>}
       <p className="messageText"><LinkifiedText text={displayText} /></p>
+      {message.kind === "document" && original && <p className="documentLink"><a href={original} target="_blank" rel="noopener noreferrer">{t("openDocument")}</a></p>}
       {message.kind === "audio" && original && <AudioPlayer messageId={message.id} src={original} label={t("originalAudio")} unsupported={t("audioUnsupported")} />}
       {(message.kind === "audio" || message.audioStatus || message.transcript) && <div className={`audioJobPanel ${message.audioStatus === "failed" ? "failed" : ""}`}>
         <div className="audioJobHead"><strong>{t("audioStatus")}</strong><span>{audioStatusLabel(message.audioStatus, t)}</span></div>

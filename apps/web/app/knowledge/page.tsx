@@ -26,6 +26,7 @@ type KnowledgeSourceMessage = {
   kind: string;
   text?: string;
   transcript?: string;
+  documentSummary?: string;
   mediaMime?: string;
   mediaStatus?: string;
   receivedAt: string;
@@ -126,14 +127,23 @@ function knowledgeSourceKind(kind: string): TranslationKey {
   if (kind === "audio") return "audio";
   if (kind === "location") return "location";
   if (kind === "video") return "video";
+  if (kind === "document") return "document";
   return "text";
+}
+
+function shortDocumentSummary(value: string | undefined, fallback: string) {
+  const normalized = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return fallback;
+  return normalized.length > 240 ? `${normalized.slice(0, 237).trimEnd()}…` : normalized;
 }
 
 function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSourceMessage; locale: Locale; t: Translator }) {
   const preview = resolveMediaUrl(source.thumbnailUrl || source.imageUrl);
   const original = resolveMediaUrl(source.mediaUrl || source.imageUrl || source.thumbnailUrl);
   const video = resolveMediaUrl(source.mediaUrl);
-  const displayText = source.kind === "audio" && source.transcript ? source.transcript : source.text || source.transcript || t("noText");
+  const displayText = source.kind === "document"
+    ? `${t("documentSummary")}: ${shortDocumentSummary(source.documentSummary || source.text, t("noText"))}`
+    : source.kind === "audio" && source.transcript ? source.transcript : source.text || source.transcript || t("noText");
   const [imageOpen, setImageOpen] = useState(false);
   const [videoOpen, setVideoOpen] = useState(false);
 
@@ -154,6 +164,7 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
       <time dateTime={source.receivedAt}>{formatKnowledgeDate(source.receivedAt, locale)}</time>
     </div>
     <p className="knowledgeSourceMessageText"><LinkifiedText text={displayText} /></p>
+    {source.kind === "document" && original && <p className="documentLink"><a href={original} target="_blank" rel="noopener noreferrer">{t("openDocument")}</a></p>}
     {source.kind === "audio" && original && <AudioPlayer messageId={source.id} src={original} label={t("originalAudio")} unsupported={t("audioUnsupported")} />}
     {source.kind === "image" && preview && <figure className="knowledgeSourceMessageFigure">
       <button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}>
