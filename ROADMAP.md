@@ -25,6 +25,8 @@ Ziel: Ein einzelner vertrauenswürdiger Nutzer kann reale Gruppen sicher verbind
 - [x] Connector-Status für QR-Pairing, Session, Fehler und erneute Anmeldung über die Status-Endpunkte
 - [x] Telegram-Dateien über `getFile` abrufen und an die MinIO-Medienpipeline übergeben
 - [x] Gemeinsamer Connector-SDK-Vertrag mit Lifecycle-Status und Fehlervertrag; produktive Connector-Implementierung wird weiter vereinheitlicht
+- [x] Benutzergebundene QR-Routen für WhatsApp und Telegram mit persistenten Kontositzungen und dediziertem Onboarding-Slot
+- [x] Gruppenentdeckung und Gruppenauswahl pro Nutzerkonto; nicht mehr erreichbare Gruppen werden automatisch aus Auswahl und Datenbestand bereinigt
 
 ### Medien
 
@@ -59,7 +61,14 @@ Ziel: Sicherer und betrieblich belastbarer Einsatz mit mehreren Nutzern und Grup
 ### Sicherheit und Datenschutz
 
 - [x] User-Login und sichere Session-Verwaltung über E-Mail/Passwort, bcrypt, HttpOnly-Sitzungscookie und Ablauf-/Logout-Handling
-- [x] Rollen und Rechte für Nutzer, Gruppen, Medien und Administration; Admin-Freigaben werden pro Gruppe in `user_group_access` geprüft
+- [x] Rollen und Rechte für Nutzer, Medien und Administration; Gruppen und Auswahllisten werden ausschließlich im jeweiligen Nutzerkonto über `user_group_access` verwaltet
+
+### Mehrbenutzer-Connector-Betrieb
+
+- [x] Nutzerkonten, persistente Connector-Sessions und Gruppen-Cursor in PostgreSQL
+- [x] Konfigurierbare WhatsApp-/Telegram-Processing-Pools mit exklusiven Leases
+- [x] Turnusverarbeitung: Lease-Freigabe nach dem Aufholen auf den aktuellen Nachrichtenstand
+- [x] Reservierter Onboarding-Konnektor pro Plattform, der nur Gruppen einliest und keine Nachrichten verarbeitet
 - [ ] Tenant-Isolation für mehrere Organisationen oder private Arbeitsbereiche
 - [ ] Verschlüsselung bei Transport und Speicherung
 - [ ] Secret-Management statt ungeschützter `.env`-Werte

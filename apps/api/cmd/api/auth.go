@@ -53,6 +53,16 @@ func groupManageCondition(user *authenticatedUser, alias string, args *[]any) st
 	return fmt.Sprintf("EXISTS (SELECT 1 FROM user_group_access uga WHERE uga.user_id=$%d::uuid AND uga.group_id=%s.id AND uga.can_manage=TRUE)", len(*args), alias)
 }
 
+// groupSelectedCondition keeps the legacy administrator selection while
+// storing each regular user's subscription independently.
+func groupSelectedCondition(user *authenticatedUser, alias string, args *[]any) string {
+	if user.isAdmin() {
+		return fmt.Sprintf("%s.is_selected = TRUE", alias)
+	}
+	*args = append(*args, user.ID)
+	return fmt.Sprintf("EXISTS (SELECT 1 FROM user_group_access uga WHERE uga.user_id=$%d::uuid AND uga.group_id=%s.id AND uga.can_read=TRUE AND uga.is_selected=TRUE)", len(*args), alias)
+}
+
 type authRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -62,13 +72,6 @@ type authRequest struct {
 type roleRequest struct {
 	Role   string `json:"role"`
 	Status string `json:"status"`
-}
-
-type groupPermissionRequest struct {
-	UserID    string `json:"userId"`
-	GroupID   string `json:"groupId"`
-	CanRead   bool   `json:"canRead"`
-	CanManage bool   `json:"canManage"`
 }
 
 func normalizeEmail(email string) string {

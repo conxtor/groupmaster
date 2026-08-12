@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -22,9 +23,130 @@ type connectorAccountView struct {
 	UpdatedAt         time.Time  `json:"updatedAt"`
 }
 
+type connectorQRView struct {
+	AccountID     string     `json:"accountId"`
+	Platform      string     `json:"platform"`
+	Status        string     `json:"status"`
+	Connected     bool       `json:"connected"`
+	QR            *string    `json:"qr,omitempty"`
+	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
+	LastError     *string    `json:"lastError,omitempty"`
+	RequestID     *string    `json:"requestId,omitempty"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
+	QueuePosition *int       `json:"queuePosition,omitempty"`
+	QueueLength   *int       `json:"queueLength,omitempty"`
+	WaitReason    *string    `json:"waitReason,omitempty"`
+	LeaseKind     *string    `json:"leaseKind,omitempty"`
+}
+
 type connectorAccountRequest struct {
 	Platform string `json:"platform"`
 	Label    string `json:"label"`
+}
+
+func intPointer(value int) *int { return &value }
+
+func stringPointer(value string) *string { return &value }
+
+// connectorQueueInfo describes both the dedicated QR slot and the rotating
+// processing pool. It is deliberately calculated from live leases so the UI
+// can distinguish "waiting for a slot" from an actual connector error.
+func (a *app) connectorQueueInfo(ctx context.Context, accountID, platform string) (queuePosition, queueLength *int, waitReason, leaseKind *string, err error) {
+	var accountStatus string
+	var sessionAvailable bool
+	var requestStatus *string
+	var activeLeaseKind *string
+	var pendingRequests, activeOnboarding, activeProcessing int
+	var pendingPosition *int
+	err = a.db.QueryRow(ctx, `
+		SELECT ca.status, ca.session_data IS NOT NULL, latest.status, active.lease_kind,
+			(SELECT COUNT(*)::int FROM connector_onboarding_requests pending
+			 WHERE pending.platform=$2 AND pending.status='pending'),
+			(SELECT COUNT(*)::int FROM connector_leases onboarding
+			 JOIN connector_accounts onboarding_account ON onboarding_account.id=onboarding.account_id
+			 WHERE onboarding_account.platform=$2 AND onboarding.lease_kind='onboarding' AND onboarding.lease_until>NOW()),
+			(SELECT COUNT(*)::int FROM connector_leases processing
+			 JOIN connector_accounts processing_account ON processing_account.id=processing.account_id
+			 WHERE processing_account.platform=$2 AND processing.lease_kind='processing' AND processing.lease_until>NOW()),
+			CASE WHEN latest.status='pending' THEN (
+				SELECT COUNT(*)::int + 1 FROM connector_onboarding_requests earlier
+				WHERE earlier.platform=$2 AND earlier.status='pending'
+				  AND (earlier.updated_at > latest.updated_at
+				       OR (earlier.updated_at=latest.updated_at AND earlier.created_at > latest.created_at))
+			) END
+		FROM connector_accounts ca
+		LEFT JOIN connector_leases active ON active.account_id=ca.id AND active.lease_until>NOW()
+		LEFT JOIN LATERAL (
+			SELECT request.status, request.updated_at, request.created_at
+			FROM connector_onboarding_requests request
+			WHERE request.account_id=ca.id AND request.status IN ('pending','claimed','connected')
+			ORDER BY request.created_at DESC LIMIT 1
+		) latest ON TRUE
+		WHERE ca.id=$1::uuid AND ca.platform=$2`, accountID, platform).
+		Scan(&accountStatus, &sessionAvailable, &requestStatus, &activeLeaseKind, &pendingRequests, &activeOnboarding, &activeProcessing, &pendingPosition)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	if activeLeaseKind != nil {
+		leaseKind = activeLeaseKind
+	}
+	if requestStatus != nil {
+		switch *requestStatus {
+		case "pending":
+			queuePosition = pendingPosition
+			queueLength = intPointer(pendingRequests)
+			if activeOnboarding >= a.onboardingSlots(platform) {
+				waitReason = stringPointer("onboarding_slot")
+			} else {
+				waitReason = stringPointer("onboarding_queue")
+			}
+		case "claimed", "connected":
+			if activeLeaseKind == nil || *activeLeaseKind != "onboarding" {
+				queuePosition = intPointer(1)
+				queueLength = intPointer(pendingRequests + 1)
+				waitReason = stringPointer("onboarding_slot")
+			}
+		}
+		return queuePosition, queueLength, waitReason, leaseKind, nil
+	}
+
+	// After a successful QR onboarding, the account is paused until the
+	// rotating processing pool claims it. Expose that short wait instead of
+	// presenting the misleading QR/authentication message again.
+	if sessionAvailable && (accountStatus == "paused" || accountStatus == "degraded" || accountStatus == "disconnected") {
+		var position, total int
+		processingErr := a.db.QueryRow(ctx, `
+			WITH eligible AS (
+				SELECT ca.id, ROW_NUMBER() OVER (ORDER BY ca.next_sync_at, ca.created_at)::int AS position,
+					COUNT(*) OVER ()::int AS total
+				FROM connector_accounts ca
+				WHERE ca.platform=$1 AND ca.status IN ('disconnected','paused','degraded')
+				  AND ca.session_data IS NOT NULL AND ca.next_sync_at<=NOW()
+				  AND NOT EXISTS (
+					SELECT 1 FROM connector_onboarding_requests active_onboarding
+					WHERE active_onboarding.account_id=ca.id AND active_onboarding.status IN ('pending','claimed','connected')
+				  )
+				  AND NOT EXISTS (
+					SELECT 1 FROM connector_leases active_processing
+					WHERE active_processing.account_id=ca.id AND active_processing.lease_kind='processing' AND active_processing.lease_until>NOW()
+				  )
+			)
+			SELECT position,total FROM eligible WHERE id=$2::uuid`, platform, accountID).Scan(&position, &total)
+		if processingErr == nil {
+			return intPointer(position), intPointer(total), stringPointer("processing_slot"), leaseKind, nil
+		}
+	}
+
+	_ = activeProcessing
+	return nil, nil, nil, leaseKind, nil
+}
+
+func (a *app) onboardingSlots(platform string) int {
+	if platform == "telegram" {
+		return a.tgOnboardingSlots
+	}
+	return a.waOnboardingSlots
 }
 
 func (a *app) connectorAccounts(w http.ResponseWriter, r *http.Request) {
@@ -95,12 +217,18 @@ func (a *app) connectorAccountAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/connectors/accounts/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) == 2 && parts[1] == "qr" {
+		a.connectorAccountQR(w, r, parts[0], user)
+		return
+	}
 	if r.Method != http.MethodPatch {
 		w.Header().Set("allow", http.MethodPatch)
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	accountID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/connectors/accounts/"), "/")
+	accountID := strings.Trim(parts[0], "/")
 	if _, err := uuid.Parse(accountID); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid connector account"})
 		return
@@ -136,6 +264,101 @@ func (a *app) connectorAccountAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (a *app) connectorAccountQR(w http.ResponseWriter, r *http.Request, accountID string, user *authenticatedUser) {
+	if _, err := uuid.Parse(accountID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid connector account"})
+		return
+	}
+	ownerClause := "ca.user_id=$2::uuid"
+	ownerArgs := []any{accountID, user.ID}
+	if user.isAdmin() {
+		ownerClause = "ca.id=$1::uuid"
+		ownerArgs = []any{accountID}
+	}
+	var platform string
+	if err := a.db.QueryRow(r.Context(), "SELECT platform FROM connector_accounts ca WHERE ca.id=$1::uuid AND "+ownerClause, ownerArgs...).Scan(&platform); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "connector account not found"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		var view connectorQRView
+		var requestID *string
+		err := a.db.QueryRow(r.Context(), `SELECT ca.id::text, ca.platform,
+			CASE
+				-- A persisted session is authoritative. A stale QR row must not
+				-- make an already authenticated pool account look like it is still
+				-- waiting for a QR code after a restart.
+				WHEN ca.session_data IS NOT NULL AND ca.status IN ('ready','connecting','syncing','paused','degraded') THEN ca.status
+				WHEN ca.status IN ('ready','connecting','syncing','paused','degraded') AND q.status IN ('failed','expired','cancelled') THEN ca.status
+				ELSE COALESCE(q.status, ca.status)
+			END,
+			(ca.session_data IS NOT NULL AND ca.status NOT IN ('pairing','reauth_required','stopped')),
+			q.qr_payload, q.expires_at,
+			CASE WHEN ca.session_data IS NOT NULL AND ca.status IN ('ready','connecting','syncing','paused','degraded') THEN ca.last_error
+				 WHEN ca.status IN ('ready','connecting','syncing','paused','degraded') AND q.status IN ('failed','expired','cancelled') THEN ca.last_error
+				 ELSE q.last_error END,
+			COALESCE(q.updated_at, ca.updated_at), latest.id::text
+			FROM connector_accounts ca
+			LEFT JOIN connector_qr_sessions q ON q.account_id=ca.id
+			LEFT JOIN LATERAL (SELECT id FROM connector_onboarding_requests WHERE account_id=ca.id AND status IN ('pending','claimed','connected') ORDER BY created_at DESC LIMIT 1) latest ON TRUE
+			WHERE ca.id=$1::uuid`, accountID).Scan(&view.AccountID, &view.Platform, &view.Status, &view.Connected, &view.QR, &view.ExpiresAt, &view.LastError, &view.UpdatedAt, &requestID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "connector account not found"})
+			return
+		}
+		view.RequestID = requestID
+		queuePosition, queueLength, waitReason, leaseKind, queueErr := a.connectorQueueInfo(r.Context(), accountID, platform)
+		if queueErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "connector queue unavailable"})
+			return
+		}
+		view.QueuePosition = queuePosition
+		view.QueueLength = queueLength
+		view.WaitReason = waitReason
+		view.LeaseKind = leaseKind
+		if view.ExpiresAt != nil && view.ExpiresAt.Before(time.Now()) && view.QR != nil {
+			view.QR = nil
+			view.Status = "expired"
+		}
+		writeJSON(w, http.StatusOK, view)
+	case http.MethodPost:
+		// A second click must be able to recover a worker that is still marked
+		// as claimed after a stalled MTProto/Baileys login. Keep the old request
+		// as a cancelled audit record and enqueue a fresh request for this user.
+		_, _ = a.db.Exec(r.Context(), `UPDATE connector_onboarding_requests
+			SET status='cancelled', worker_id=NULL, error='QR-Onboarding neu gestartet', updated_at=NOW()
+			WHERE account_id=$1::uuid AND status IN ('pending','claimed','connected')`, accountID)
+		var requestID string
+		err := a.db.QueryRow(r.Context(), `INSERT INTO connector_onboarding_requests (account_id,user_id,platform,status)
+			SELECT ca.id, ca.user_id, ca.platform, 'pending' FROM connector_accounts ca
+			WHERE ca.id=$1::uuid
+			RETURNING id::text`, accountID).Scan(&requestID)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "QR-Onboarding konnte nicht gestartet werden"})
+			return
+		}
+		_, _ = a.db.Exec(r.Context(), `INSERT INTO connector_qr_sessions (account_id,user_id,platform,status,qr_payload,expires_at,last_error)
+			SELECT id,user_id,platform,'starting',NULL,NULL,NULL FROM connector_accounts WHERE id=$1::uuid
+			ON CONFLICT (account_id) DO UPDATE SET status='starting', qr_payload=NULL, expires_at=NULL, last_error=NULL, updated_at=NOW()`, accountID)
+		// A QR request is an explicit handoff from the rotating processing pool
+		// to the dedicated onboarding slot. The old worker will fail its next
+		// lease renewal because the request is pending and then close its socket.
+		_, _ = a.db.Exec(r.Context(), `UPDATE connector_leases SET lease_until=NOW(), updated_at=NOW()
+			WHERE account_id=$1::uuid AND lease_kind IN ('processing','onboarding')`, accountID)
+		_, _ = a.db.Exec(r.Context(), "UPDATE connector_accounts SET status='pairing', last_error=NULL, updated_at=NOW() WHERE id=$1::uuid", accountID)
+		writeJSON(w, http.StatusAccepted, map[string]any{"accountId": accountID, "platform": platform, "status": "starting", "requestId": requestID})
+	case http.MethodDelete:
+		_, _ = a.db.Exec(r.Context(), `UPDATE connector_onboarding_requests SET status='cancelled', updated_at=NOW() WHERE account_id=$1::uuid AND status IN ('pending','claimed','connected')`, accountID)
+		_, _ = a.db.Exec(r.Context(), `UPDATE connector_qr_sessions SET status='cancelled', qr_payload=NULL, expires_at=NULL, updated_at=NOW() WHERE account_id=$1::uuid`, accountID)
+		_, _ = a.db.Exec(r.Context(), "UPDATE connector_accounts SET status='paused', updated_at=NOW() WHERE id=$1::uuid AND status='pairing'", accountID)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+	default:
+		w.Header().Set("allow", "GET, POST, DELETE")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	}
 }
 
 func itoa(value int) string {

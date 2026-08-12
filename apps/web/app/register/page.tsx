@@ -32,7 +32,7 @@ export default function RegisterPage() {
   return <main className="shell authPage"><section className="authCard panel">
     <p className="eyebrow">WAGI / GROUP INTELLIGENCE</p>
     <h1>Konto erstellen</h1>
-    <p className="muted">Neue Konten starten ohne Gruppenrechte. Ein Administrator kann anschließend Gruppen freigeben.</p>
+    <p className="muted">Nach der Anmeldung verbindest du deine eigenen Konten und wählst deine Gruppen selbst aus.</p>
     {error && <div className="notice">{error}</div>}
     <form className="authForm" onSubmit={submit}>
       <label>Name<input type="text" autoComplete="name" required minLength={2} value={name} onChange={(event) => setName(event.target.value)} /></label>

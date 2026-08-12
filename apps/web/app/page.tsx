@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { QRCodeSVG } from "qrcode.react";
 import EventMap from "./event-map";
 import { buildGroupHierarchy, type GroupHierarchyNode } from "./group-hierarchy";
 import { AuthGate, apiFetch } from "./auth";
@@ -28,12 +27,9 @@ type MessageNode = Message & { children: MessageNode[] };
 type EventVersion = { event: Event; place?: Place; updatedAt: string; sourceMessageIds: string[]; updateMessage?: Message };
 type EventRecord = { key: string; groupId: string; groupSubject: string; groupPlatform?: string; versions: EventVersion[] };
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
-type ConnectorSnapshot = { connector: string; status: string; mode?: string; connected?: boolean; qr?: string | null; qrExpiresAt?: number | null; qrLoginActive?: boolean; lastError?: string | null };
-type ServiceStatus = { connectors: Array<{ connector: string; status: string; detail?: string; lastError?: string; updatedAt: string }>; audioJobs: Record<string, number>; recentAudioErrors: Array<{ id: string; error?: string; attempts: number; groupSubject: string }> };
+type ServiceStatus = { connectors: Array<{ connector: string; status: string; detail?: string; lastError?: string; updatedAt: string; queuePosition?: number | null; queueLength?: number | null; waitReason?: string | null }>; audioJobs: Record<string, number>; recentAudioErrors: Array<{ id: string; error?: string; attempts: number; groupSubject: string }> };
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
-const waConnectorBase = process.env.NEXT_PUBLIC_WA_CONNECTOR_URL ?? "http://localhost:3001";
-const tgConnectorBase = process.env.NEXT_PUBLIC_TG_CONNECTOR_URL ?? "http://localhost:3002";
 const demoTimestamp = "2026-08-10T12:00:00.000Z";
 const sampleGroups: Group[] = [
   { id: "120363mock@g.us", subject: "Barcelona Wochenende", participantCount: 6, isSelected: true, discoveredAt: demoTimestamp },
@@ -46,68 +42,6 @@ const sampleMessages: Message[] = [
   { id: "sample-image", groupId: "120363mock@g.us", groupSubject: "Barcelona Wochenende", senderJid: "491761112233@s.whatsapp.net", senderName: "Lena", kind: "image", text: "Die aktuelle Routenkarte für den Montserrat-Aufstieg.", imageUrl: "/mock/barcelona-route.svg", receivedAt: demoTimestamp, hasMedia: true },
   { id: "sample-2", groupId: "120363mock2@g.us", groupSubject: "Familie Costa Brava", senderJid: "491709876543@s.whatsapp.net", senderName: "Sam", kind: "audio", text: "Audio wartet auf Transkription", receivedAt: demoTimestamp, hasMedia: true },
 ];
-
-function connectorLabel(snapshot: ConnectorSnapshot | null, t: Translator) {
-  if (!snapshot) return t("connectorNeedsAuth");
-  if (snapshot.status === "ready") return t("connectorConnected");
-  if (snapshot.status === "pairing" || snapshot.status === "reauth_required") return t("connectorNeedsAuth");
-  if (snapshot.status === "error") return t("connectorError");
-  return snapshot.status;
-}
-
-function ConnectorSetup({ locale }: { locale: Locale }) {
-  const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
-  const [whatsapp, setWhatsapp] = useState<ConnectorSnapshot | null>(null);
-  const [telegram, setTelegram] = useState<ConnectorSnapshot | null>(null);
-  const [setupError, setSetupError] = useState<string | null>(null);
-  const [telegramQrBusy, setTelegramQrBusy] = useState(false);
-
-  async function refreshStatus() {
-    try {
-      const [waResponse, tgResponse] = await Promise.all([
-        fetch(`${waConnectorBase}/status`),
-        fetch(`${tgConnectorBase}/status`),
-      ]);
-      if (!waResponse.ok || !tgResponse.ok) throw new Error(t("connectorError"));
-      setWhatsapp(await waResponse.json() as ConnectorSnapshot);
-      setTelegram(await tgResponse.json() as ConnectorSnapshot);
-      setSetupError(null);
-    } catch (error) {
-      setSetupError(error instanceof Error ? error.message : t("connectorError"));
-    }
-  }
-
-  useEffect(() => {
-    void refreshStatus();
-    const timer = window.setInterval(() => void refreshStatus(), 4000);
-    return () => window.clearInterval(timer);
-  }, [locale]);
-
-  async function startTelegramQr() {
-    setTelegramQrBusy(true);
-    try {
-      const response = await fetch(`${tgConnectorBase}/auth/qr`, { method: "POST" });
-      if (!response.ok) {
-        const body = await response.json().catch(() => null) as { error?: string } | null;
-        throw new Error(body?.error ?? t("connectorError"));
-      }
-      await refreshStatus();
-    } catch (error) {
-      setSetupError(error instanceof Error ? error.message : t("connectorError"));
-    } finally { setTelegramQrBusy(false); }
-  }
-
-  return <section className="connectorSetup panel">
-    <div className="panelHead"><div><p className="eyebrow">{t("connectors")}</p><h2>{t("connectorSetup")}</h2><p className="muted">{t("connectorSetupHint")}</p></div><button className="textButton" onClick={() => void refreshStatus()}>{t("refreshStatus")}</button></div>
-    <div className="connectorSetupBody">
-      {setupError && <div className="notice setupNotice">{setupError}</div>}
-      <div className="connectorCards">
-        <article className="connectorCard"><div className="connectorCardHead"><div><p className="eventGroup">{t("whatsappConnector")}</p><strong>{connectorLabel(whatsapp, t)}</strong></div><span className={`connectorDot ${whatsapp?.status === "ready" ? "ready" : ""}`} /></div>{whatsapp?.qr ? <div className="connectorQr"><QRCodeSVG value={whatsapp.qr} size={168} includeMargin level="M" /><p>{t("scanWithWhatsapp")}</p></div> : <p className="connectorHint">{whatsapp?.lastError ?? (whatsapp?.status === "ready" ? t("connectorConnected") : t("waitingForQr"))}</p>}</article>
-        <article className="connectorCard"><div className="connectorCardHead"><div><p className="eventGroup">{t("telegramConnector")}</p><strong>{connectorLabel(telegram, t)}</strong></div><span className={`connectorDot ${telegram?.status === "ready" ? "ready" : ""}`} /></div>{telegram?.qr ? <div className="connectorQr"><QRCodeSVG value={telegram.qr} size={168} includeMargin level="M" /><p>{telegram.qrExpiresAt ? t("qrExpires", { time: new Date(telegram.qrExpiresAt).toLocaleTimeString(localeCodes[locale], { hour: "2-digit", minute: "2-digit" }) }) : t("waitingForQr")}</p></div> : <><p className="connectorHint">{telegram?.lastError ?? (telegram?.mode === "telegram-direct" ? t("directTelegramOnly") : t("directTelegramConfigRequired"))}</p><button className="primaryButton" disabled={telegramQrBusy || !telegram || telegram.mode !== "telegram-direct"} onClick={() => void startTelegramQr()}>{telegramQrBusy ? t("waitingForQr") : t("startTelegramQr")}</button></>}</article>
-      </div>
-    </div>
-  </section>;
-}
 
 function jobStatusLabel(status: string, t: Translator) {
   if (status === "queued") return t("jobQueued");
@@ -124,7 +58,7 @@ function ProcessingStatus({ locale, status }: { locale: Locale; status: ServiceS
   return <section className="statusPanel panel">
     <div className="panelHead"><div><p className="eyebrow">{t("processingStatus")}</p><h2>{t("connectionStatus")}</h2></div><span className="count">{status.connectors.length}</span></div>
     <div className="statusPanelBody">
-      <div className="statusGroup"><strong>{t("connectionStatus")}</strong>{status.connectors.length ? status.connectors.map((connector) => <div className="statusLine" key={connector.connector}><span className={`statusBadge ${connector.status === "ready" ? "ok" : connector.status === "error" || connector.status === "reauth_required" ? "error" : "pending"}`}>{connector.status}</span><span>{connector.connector}</span>{connector.lastError && <small>{t("lastError", { error: connector.lastError })}</small>}</div>) : <p className="muted">{t("noConnectorStatus")}</p>}</div>
+      <div className="statusGroup"><strong>{t("connectionStatus")}</strong>{status.connectors.length ? status.connectors.map((connector) => <div className="statusLine" key={connector.connector}><span className={`statusBadge ${connector.status === "ready" || connector.status === "paused" ? "ok" : connector.status === "error" || connector.status === "reauth_required" ? "error" : "pending"}`}>{connector.status}</span><span>{connector.connector}</span>{connector.waitReason && <small>{t("connectorQueueWaiting")}{typeof connector.queuePosition === "number" && typeof connector.queueLength === "number" ? ` · ${t("connectorQueuePosition", { position: connector.queuePosition, count: connector.queueLength })}` : ""}</small>}{connector.lastError && <small>{t("lastError", { error: connector.lastError })}</small>}</div>) : <p className="muted">{t("noConnectorStatus")}</p>}</div>
       <div className="statusGroup"><strong>{t("audioStatus")}</strong>{jobEntries.length ? jobEntries.map(([jobStatus, count]) => <span className="jobCount" key={jobStatus}>{count} · {jobStatusLabel(jobStatus, t)}</span>) : <p className="muted">{t("noConnectorStatus")}</p>}</div>
       {status.recentAudioErrors.length > 0 && <div className="statusErrors"><strong>{t("audioFailed")}</strong>{status.recentAudioErrors.slice(0, 3).map((job) => <p key={job.id}>{job.groupSubject} · {t("audioAttempts", { count: job.attempts })}{job.error ? ` · ${job.error}` : ""}</p>)}</div>}
     </div>
@@ -472,11 +406,10 @@ export default function Dashboard() {
     <main className="shell">
       <header className="topbar">
         <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("title")}</h1></div>
-        <div className="topbarTools"><nav className="pageNav"><Link href="/" className="pageNavActive">{t("dashboard")}</Link><Link href="/knowledge">{t("knowledge")}</Link><Link href="/groups">{t("manageGroups")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
+        <div className="topbarTools"><nav className="pageNav"><Link href="/" className="pageNavActive">{t("dashboard")}</Link><Link href="/knowledge">{t("knowledge")}</Link><Link href="/connectors">{t("connectors")}</Link><Link href="/groups">{t("manageGroups")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
       </header>
       <section className="hero"><div><p className="eyebrow">{t("signalCheck")}</p><p className="heroNumber">{visibleMessages.filter((item) => item.analysis?.relevant).length || 1}</p><p className="muted">{t("relevantSignals", { scope })}</p></div><div className="heroNote"><span>✦</span><p>{t("heroNote")}</p></div></section>
       {error && <div className="notice">{error}</div>}
-      <ConnectorSetup locale={locale} />
       <ProcessingStatus locale={locale} status={serviceStatus} />
       <section className="panel filterPanel"><div className="panelHead"><div><p className="eyebrow">{t("searchMessages")}</p><h2>{t("messageStream")}</h2></div><button className="textButton" type="button" onClick={clearFilters}>{t("clearFilters")}</button></div><div className="filterGrid"><label><span>{t("searchMessages")}</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={t("searchMessages")} /></label><label><span>{t("filterGroup")}</span><select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="all">{t("allSelected")}</option>{selectedGroups.map((group) => <option key={group.id} value={group.id}>{group.subject}</option>)}</select></label><label><span>{t("filterKind")}</span><select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">{t("allKinds")}</option>{["text", "audio", "image", "video", "location", "document"].map((kind) => <option key={kind} value={kind}>{kindLabel(kind, locale)}</option>)}</select></label><label><span>{t("filterFrom")}</span><input type="datetime-local" value={fromFilter} onChange={(event) => setFromFilter(event.target.value)} /></label><label><span>{t("filterTo")}</span><input type="datetime-local" value={toFilter} onChange={(event) => setToFilter(event.target.value)} /></label><label className="filterCheck"><input type="checkbox" checked={eventOnly} onChange={(event) => setEventOnly(event.target.checked)} /><span>{t("filterEvents")}</span></label><label className="filterCheck"><input type="checkbox" checked={placeOnly} onChange={(event) => setPlaceOnly(event.target.checked)} /><span>{t("filterPlaces")}</span></label></div></section>
       <div className="grid">

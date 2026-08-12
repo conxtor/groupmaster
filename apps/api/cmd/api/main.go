@@ -23,12 +23,16 @@ import (
 )
 
 type app struct {
-	db          *pgxpool.Pool
-	nc          *nats.Conn
-	js          nats.JetStreamContext
-	mediaDir    string
-	mediaSecret string
-	corsOrigin  string
+	db                *pgxpool.Pool
+	nc                *nats.Conn
+	js                nats.JetStreamContext
+	mediaDir          string
+	mediaSecret       string
+	corsOrigin        string
+	waPoolSize        int
+	tgPoolSize        int
+	waOnboardingSlots int
+	tgOnboardingSlots int
 }
 
 type group struct {
@@ -102,11 +106,14 @@ type audioJobView struct {
 }
 
 type connectorStatusView struct {
-	Connector string    `json:"connector"`
-	Status    string    `json:"status"`
-	Detail    *string   `json:"detail,omitempty"`
-	LastError *string   `json:"lastError,omitempty"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Connector     string    `json:"connector"`
+	Status        string    `json:"status"`
+	Detail        *string   `json:"detail,omitempty"`
+	LastError     *string   `json:"lastError,omitempty"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+	QueuePosition *int      `json:"queuePosition,omitempty"`
+	QueueLength   *int      `json:"queueLength,omitempty"`
+	WaitReason    *string   `json:"waitReason,omitempty"`
 }
 
 type serviceStatusView struct {
@@ -163,6 +170,14 @@ func env(key, fallback string) string {
 	return fallback
 }
 
+func envInt(key string, fallback int) int {
+	value, err := strconv.Atoi(os.Getenv(key))
+	if err != nil || value < 1 {
+		return fallback
+	}
+	return value
+}
+
 func ensureEventStream(js nats.JetStreamContext) error {
 	if _, err := js.StreamInfo("WAGI_EVENTS"); err == nil {
 		return nil
@@ -212,7 +227,14 @@ func (a *app) groups(w http.ResponseWriter, r *http.Request) {
 	}
 	args := make([]any, 0, 1)
 	visibility := groupReadCondition(user, "g", &args)
-	rows, err := a.db.Query(r.Context(), fmt.Sprintf(`SELECT g.id, g.subject, g.participant_count, g.is_selected, g.platform, g.chat_type, g.language, g.parent_group_id, g.topic_id, g.discovered_at FROM wa_groups g WHERE %s ORDER BY g.platform, COALESCE(g.parent_group_id, g.id), CASE WHEN g.chat_type='topic' THEN 1 ELSE 0 END, g.subject`, visibility), args...)
+	selection := "g.is_selected"
+	join := ""
+	if !user.isAdmin() {
+		args = append(args, user.ID)
+		join = " LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$2::uuid"
+		selection = "COALESCE(uga.is_selected,FALSE)"
+	}
+	rows, err := a.db.Query(r.Context(), fmt.Sprintf(`SELECT g.id, g.subject, g.participant_count, %s, g.platform, g.chat_type, g.language, g.parent_group_id, g.topic_id, g.discovered_at FROM wa_groups g%s WHERE %s ORDER BY g.platform, COALESCE(g.parent_group_id, g.id), CASE WHEN g.chat_type='topic' THEN 1 ELSE 0 END, g.subject`, selection, join, visibility), args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -241,9 +263,9 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	conditions := []string{"g.is_selected = TRUE"}
 	args := make([]any, 0)
 	arg := func(value any) string { args = append(args, value); return fmt.Sprintf("$%d", len(args)) }
+	conditions := []string{groupSelectedCondition(user, "g", &args)}
 	conditions = append(conditions, groupReadCondition(user, "g", &args))
 	if value := strings.TrimSpace(r.URL.Query().Get("q")); value != "" {
 		placeholder := arg("%" + value + "%")
@@ -362,15 +384,16 @@ func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
 	var storedMime *string
 	mediaArgs := []any{messageID}
 	visibility := groupReadCondition(user, "g", &mediaArgs)
+	selection := groupSelectedCondition(user, "g", &mediaArgs)
 	err := a.db.QueryRow(r.Context(), fmt.Sprintf(`
 		SELECT COALESCE(m.media_key, ''), COALESCE(m.media_mime, ''), COALESCE(m.platform, ''), COALESCE(m.wa_message_id, ''), m.kind, mo.object_path, mo.thumbnail_path, mo.mime
 		FROM messages m
-		JOIN wa_groups g ON g.id = m.group_id AND g.is_selected = TRUE
+		JOIN wa_groups g ON g.id = m.group_id
 		LEFT JOIN LATERAL (
 			SELECT object_path, thumbnail_path, mime FROM media_objects
 			WHERE message_id = m.id ORDER BY updated_at DESC LIMIT 1
 		) mo ON TRUE
-		WHERE m.id = $1::uuid AND m.has_media = TRUE AND m.kind IN ('image', 'video') AND %s`, visibility), mediaArgs...).
+		WHERE m.id = $1::uuid AND m.has_media = TRUE AND m.kind IN ('image', 'video') AND %s AND %s`, visibility, selection), mediaArgs...).
 		Scan(&mediaKey, &mediaMime, &platform, &waMessageID, &kind, &objectPath, &thumbnailPath, &storedMime)
 	if err == pgx.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "media not found"})
@@ -471,9 +494,9 @@ func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	conditions := []string{"g.is_selected = TRUE"}
 	args := make([]any, 0)
 	arg := func(value any) string { args = append(args, value); return fmt.Sprintf("$%d", len(args)) }
+	conditions := []string{groupSelectedCondition(user, "g", &args)}
 	conditions = append(conditions, groupReadCondition(user, "g", &args))
 	if value := strings.TrimSpace(r.URL.Query().Get("groupId")); value != "" {
 		conditions = append(conditions, "kt.group_id = "+arg(value))
@@ -655,9 +678,16 @@ func (a *app) selectGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var item group
-	accessArgs := []any{body.Selected, groupID}
-	access := groupManageCondition(user, "g", &accessArgs)
-	err := a.db.QueryRow(r.Context(), fmt.Sprintf(`UPDATE wa_groups g SET is_selected = $1, updated_at = NOW() WHERE g.id = $2 AND %s RETURNING g.id, g.subject, g.participant_count, g.is_selected, g.platform, g.chat_type, g.language, g.parent_group_id, g.topic_id, g.discovered_at`, access), accessArgs...).Scan(&item.ID, &item.Subject, &item.ParticipantCount, &item.IsSelected, &item.Platform, &item.ChatType, &item.Language, &item.ParentGroupID, &item.TopicID, &item.DiscoveredAt)
+	var err error
+	if user.isAdmin() {
+		err = a.db.QueryRow(r.Context(), `UPDATE wa_groups SET is_selected = $1, updated_at = NOW() WHERE id = $2 RETURNING id, subject, participant_count, is_selected, platform, chat_type, language, parent_group_id, topic_id, discovered_at`, body.Selected, groupID).Scan(&item.ID, &item.Subject, &item.ParticipantCount, &item.IsSelected, &item.Platform, &item.ChatType, &item.Language, &item.ParentGroupID, &item.TopicID, &item.DiscoveredAt)
+	} else {
+		err = a.db.QueryRow(r.Context(), `UPDATE user_group_access uga
+			SET is_selected=$1
+			FROM wa_groups g
+			WHERE uga.user_id=$2::uuid AND uga.group_id=$3 AND uga.can_manage=TRUE AND g.id=uga.group_id
+			RETURNING g.id, g.subject, g.participant_count, uga.is_selected, g.platform, g.chat_type, g.language, g.parent_group_id, g.topic_id, g.discovered_at`, body.Selected, user.ID, groupID).Scan(&item.ID, &item.Subject, &item.ParticipantCount, &item.IsSelected, &item.Platform, &item.ChatType, &item.Language, &item.ParentGroupID, &item.TopicID, &item.DiscoveredAt)
+	}
 	if err == pgx.ErrNoRows {
 		writeJSON(w, 404, map[string]string{"error": "group not found"})
 		return
@@ -708,6 +738,7 @@ func (a *app) listAudioJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	args := make([]any, 0, 2)
+	selection := groupSelectedCondition(user, "g", &args)
 	visibility := groupReadCondition(user, "g", &args)
 	args = append(args, limit)
 	limitArg := fmt.Sprintf("$%d", len(args))
@@ -717,9 +748,9 @@ func (a *app) listAudioJobs(w http.ResponseWriter, r *http.Request) {
 		       aj.next_attempt_at, aj.updated_at
 		FROM audio_jobs aj
 		JOIN messages m ON m.id = aj.message_id
-		JOIN wa_groups g ON g.id = m.group_id AND g.is_selected = TRUE
-		WHERE %s
-		ORDER BY aj.updated_at DESC LIMIT %s`, visibility, limitArg), args...)
+		JOIN wa_groups g ON g.id = m.group_id
+		WHERE %s AND %s
+		ORDER BY aj.updated_at DESC LIMIT %s`, selection, visibility, limitArg), args...)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audio jobs unavailable"})
 		return
@@ -750,7 +781,7 @@ func (a *app) createAudioJob(w http.ResponseWriter, r *http.Request) {
 	accessArgs := []any{request.MessageID}
 	visibility := groupReadCondition(user, "g", &accessArgs)
 	var accessible bool
-	if err := a.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM messages m JOIN wa_groups g ON g.id=m.group_id AND g.is_selected=TRUE WHERE m.id=$1::uuid AND %s)`, visibility), accessArgs...).Scan(&accessible); err != nil {
+	if err := a.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM messages m JOIN wa_groups g ON g.id=m.group_id WHERE m.id=$1::uuid AND %s AND %s)`, groupSelectedCondition(user, "g", &accessArgs), visibility), accessArgs...).Scan(&accessible); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "message access could not be checked"})
 		return
 	}
@@ -800,15 +831,16 @@ func (a *app) retryAudioJob(w http.ResponseWriter, r *http.Request, jobID string
 	var item audioJobView
 	var objectPath *string
 	args := []any{jobID}
+	selection := groupSelectedCondition(user, "g", &args)
 	visibility := groupReadCondition(user, "g", &args)
 	err := a.db.QueryRow(r.Context(), fmt.Sprintf(`
 		UPDATE audio_jobs aj
 		SET status='queued', attempts=0, error=NULL, next_attempt_at=NOW(), updated_at=NOW()
-		FROM messages m JOIN wa_groups g ON g.id=m.group_id AND g.is_selected=TRUE
-		WHERE aj.id=$1::uuid AND aj.message_id=m.id AND %s
+		FROM messages m JOIN wa_groups g ON g.id=m.group_id
+		WHERE aj.id=$1::uuid AND aj.message_id=m.id AND %s AND %s
 		RETURNING aj.id::text, aj.message_id::text, m.group_id, g.subject, aj.media_key, aj.media_mime,
 		          aj.status, aj.transcript, aj.language, aj.confidence, aj.attempts, aj.error,
-		          aj.next_attempt_at, aj.updated_at, aj.object_path`, visibility), args...).
+		          aj.next_attempt_at, aj.updated_at, aj.object_path`, selection, visibility), args...).
 		Scan(&item.ID, &item.MessageID, &item.GroupID, &item.GroupSubject, &item.MediaKey, &item.MediaMime, &item.Status, &item.Transcript, &item.Language, &item.Confidence, &item.Attempts, &item.Error, &item.NextAttemptAt, &item.UpdatedAt, &objectPath)
 	if err == pgx.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "audio job not found"})
@@ -840,15 +872,16 @@ func (a *app) updateAudioTranscript(w http.ResponseWriter, r *http.Request, jobI
 	var item audioJobView
 	var objectPath *string
 	args := []any{jobID, strings.TrimSpace(request.Transcript), strings.TrimSpace(request.Language), request.Confidence}
+	selection := groupSelectedCondition(user, "g", &args)
 	visibility := groupReadCondition(user, "g", &args)
 	err := a.db.QueryRow(r.Context(), fmt.Sprintf(`
 		UPDATE audio_jobs aj
 		SET status='completed', transcript=$2, language=NULLIF($3,''), confidence=$4, error=NULL, next_attempt_at=NULL, updated_at=NOW()
-		FROM messages m JOIN wa_groups g ON g.id=m.group_id AND g.is_selected=TRUE
-		WHERE aj.id=$1::uuid AND aj.message_id=m.id AND %s
+		FROM messages m JOIN wa_groups g ON g.id=m.group_id
+		WHERE aj.id=$1::uuid AND aj.message_id=m.id AND %s AND %s
 		RETURNING aj.id::text, aj.message_id::text, m.group_id, g.subject, aj.media_key, aj.media_mime,
 		          aj.status, aj.transcript, aj.language, aj.confidence, aj.attempts, aj.error,
-		          aj.next_attempt_at, aj.updated_at, aj.object_path`, visibility), args...).
+		          aj.next_attempt_at, aj.updated_at, aj.object_path`, selection, visibility), args...).
 		Scan(&item.ID, &item.MessageID, &item.GroupID, &item.GroupSubject, &item.MediaKey, &item.MediaMime, &item.Status, &item.Transcript, &item.Language, &item.Confidence, &item.Attempts, &item.Error, &item.NextAttemptAt, &item.UpdatedAt, &objectPath)
 	if err == pgx.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "audio job not found"})
@@ -873,24 +906,34 @@ func (a *app) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := serviceStatusView{Connectors: make([]connectorStatusView, 0), AudioJobs: map[string]int{}, RecentAudioErrors: make([]audioJobView, 0)}
-	connectorRows, err := a.db.Query(r.Context(), `SELECT connector, status, detail, last_error, updated_at FROM connector_states ORDER BY connector`)
+	connectorRows, err := a.db.Query(r.Context(), `SELECT id::text, platform, status, last_error, updated_at FROM connector_accounts WHERE user_id=$1::uuid ORDER BY platform`, user.ID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
 		return
 	}
 	for connectorRows.Next() {
+		var accountID string
 		var item connectorStatusView
-		if err := connectorRows.Scan(&item.Connector, &item.Status, &item.Detail, &item.LastError, &item.UpdatedAt); err != nil {
+		if err := connectorRows.Scan(&accountID, &item.Connector, &item.Status, &item.LastError, &item.UpdatedAt); err != nil {
 			connectorRows.Close()
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
 			return
 		}
+		queuePosition, queueLength, waitReason, _, queueErr := a.connectorQueueInfo(r.Context(), accountID, item.Connector)
+		if queueErr != nil {
+			connectorRows.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+			return
+		}
+		item.QueuePosition = queuePosition
+		item.QueueLength = queueLength
+		item.WaitReason = waitReason
 		result.Connectors = append(result.Connectors, item)
 	}
 	connectorRows.Close()
 	jobArgs := make([]any, 0, 1)
 	jobVisibility := groupReadCondition(user, "g", &jobArgs)
-	jobRows, err := a.db.Query(r.Context(), fmt.Sprintf(`SELECT status, COUNT(*) FROM audio_jobs aj JOIN messages m ON m.id=aj.message_id JOIN wa_groups g ON g.id=m.group_id AND g.is_selected=TRUE WHERE %s GROUP BY status`, jobVisibility), jobArgs...)
+	jobRows, err := a.db.Query(r.Context(), fmt.Sprintf(`SELECT status, COUNT(*) FROM audio_jobs aj JOIN messages m ON m.id=aj.message_id JOIN wa_groups g ON g.id=m.group_id WHERE %s AND %s GROUP BY status`, groupSelectedCondition(user, "g", &jobArgs), jobVisibility), jobArgs...)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
 		return
@@ -912,8 +955,8 @@ func (a *app) status(w http.ResponseWriter, r *http.Request) {
 		SELECT aj.id::text, aj.message_id::text, m.group_id, g.subject, aj.media_key, aj.media_mime,
 		       aj.status, aj.transcript, aj.language, aj.confidence, aj.attempts, aj.error,
 		       aj.next_attempt_at, aj.updated_at
-		FROM audio_jobs aj JOIN messages m ON m.id=aj.message_id JOIN wa_groups g ON g.id=m.group_id AND g.is_selected=TRUE
-		WHERE aj.status='failed' AND %s ORDER BY aj.updated_at DESC LIMIT 10`, errorVisibility), errorArgs...)
+		FROM audio_jobs aj JOIN messages m ON m.id=aj.message_id JOIN wa_groups g ON g.id=m.group_id
+		WHERE aj.status='failed' AND %s AND %s ORDER BY aj.updated_at DESC LIMIT 10`, groupSelectedCondition(user, "g", &errorArgs), errorVisibility), errorArgs...)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
 		return
@@ -976,7 +1019,18 @@ func main() {
 	if err := ensureEventStream(js); err != nil {
 		log.Fatal(err)
 	}
-	a := &app{db: db, nc: natsConn, js: js, mediaDir: env("MEDIA_DIR", "/data/media"), mediaSecret: env("MEDIA_SIGNING_SECRET", uuid.NewString()), corsOrigin: env("WAGI_CORS_ORIGIN", "http://localhost:3000")}
+	a := &app{
+		db:                db,
+		nc:                natsConn,
+		js:                js,
+		mediaDir:          env("MEDIA_DIR", "/data/media"),
+		mediaSecret:       env("MEDIA_SIGNING_SECRET", uuid.NewString()),
+		corsOrigin:        env("WAGI_CORS_ORIGIN", "http://localhost:3000"),
+		waPoolSize:        envInt("WA_CONNECTOR_POOL_SIZE", 5),
+		tgPoolSize:        envInt("TG_CONNECTOR_POOL_SIZE", 5),
+		waOnboardingSlots: envInt("WA_ONBOARDING_SLOTS", 1),
+		tgOnboardingSlots: envInt("TG_ONBOARDING_SLOTS", 1),
+	}
 	if err := a.bootstrapAdmin(); err != nil {
 		log.Fatal(err)
 	}
@@ -989,7 +1043,7 @@ func main() {
 	mux.HandleFunc("/api/v1/auth/logout", a.authLogout)
 	mux.HandleFunc("/api/v1/auth/register", a.authRegister)
 	mux.HandleFunc("/api/v1/admin/users", requireAdmin(a, a.adminUsers))
-	mux.HandleFunc("/api/v1/admin/groups/access", requireAdmin(a, a.adminGroupAccess))
+	mux.HandleFunc("/api/v1/admin/users/", requireAdmin(a, a.adminUsers))
 	mux.HandleFunc("/api/v1/connectors/accounts", requireAuthenticated(a, a.connectorAccounts))
 	mux.HandleFunc("/api/v1/connectors/accounts/", requireAuthenticated(a, a.connectorAccountAction))
 	mux.HandleFunc("/api/v1/status", requireAuthenticated(a, a.status))

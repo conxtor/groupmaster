@@ -1,20 +1,20 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import makeWASocket, {
   Browsers,
   DisconnectReason,
   downloadMediaMessage,
+  proto,
   useMultiFileAuthState,
   type WAMessage,
 } from "@whiskeysockets/baileys";
 import { connect, StorageType, StringCodec, type JetStreamClient, type NatsConnection } from "nats";
 import { Pool } from "pg";
 import pino from "pino";
-import qrcode from "qrcode-terminal";
 import { subjects, type EventEnvelope, type GroupDiscovered, type GroupSelectionChanged, type WhatsAppMessageReceived } from "@wagi/contracts";
-import { acquireConnectorAccount, ensureConnectorAccount, type ConnectorAccountLease, type ConnectorSQLStore } from "@wagi/connector-sdk";
+import { acquireConnectorAccount, claimConnectorOnboardingRequest, type ConnectorAccountLease, type ConnectorSQLStore, type ConnectorOnboardingRequest } from "@wagi/connector-sdk";
 
 const port = Number(process.env.PORT ?? 3001);
 const databaseUrl = process.env.DATABASE_URL ?? "postgres://wagi_app:app@localhost:5432/app";
@@ -32,10 +32,19 @@ const groupRefreshIntervalMs = Math.max(30_000, Number(process.env.GROUP_REFRESH
 const mediaCleanupToken = (process.env.MEDIA_CLEANUP_TOKEN ?? "").trim();
 const allowlist = new Set((process.env.WA_GROUP_ALLOWLIST ?? "").split(",").map((value) => value.trim()).filter(Boolean));
 const poolEnabled = (process.env.CONNECTOR_POOL_ENABLED ?? "false").toLowerCase() === "true";
-const poolWorkerId = process.env.CONNECTOR_WORKER_ID ?? `wa-${process.pid}`;
+const poolWorkerId = (process.env.CONNECTOR_WORKER_ID ?? "").trim() || `wa-${process.env.HOSTNAME ?? process.pid}`;
 const poolLeaseSeconds = Math.max(30, Number(process.env.CONNECTOR_LEASE_SECONDS ?? 90));
 const poolSlotSeconds = Math.max(0, Number(process.env.CONNECTOR_ACCOUNT_SLOT_SECONDS ?? 1800));
-const poolBootstrapEmail = (process.env.WAGI_BOOTSTRAP_ADMIN_EMAIL ?? "volker@kerkhoff.es").trim();
+const connectorStartDelayMs = Math.max(0, Number(process.env.CONNECTOR_START_DELAY_MS ?? 0));
+const poolRetryDelayMs = Math.max(5_000, Number(process.env.CONNECTOR_POOL_RETRY_DELAY_MS ?? 10_000));
+const connectorRole = (process.env.CONNECTOR_ROLE ?? "processing").trim().toLowerCase();
+const onboardingOnly = poolEnabled && connectorRole === "onboarding" && !mockMode;
+const connectorPoolSize = Math.max(1, Number(process.env.WA_CONNECTOR_POOL_SIZE ?? process.env.CONNECTOR_POOL_SIZE ?? 1));
+const connectorOnboardingSlots = Math.max(1, Number(process.env.WA_ONBOARDING_SLOTS ?? process.env.CONNECTOR_ONBOARDING_SLOTS ?? 1));
+const connectorSyncIntervalSeconds = Math.max(30, Number(process.env.CONNECTOR_SYNC_INTERVAL_SECONDS ?? 300));
+const historyPageSize = Math.min(50, Math.max(1, Number(process.env.WA_HISTORY_PAGE_SIZE ?? 50)));
+const historyMaxPages = Math.max(1, Number(process.env.WA_HISTORY_MAX_PAGES ?? 20));
+const historyWaitMs = Math.max(5_000, Number(process.env.WA_HISTORY_WAIT_MS ?? 20_000));
 
 const pool = new Pool({ connectionString: databaseUrl });
 const sc = StringCodec();
@@ -51,6 +60,11 @@ let backfillCutoff = new Date(0);
 const downloadLogger = pino({ level: "silent" });
 let waSocket: ReturnType<typeof makeWASocket> | null = null;
 const pendingHistory = new Map<string, WAMessage[]>();
+const historyWaiters = new Map<string, Array<(messageCount: number) => void>>();
+let authSnapshotWrite: Promise<void> = Promise.resolve();
+type WhatsAppParticipant = { id?: string; lid?: string; jid?: string; name?: string; notify?: string; verifiedName?: string };
+type WhatsAppSenderIdentity = { senderJid: string; senderName?: string };
+const senderIdentityCache = new Map<string, { identity: WhatsAppSenderIdentity; expiresAt: number }>();
 let groupRefreshTimer: NodeJS.Timeout | null = null;
 let groupRefreshInProgress = false;
 let reconnectTimer: NodeJS.Timeout | null = null;
@@ -58,36 +72,157 @@ let reconnectAttempts = 0;
 let connectInProgress = false;
 let accountLease: ConnectorAccountLease | null = null;
 let accountRotationTimer: NodeJS.Timeout | null = null;
+let onboardingRequest: ConnectorOnboardingRequest | null = null;
+let onboardingPollTimer: NodeJS.Timeout | null = null;
+let processingPollTimer: NodeJS.Timeout | null = null;
+let processingAcquireInProgress = false;
+let onboardingAcquireInProgress = false;
+let processingCycleFinished = false;
+let authSnapshotTimer: NodeJS.Timeout | null = null;
+let authSnapshotTimerDirectory: string | null = null;
+let authSnapshotTimerAccountId: string | null = null;
 const sqlStore = pool as unknown as ConnectorSQLStore;
+
+async function stopAfterLeaseLoss(expectedLease: ConnectorAccountLease, error: unknown) {
+  if (accountLease !== expectedLease) return;
+  const accountId = expectedLease.account.accountId;
+  connected = false;
+  lifecycleStatus = "stopped";
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  if (accountRotationTimer) clearTimeout(accountRotationTimer);
+  accountRotationTimer = null;
+  try { (waSocket as any)?.end?.(); } catch { /* best effort */ }
+  waSocket = null;
+  await flushAuthSnapshot(join(authDir, accountId), accountId).catch((snapshotError) => console.warn("WhatsApp session snapshot after lease loss failed", snapshotError));
+  accountLease = null;
+  await expectedLease.release().catch((releaseError) => console.warn("WhatsApp lease release after loss failed", releaseError));
+  console.warn("WhatsApp worker stopped after losing its account lease", error);
+}
 
 async function initializePoolLease() {
   if (!poolEnabled || mockMode) return true;
   const preferredAccountId = (process.env.CONNECTOR_ACCOUNT_ID ?? "").trim() || undefined;
-  if (!preferredAccountId) await ensureConnectorAccount(sqlStore, "whatsapp", poolBootstrapEmail, "WhatsApp");
-  accountLease = await acquireConnectorAccount(sqlStore, "whatsapp", poolWorkerId, preferredAccountId, poolLeaseSeconds);
-  if (!accountLease) {
+  const lease = await acquireConnectorAccount(sqlStore, "whatsapp", poolWorkerId, preferredAccountId, poolLeaseSeconds, {
+    leaseKind: "processing",
+    poolSize: connectorPoolSize,
+    onboardingSlots: connectorOnboardingSlots,
+  });
+  if (!lease) {
     await setStatus("degraded", "Kein freies WhatsApp-Connector-Konto; Worker wartet auf eine Lease");
     return false;
   }
-  accountLease.startRenewal((error) => console.warn("WhatsApp connector lease renewal failed", error));
+  accountLease = lease;
+  lease.startRenewal((error) => void stopAfterLeaseLoss(lease, error));
   if (poolSlotSeconds > 0) {
     if (accountRotationTimer) clearTimeout(accountRotationTimer);
     accountRotationTimer = setTimeout(() => void rotatePoolAccount(), poolSlotSeconds * 1000);
     accountRotationTimer.unref?.();
   }
-  await accountLease.setStatus("connecting");
+  await lease.setStatus("connecting");
+  processingCycleFinished = false;
   console.log(`WhatsApp worker ${poolWorkerId} leased account ${accountLease.account.accountId} for ${accountLease.account.label}`);
   return true;
+}
+
+async function initializeOnboardingLease() {
+  if (!onboardingOnly || accountLease) return false;
+  const request = await claimConnectorOnboardingRequest(sqlStore, "whatsapp", poolWorkerId);
+  if (!request) return false;
+  const lease = await acquireConnectorAccount(sqlStore, "whatsapp", poolWorkerId, request.accountId, poolLeaseSeconds, {
+    leaseKind: "onboarding",
+    poolSize: connectorPoolSize,
+    onboardingSlots: connectorOnboardingSlots,
+  });
+  if (!lease) {
+    await pool.query("UPDATE connector_onboarding_requests SET status='pending', worker_id=NULL, updated_at=NOW() WHERE id=$1::uuid", [request.id]);
+    return false;
+  }
+  onboardingRequest = request;
+  accountLease = lease;
+  // A QR start is an explicit re-pair request. Remove only this account's
+  // local auth snapshot so an expired session cannot suppress the QR event.
+  await rm(join(authDir, request.accountId), { recursive: true, force: true });
+  await accountLease.saveSession(Buffer.from("{}", "utf8"));
+  lease.startRenewal((error) => {
+    if (accountLease === lease) void finishOnboarding("failed", error);
+  });
+  await accountLease.updateOnboardingRequest("claimed", null, request.id);
+  await accountLease.setStatus("pairing");
+  console.log(`WhatsApp onboarding worker ${poolWorkerId} handles account ${request.accountId}`);
+  return true;
+}
+
+async function finishOnboarding(status = "completed", error?: unknown) {
+  const lease = accountLease;
+  const request = onboardingRequest;
+  if (!lease || !request) return;
+  const message = error ? String(error) : null;
+  const ownership = await pool.query<{ status: string }>(
+    "SELECT status FROM connector_onboarding_requests WHERE id=$1::uuid AND worker_id=$2 AND status IN ('claimed','connected')",
+    [request.id, poolWorkerId],
+  );
+  if (ownership.rows.length) {
+    await lease.updateQR({ status: error ? "failed" : status, qrPayload: null, expiresAt: null, error: message });
+    await lease.updateOnboardingRequest(error ? "failed" : status, message, request.id);
+  }
+  if (ownership.rows.length && !error) {
+    await lease.setStatus("paused");
+    // A newly paired account must be eligible for the next processing-pool
+    // cycle immediately. Without this, a NULL/old next_sync_at can leave the
+    // account paired successfully but silent in the message pipeline.
+    await pool.query("UPDATE connector_accounts SET next_sync_at=NOW(), last_error=NULL, updated_at=NOW() WHERE id=$1::uuid", [lease.account.accountId]);
+  }
+  try { (waSocket as any)?.end?.(); } catch { /* best effort */ }
+  waSocket = null;
+  await flushAuthSnapshot(join(authDir, lease.account.accountId), lease.account.accountId).catch((snapshotError) => console.warn("WhatsApp onboarding session snapshot failed", snapshotError));
+  accountLease = null;
+  onboardingRequest = null;
+  connected = false;
+  lifecycleStatus = "stopped";
+  latestQr = null;
+  await lease.release().catch((releaseError) => console.warn("WhatsApp onboarding lease release failed", releaseError));
+}
+
+function startOnboardingPoller() {
+  if (!onboardingOnly || onboardingPollTimer) return;
+  const poll = () => {
+    if (accountLease || onboardingAcquireInProgress) return;
+    onboardingAcquireInProgress = true;
+    void initializeOnboardingLease().then((claimed) => {
+      if (claimed) return connectWhatsApp();
+    }).catch((error) => console.warn("WhatsApp onboarding poll failed", error))
+      .finally(() => { onboardingAcquireInProgress = false; });
+  };
+  onboardingPollTimer = setInterval(poll, Math.min(poolRetryDelayMs, 2_000));
+  onboardingPollTimer.unref?.();
+  poll();
+}
+
+function startProcessingPoller() {
+  if (!poolEnabled || onboardingOnly || processingPollTimer) return;
+  processingPollTimer = setInterval(() => {
+    if (accountLease || connectInProgress || processingAcquireInProgress || lifecycleStatus === "pairing" || lifecycleStatus === "connecting" || lifecycleStatus === "syncing") return;
+    processingAcquireInProgress = true;
+    void initializePoolLease().then((ready) => {
+      if (ready) return connectWhatsApp().catch((error) => scheduleWhatsAppReconnect(error));
+      return undefined;
+    }).catch((error) => console.warn("WhatsApp processing pool poll failed", error))
+      .finally(() => { processingAcquireInProgress = false; });
+  }, poolRetryDelayMs);
+  processingPollTimer.unref?.();
 }
 
 async function rotatePoolAccount() {
   if (!poolEnabled || !accountLease || mockMode) return;
   const previousLease = accountLease;
+  const accountId = previousLease.account.accountId;
   accountRotationTimer = null;
   lifecycleStatus = "stopped";
   connected = false;
   try { (waSocket as any)?.end?.(); } catch (error) { console.warn("WhatsApp socket rotation close failed", error); }
   waSocket = null;
+  await flushAuthSnapshot(join(authDir, accountId), accountId).catch((snapshotError) => console.warn("WhatsApp rotated session snapshot failed", snapshotError));
   accountLease = null;
   await previousLease.setStatus("paused", null).catch(() => undefined);
   await previousLease.release().catch((error) => console.warn("WhatsApp account lease release failed", error));
@@ -98,8 +233,34 @@ async function rotatePoolAccount() {
   }
 }
 
+async function finishProcessingCycle() {
+  if (!poolEnabled || onboardingOnly || !accountLease || processingCycleFinished) return;
+  processingCycleFinished = true;
+  const lease = accountLease;
+  lifecycleStatus = "stopped";
+  connected = false;
+  if (accountRotationTimer) clearTimeout(accountRotationTimer);
+  accountRotationTimer = null;
+  try { (waSocket as any)?.end?.(); } catch { /* best effort */ }
+  waSocket = null;
+  await flushAuthSnapshot(join(authDir, lease.account.accountId), lease.account.accountId).catch((snapshotError) => console.warn("WhatsApp processing session snapshot failed", snapshotError));
+  await lease.completeSync(new Date(Date.now() + connectorSyncIntervalSeconds * 1000)).catch((error) => console.warn("WhatsApp sync completion persistence failed", error));
+  accountLease = null;
+  await lease.release().catch((error) => console.warn("WhatsApp processing lease release failed", error));
+  console.log(`WhatsApp worker ${poolWorkerId} released account ${lease.account.accountId} after sync`);
+}
+
 async function restoreAuthSnapshot(directory: string) {
   if (!accountLease) return;
+  // Pool workers share the named auth volume. If it already contains valid
+  // credentials, keep its newest Signal files; the PostgreSQL copy is the
+  // fallback for a fresh worker or a fresh volume.
+  try {
+    const localCredentials = JSON.parse((await readFile(join(directory, "creds.json"))).toString("utf8")) as Record<string, unknown>;
+    if (localCredentials && typeof localCredentials === "object") return;
+  } catch {
+    // No usable local credentials; restore the durable PostgreSQL snapshot.
+  }
   const snapshot = await accountLease.loadSession();
   if (!snapshot) return;
   const files = JSON.parse(snapshot.toString("utf8")) as Record<string, string>;
@@ -107,14 +268,52 @@ async function restoreAuthSnapshot(directory: string) {
   for (const [name, value] of Object.entries(files)) await writeFile(join(directory, name), Buffer.from(value, "base64"));
 }
 
-async function persistAuthSnapshot(directory: string) {
-  if (!accountLease) return;
-  const snapshot: Record<string, string> = {};
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (!entry.isFile()) continue;
-    snapshot[entry.name] = (await readFile(join(directory, entry.name))).toString("base64");
-  }
-  await accountLease.saveSession(Buffer.from(JSON.stringify(snapshot), "utf8"));
+async function persistAuthSnapshot(directory: string, expectedAccountId?: string) {
+  const lease = accountLease;
+  if (!lease || (expectedAccountId && lease.account.accountId !== expectedAccountId)) return;
+  authSnapshotWrite = authSnapshotWrite.catch(() => undefined).then(async () => {
+    const snapshot: Record<string, string> = {};
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      try {
+        const contents = await readFile(join(directory, entry.name));
+        // Do not publish a file while Baileys is replacing it. A truncated
+        // Signal JSON file would otherwise become a durable Bad-MAC snapshot.
+        JSON.parse(contents.toString("utf8"));
+        snapshot[entry.name] = contents.toString("base64");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    if (accountLease?.account.accountId !== lease.account.accountId) return;
+    await lease.saveSession(Buffer.from(JSON.stringify(snapshot), "utf8"));
+  });
+  await authSnapshotWrite;
+}
+
+function scheduleAuthSnapshotPersist(directory: string, accountId: string) {
+  if (authSnapshotTimer) clearTimeout(authSnapshotTimer);
+  authSnapshotTimerDirectory = directory;
+  authSnapshotTimerAccountId = accountId;
+  authSnapshotTimer = setTimeout(() => {
+    authSnapshotTimer = null;
+    const targetDirectory = authSnapshotTimerDirectory;
+    const targetAccountId = authSnapshotTimerAccountId;
+    authSnapshotTimerDirectory = null;
+    authSnapshotTimerAccountId = null;
+    if (targetDirectory && targetAccountId) {
+      void persistAuthSnapshot(targetDirectory, targetAccountId).catch((error) => console.warn("WhatsApp scheduled session snapshot failed", error));
+    }
+  }, 1_500);
+  authSnapshotTimer.unref?.();
+}
+
+async function flushAuthSnapshot(directory: string, accountId: string) {
+  if (authSnapshotTimer) clearTimeout(authSnapshotTimer);
+  authSnapshotTimer = null;
+  authSnapshotTimerDirectory = null;
+  authSnapshotTimerAccountId = null;
+  await persistAuthSnapshot(directory, accountId);
 }
 
 async function prepareInitialActivation() {
@@ -143,9 +342,37 @@ function backfillDelay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function waitForWhatsAppHistory(groupId: string) {
+  let timer: NodeJS.Timeout | undefined;
+  let resolvePromise: ((messageCount: number) => void) | undefined;
+  const waiter = (messageCount: number) => {
+    if (timer) clearTimeout(timer);
+    resolvePromise?.(messageCount);
+  };
+  const promise = new Promise<number>((resolve) => {
+    resolvePromise = resolve;
+    const waiters = historyWaiters.get(groupId) ?? [];
+    waiters.push(waiter);
+    historyWaiters.set(groupId, waiters);
+    timer = setTimeout(() => {
+      const current = historyWaiters.get(groupId) ?? [];
+      historyWaiters.set(groupId, current.filter((candidate) => candidate !== waiter));
+      resolve(0);
+    }, historyWaitMs);
+  });
+  return promise;
+}
+
+function notifyWhatsAppHistory(groupId: string, messageCount: number) {
+  const waiters = historyWaiters.get(groupId);
+  if (!waiters?.length) return;
+  historyWaiters.delete(groupId);
+  for (const waiter of waiters) waiter(messageCount);
+}
+
 async function setStatus(status: typeof lifecycleStatus, detail?: string, error?: unknown) {
   lifecycleStatus = status;
-  lastError = error ? String(error) : lastError;
+  lastError = error ? String(error) : (status === "error" || status === "reauth_required" ? lastError : null);
   if (accountLease) await accountLease.setStatus(status, lastError).catch((dbError) => console.warn("connector account status persistence failed", dbError));
   await pool.query(
     `INSERT INTO connector_states (connector, status, detail, last_error, qr, connected_at)
@@ -176,7 +403,13 @@ async function cleanupRemovedGroups(platform: "whatsapp" | "telegram", groupIds:
   );
   const result = JSON.parse(sc.decode(response.data)) as { ok?: boolean; error?: string };
   if (!result.ok) throw new Error(result.error ?? "Medienbereinigung fehlgeschlagen");
-  await pool.query("DELETE FROM wa_groups WHERE platform=$1 AND id=ANY($2::text[])", [platform, uniqueIds]);
+  const ownerUserId = accountLease?.account.userId;
+  if (ownerUserId) {
+    await pool.query("DELETE FROM user_group_access WHERE user_id=$1::uuid AND group_id=ANY($2::text[])", [ownerUserId, uniqueIds]);
+    await pool.query("DELETE FROM wa_groups g WHERE g.platform=$1 AND g.id=ANY($2::text[]) AND NOT EXISTS (SELECT 1 FROM user_group_access uga WHERE uga.group_id=g.id)", [platform, uniqueIds]);
+  } else {
+    await pool.query("DELETE FROM wa_groups WHERE platform=$1 AND id=ANY($2::text[])", [platform, uniqueIds]);
+  }
   console.log(`Removed ${uniqueIds.length} departed ${platform} group(s) and related data`);
 }
 
@@ -199,15 +432,21 @@ async function ensureEventStream() {
 
 async function upsertGroup(group: GroupDiscovered) {
 	const subject = group.subject?.trim() || group.groupId;
-	const result = await pool.query<{ is_selected: boolean }>(
-		`INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $1)
+	const ownerUserId = accountLease?.account.userId ?? null;
+	await pool.query(
+		`INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id, owner_user_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $1, $8)
 		 ON CONFLICT (id) DO UPDATE SET subject = CASE WHEN EXCLUDED.subject = EXCLUDED.id THEN wa_groups.subject ELSE EXCLUDED.subject END, owner_jid = EXCLUDED.owner_jid,
 		   participant_count = EXCLUDED.participant_count, platform = EXCLUDED.platform, chat_type = EXCLUDED.chat_type,
-		   external_chat_id = EXCLUDED.external_chat_id, updated_at = NOW()
-		 RETURNING is_selected`,
-		[group.groupId, subject, group.ownerJid ?? null, group.participantCount ?? 0, group.isSelected, group.platform ?? "whatsapp", group.chatType ?? "group"],
+		   external_chat_id = EXCLUDED.external_chat_id, owner_user_id = COALESCE(wa_groups.owner_user_id, EXCLUDED.owner_user_id), updated_at = NOW()`,
+		[group.groupId, subject, group.ownerJid ?? null, group.participantCount ?? 0, group.isSelected, group.platform ?? "whatsapp", group.chatType ?? "group", ownerUserId],
 	);
+	if (ownerUserId) {
+		await pool.query(`INSERT INTO user_group_access (user_id, group_id, can_read, can_manage, is_selected)
+			VALUES ($1::uuid,$2,TRUE,TRUE,$3) ON CONFLICT (user_id,group_id) DO NOTHING`, [ownerUserId, group.groupId, group.isSelected]);
+	}
+	const result = await pool.query<{ is_selected: boolean }>(`SELECT COALESCE(uga.is_selected,g.is_selected) AS is_selected
+		FROM wa_groups g LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$2::uuid WHERE g.id=$1`, [group.groupId, ownerUserId]);
 	await publish(subjects.groupDiscovered, subjects.groupDiscovered, { ...group, subject, isSelected: result.rows[0]?.is_selected ?? group.isSelected });
 }
 
@@ -250,10 +489,12 @@ async function refreshAllWhatsAppGroupNames(socket: ReturnType<typeof makeWASock
     const presentIds = Object.keys(participating).filter((groupId) => groupId.endsWith("@g.us"));
     for (const [groupId, metadata] of Object.entries(participating)) {
       if (!groupId.endsWith("@g.us")) continue;
+      if (metadata.participants?.length) await persistWhatsAppContacts(metadata.participants as WhatsAppParticipant[]);
       const subject = metadata.subject?.trim();
       await upsertGroup({ groupId, subject: subject || groupId, participantCount: metadata.participants?.length ?? 0, isSelected: allowlistedGroup(groupId), platform: "whatsapp", chatType: "group" });
     }
-    const stored = await pool.query<{ id: string }>("SELECT id FROM wa_groups WHERE platform='whatsapp'");
+		await repairStoredWhatsAppSenderNames();
+		const stored = await pool.query<{ id: string }>("SELECT id FROM wa_groups WHERE platform='whatsapp' AND ($1::uuid IS NULL OR owner_user_id=$1::uuid)", [accountLease?.account.userId ?? null]);
     const stale = stored.rows.map((row) => row.id).filter((id) => !presentIds.includes(id));
     await cleanupRemovedGroups("whatsapp", stale);
   } catch {
@@ -344,17 +585,159 @@ async function downloadWhatsAppMedia(message: WAMessage, socket: ReturnType<type
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+async function persistWhatsAppContacts(contacts: WhatsAppParticipant[]) {
+  const accountId = accountLease?.account.accountId;
+  if (!accountId) return;
+  for (const contact of contacts) {
+    const identityJid = contact.lid?.trim() || contact.id?.trim() || contact.jid?.trim();
+    if (!identityJid) continue;
+    const phoneJid = contact.jid?.trim() || (contact.id?.endsWith("@s.whatsapp.net") ? contact.id.trim() : null);
+    await pool.query(
+      `INSERT INTO whatsapp_contacts (account_id,identity_jid,phone_jid,display_name,notify_name,verified_name)
+       VALUES ($1::uuid,$2,$3,$4,$5,$6)
+       ON CONFLICT (account_id,identity_jid) DO UPDATE SET
+         phone_jid=COALESCE(EXCLUDED.phone_jid,whatsapp_contacts.phone_jid),
+         display_name=COALESCE(NULLIF(EXCLUDED.display_name,''),whatsapp_contacts.display_name),
+         notify_name=COALESCE(NULLIF(EXCLUDED.notify_name,''),whatsapp_contacts.notify_name),
+         verified_name=COALESCE(NULLIF(EXCLUDED.verified_name,''),whatsapp_contacts.verified_name),
+         updated_at=NOW()`,
+      [accountId, identityJid, phoneJid, contact.name?.trim() || null, contact.notify?.trim() || null, contact.verifiedName?.trim() || null],
+    );
+  }
+}
+
+async function repairStoredWhatsAppSenderNames() {
+  const accountId = accountLease?.account.accountId;
+  if (!accountId) return;
+  await pool.query(
+    `UPDATE messages m SET sender_name=NULLIF(m.raw->>'pushName','')
+     WHERE m.platform='whatsapp' AND (m.sender_name IS NULL OR btrim(m.sender_name)='')
+       AND NULLIF(m.raw->>'pushName','') IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM connector_accounts ca
+         LEFT JOIN wa_groups og ON og.owner_user_id=ca.user_id AND og.id=m.group_id
+         LEFT JOIN user_group_access uga ON uga.user_id=ca.user_id AND uga.group_id=m.group_id
+         WHERE ca.id=$1::uuid AND (og.id IS NOT NULL OR uga.group_id IS NOT NULL)
+       )`,
+    [accountId],
+  );
+  await pool.query(
+    `UPDATE messages m SET
+       sender_jid=COALESCE(NULLIF(c.phone_jid,''),m.sender_jid),
+       sender_name=COALESCE(NULLIF(m.sender_name,''),NULLIF(c.display_name,''),NULLIF(c.notify_name,''),NULLIF(c.verified_name,''))
+     FROM whatsapp_contacts c
+     WHERE c.account_id=$1::uuid AND m.platform='whatsapp'
+       AND (c.identity_jid=m.sender_jid OR c.phone_jid=m.sender_jid)
+       AND (m.sender_jid LIKE '%@lid' OR NULLIF(m.sender_name,'') IS NULL)`,
+    [accountId],
+  );
+}
+
+function participantAliases(message: WAMessage) {
+  return Array.from(new Set([
+    message.key.participant,
+    message.key.participantLid,
+    message.key.participantPn,
+    message.key.senderLid,
+    message.key.senderPn,
+  ].map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
+}
+
+function participantCacheKey(groupId: string, participant: string) {
+  return `${accountLease?.account.accountId ?? "unassigned"}:${groupId}:${participant}`;
+}
+
+function displayNameForParticipant(participant?: WhatsAppParticipant | null) {
+  return participant?.name?.trim() || participant?.notify?.trim() || participant?.verifiedName?.trim() || undefined;
+}
+
+function cacheSenderIdentity(groupId: string, aliases: string[], identity: WhatsAppSenderIdentity, ttlMs: number) {
+  const entry = { identity, expiresAt: Date.now() + ttlMs };
+  for (const alias of aliases) senderIdentityCache.set(participantCacheKey(groupId, alias), entry);
+}
+
+async function resolveWhatsAppSender(message: WAMessage, socket: ReturnType<typeof makeWASocket> | null): Promise<{ identity: WhatsAppSenderIdentity; aliases: string[] }> {
+  const groupId = message.key.remoteJid ?? "";
+  const aliases = participantAliases(message);
+  const participantPn = message.key.participantPn?.trim() || message.key.senderPn?.trim();
+  const fallbackJid = participantPn || message.key.participant?.trim() || message.key.participantLid?.trim() || "unknown";
+  const pushName = message.pushName?.trim();
+  if (pushName) {
+    const identity = { senderJid: fallbackJid, senderName: pushName };
+    cacheSenderIdentity(groupId, aliases, identity, 60 * 60 * 1000);
+    return { identity, aliases };
+  }
+
+  for (const alias of aliases) {
+    const cached = senderIdentityCache.get(participantCacheKey(groupId, alias));
+    if (cached && cached.expiresAt > Date.now()) return { identity: cached.identity, aliases };
+  }
+
+  const accountId = accountLease?.account.accountId;
+  if (accountId && aliases.length) {
+    const contact = await pool.query<{ identity_jid: string; phone_jid: string | null; display_name: string | null; notify_name: string | null; verified_name: string | null }>(
+      `SELECT identity_jid, phone_jid, display_name, notify_name, verified_name
+       FROM whatsapp_contacts
+       WHERE account_id=$1::uuid AND (identity_jid=ANY($2::text[]) OR phone_jid=ANY($2::text[]))
+       ORDER BY CASE WHEN display_name IS NOT NULL OR notify_name IS NOT NULL OR verified_name IS NOT NULL THEN 0 ELSE 1 END,
+                updated_at DESC LIMIT 1`,
+      [accountId, aliases],
+    );
+    const row = contact.rows[0];
+    if (row) {
+      const identity = {
+        senderJid: row.phone_jid || row.identity_jid || fallbackJid,
+        senderName: row.display_name?.trim() || row.notify_name?.trim() || row.verified_name?.trim() || undefined,
+      };
+      cacheSenderIdentity(groupId, aliases, identity, identity.senderName ? 60 * 60 * 1000 : 5 * 60 * 1000);
+      return { identity, aliases };
+    }
+  }
+
+  let matched: WhatsAppParticipant | undefined;
+  try {
+    const metadata = socket ? await socket.groupMetadata(groupId) : null;
+    if (metadata?.participants?.length) await persistWhatsAppContacts(metadata.participants as WhatsAppParticipant[]);
+    matched = metadata?.participants?.find((candidate: WhatsAppParticipant) => {
+      const candidateAliases = [candidate.id, candidate.lid, candidate.jid].filter((value): value is string => Boolean(value));
+      return candidateAliases.some((candidateAlias) => aliases.includes(candidateAlias))
+        || Boolean(participantPn && candidate.jid === participantPn);
+    });
+  } catch {
+    // Group metadata can be temporarily unavailable during reconnect/history sync.
+  }
+  const identity = {
+    senderJid: participantPn || matched?.jid || fallbackJid,
+    senderName: displayNameForParticipant(matched),
+  };
+  cacheSenderIdentity(groupId, aliases, identity, identity.senderName ? 60 * 60 * 1000 : 5 * 60 * 1000);
+  return { identity, aliases };
+}
+
+async function persistResolvedSenderName(groupId: string, identity: WhatsAppSenderIdentity, aliases: string[]) {
+  if (!identity.senderJid || !aliases.length) return;
+  await pool.query(
+    `UPDATE messages SET sender_jid=CASE WHEN sender_jid=ANY($2::text[]) THEN $3 ELSE sender_jid END,
+       sender_name=COALESCE(NULLIF(sender_name,''),$4)
+     WHERE group_id=$1 AND sender_jid=ANY($2::text[])`,
+    [groupId, aliases, identity.senderJid, identity.senderName],
+  );
+}
+
 async function persistMessage(message: WAMessage) {
+  if (onboardingOnly) return;
   const groupId = message.key.remoteJid;
   const waMessageId = message.key.id;
   if (!groupId?.endsWith("@g.us") || !waMessageId) return;
 
-  const selected = await pool.query<{ is_selected: boolean }>("SELECT is_selected FROM wa_groups WHERE id = $1", [groupId]);
+  const selected = await pool.query<{ is_selected: boolean }>(`SELECT (g.is_selected OR COALESCE(uga.is_selected,FALSE)) AS is_selected
+    FROM wa_groups g LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$2::uuid WHERE g.id=$1`, [groupId, accountLease?.account.userId ?? null]);
   if (!selected.rows[0]?.is_selected) return;
 
   const kind = messageKind(message);
   const hasMedia = kind === "audio" || kind === "image" || kind === "video" || kind === "document";
   const mediaMime = mediaMimeFor(message, kind);
+  const { identity: sender, aliases: senderAliases } = await resolveWhatsAppSender(message, waSocket);
   const timestamp = Number(message.messageTimestamp ?? Math.floor(Date.now() / 1000));
   // The cutoff is reset at every process start. This keeps delayed history
   // events bounded to the requested restart window as well as live updates.
@@ -368,7 +751,10 @@ async function persistMessage(message: WAMessage) {
      FROM messages m WHERE m.group_id = $1 AND m.wa_message_id = $2`, [groupId, waMessageId],
   );
   const mediaAlreadyStored = !hasMedia || Boolean(previous.rows[0]?.media_object_path);
-  if (previous.rows[0]?.content_hash === contentHash && !previous.rows[0]?.deleted_at && mediaAlreadyStored) return;
+  if (previous.rows[0]?.content_hash === contentHash && !previous.rows[0]?.deleted_at && mediaAlreadyStored) {
+    await persistResolvedSenderName(groupId, sender, senderAliases);
+    return;
+  }
   let objectPath: string | undefined;
   const mediaKey = hasMedia ? `${groupId}/${waMessageId}` : undefined;
   if (hasMedia && !mockMode && waSocket) {
@@ -388,16 +774,17 @@ async function persistMessage(message: WAMessage) {
     `INSERT INTO messages (group_id, wa_message_id, platform, external_chat_id, sender_jid, sender_name, kind, text, received_at, has_media, media_key, media_mime, raw, content_hash, sequence_no, media_status, edited_at, deleted_at)
      VALUES ($1,$2,'whatsapp',$1,$3,$4,$5,$6,to_timestamp($7),$8,$9,$10,$11,$12,$7,$13,CASE WHEN $14 THEN NOW() ELSE NULL END,NULL)
      ON CONFLICT (group_id, wa_message_id) DO UPDATE SET sender_jid = EXCLUDED.sender_jid,
-       sender_name = EXCLUDED.sender_name, kind = EXCLUDED.kind, text = EXCLUDED.text,
+       sender_name = COALESCE(NULLIF(EXCLUDED.sender_name,''), messages.sender_name), kind = EXCLUDED.kind, text = EXCLUDED.text,
        received_at = EXCLUDED.received_at, has_media = EXCLUDED.has_media,
        media_key = EXCLUDED.media_key, media_mime = EXCLUDED.media_mime, raw = EXCLUDED.raw,
        content_hash = EXCLUDED.content_hash, sequence_no = EXCLUDED.sequence_no,
        media_status = EXCLUDED.media_status,
        edited_at = CASE WHEN messages.content_hash IS NOT NULL THEN NOW() ELSE messages.edited_at END
      RETURNING id`,
-    [groupId, waMessageId, message.key.participant ?? "unknown", message.pushName ?? null, kind, text ?? null,
+    [groupId, waMessageId, sender.senderJid, sender.senderName ?? null, kind, text ?? null,
       timestamp, hasMedia, mediaKey ?? null, mediaMime ?? null, raw, contentHash, mediaStatus, Boolean(previous.rows[0])],
   );
+  await persistResolvedSenderName(groupId, sender, senderAliases);
   const messageId = result.rows[0].id;
   const revisionCount = await pool.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM message_revisions WHERE message_id = $1", [messageId]);
   await pool.query(
@@ -406,7 +793,7 @@ async function persistMessage(message: WAMessage) {
   );
   const data: WhatsAppMessageReceived = {
     messageId, waMessageId, groupId, platform: "whatsapp", chatType: "group", externalChatId: groupId,
-    senderJid: message.key.participant ?? "unknown", senderName: message.pushName ?? undefined,
+    senderJid: sender.senderJid, senderName: sender.senderName,
     kind, text: messageText(message), receivedAt: new Date(timestamp * 1000).toISOString(), hasMedia,
     mediaKey, mediaMime, mediaObjectPath: objectPath, raw,
     replyToWaMessageId: replyToWaMessageId(message),
@@ -428,11 +815,13 @@ async function persistMessage(message: WAMessage) {
 }
 
 async function queueOrPersistHistory(message: WAMessage) {
+  if (onboardingOnly) return;
   const groupId = message.key.remoteJid;
   if (!groupId?.endsWith("@g.us")) return;
   const timestamp = Number(message.messageTimestamp ?? 0);
   if (!timestamp || new Date(timestamp * 1000) < backfillCutoff) return;
-  const selected = await pool.query<{ is_selected: boolean }>("SELECT is_selected FROM wa_groups WHERE id = $1", [groupId]);
+  const selected = await pool.query<{ is_selected: boolean }>(`SELECT (g.is_selected OR COALESCE(uga.is_selected,FALSE)) AS is_selected
+    FROM wa_groups g LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$2::uuid WHERE g.id=$1`, [groupId, accountLease?.account.userId ?? null]);
   if (selected.rows[0]?.is_selected) {
     await persistMessage(message);
     return;
@@ -442,31 +831,55 @@ async function queueOrPersistHistory(message: WAMessage) {
   pendingHistory.set(groupId, messages);
 }
 
-async function requestWhatsAppHistory(groupId: string) {
-  if (!waSocket || !connected) return;
-  const oldest = await pool.query<{ wa_message_id: string; received_at: Date }>(
-    "SELECT wa_message_id, received_at FROM messages WHERE group_id=$1 ORDER BY received_at ASC LIMIT 1",
-    [groupId],
-  );
-  const oldestMessage = oldest.rows[0];
-  try {
-    await waSocket.fetchMessageHistory(
-      200,
-      { remoteJid: groupId, fromMe: false, id: oldestMessage?.wa_message_id ?? "0" },
-      oldestMessage?.received_at?.getTime() ?? backfillCutoff.getTime(),
+async function requestWhatsAppHistory(socket: ReturnType<typeof makeWASocket>, groupId: string) {
+  if (!connected || waSocket !== socket) return;
+  let lastOldestID: string | undefined;
+  for (let page = 0; page < historyMaxPages; page += 1) {
+    if (!connected || waSocket !== socket) return;
+    const oldest = await pool.query<{ wa_message_id: string; received_at: Date; from_me: boolean; participant: string | null }>(
+      `SELECT wa_message_id, received_at,
+              CASE WHEN raw->'key'->>'fromMe'='true' THEN TRUE ELSE FALSE END AS from_me,
+              raw->'key'->>'participant' AS participant
+       FROM messages WHERE group_id=$1 ORDER BY received_at ASC LIMIT 1`,
+      [groupId],
     );
-  } catch (error) {
-    console.warn("WhatsApp selected-group history request failed", groupId, error);
+    const oldestMessage = oldest.rows[0];
+    if (oldestMessage && oldestMessage.received_at.getTime() <= backfillCutoff.getTime()) return;
+    if (oldestMessage?.wa_message_id === lastOldestID) return;
+    lastOldestID = oldestMessage?.wa_message_id;
+    const oldestKey = {
+      remoteJid: groupId,
+      fromMe: oldestMessage?.from_me ?? false,
+      id: oldestMessage?.wa_message_id ?? "0",
+      ...(oldestMessage?.participant ? { participant: oldestMessage.participant } : {}),
+    };
+    const historyResult = waitForWhatsAppHistory(groupId);
+    try {
+      await socket.fetchMessageHistory(
+        historyPageSize,
+        oldestKey,
+        oldestMessage?.received_at?.getTime() ?? backfillCutoff.getTime(),
+      );
+      const receivedCount = await historyResult;
+      console.log(`WhatsApp history page ${page + 1}/${historyMaxPages} received for ${groupId}: ${receivedCount} message(s)`);
+      if (receivedCount === 0) return;
+      await backfillDelay(Math.max(500, backfillThrottleMs));
+    } catch (error) {
+      historyWaiters.delete(groupId);
+      console.warn("WhatsApp selected-group history request failed", groupId, error);
+      return;
+    }
   }
 }
 
 async function backfillSelectedWhatsAppGroups(socket: ReturnType<typeof makeWASocket>) {
   const selected = await pool.query<{ id: string }>(
-    "SELECT id FROM wa_groups WHERE platform='whatsapp' AND is_selected=TRUE ORDER BY subject",
+    "SELECT g.id FROM wa_groups g LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$1::uuid WHERE g.platform='whatsapp' AND (g.is_selected=TRUE OR uga.is_selected=TRUE) ORDER BY g.subject",
+    [accountLease?.account.userId ?? null],
   );
   for (const [index, group] of selected.rows.entries()) {
     if (index > 0) await backfillDelay(backfillGroupDelayMs);
-    await requestWhatsAppHistory(group.id);
+    await requestWhatsAppHistory(socket, group.id);
   }
 }
 
@@ -474,7 +887,8 @@ async function retryMissingWhatsAppMedia(socket: ReturnType<typeof makeWASocket>
   const rows = await pool.query<{ id: string; raw: WAMessage }>(
     `SELECT m.id, m.raw
      FROM messages m
-     JOIN wa_groups g ON g.id = m.group_id AND g.platform='whatsapp' AND g.is_selected=TRUE
+     JOIN wa_groups g ON g.id = m.group_id AND g.platform='whatsapp'
+     LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$2::uuid
      LEFT JOIN LATERAL (
        SELECT mo.message_id
        FROM media_objects mo
@@ -484,7 +898,7 @@ async function retryMissingWhatsAppMedia(socket: ReturnType<typeof makeWASocket>
      WHERE m.platform='whatsapp' AND m.has_media=TRUE AND m.kind IN ('image','video')
        AND m.received_at >= $1 AND stored.message_id IS NULL
      ORDER BY m.received_at DESC`,
-    [backfillCutoff],
+    [backfillCutoff, accountLease?.account.userId ?? null],
   );
   if (!rows.rows.length) return;
   console.log(`Retrying ${rows.rows.length} missing WhatsApp image/video file(s)`);
@@ -503,7 +917,7 @@ async function handleGroupSelection(data: GroupSelectionChanged) {
   if (data.platform && data.platform !== "whatsapp") return;
   const groupId = data.groupId;
   if (!groupId.endsWith("@g.us")) return;
-  await pool.query("UPDATE wa_groups SET is_selected=$1, updated_at=NOW() WHERE id=$2", [data.selected, groupId]);
+  await pool.query("UPDATE user_group_access SET is_selected=$1 WHERE user_id=$3::uuid AND group_id=$2", [data.selected, groupId, accountLease?.account.userId ?? null]);
   if (!data.selected) {
     pendingHistory.delete(groupId);
     return;
@@ -514,7 +928,7 @@ async function handleGroupSelection(data: GroupSelectionChanged) {
     await persistMessage(message);
     await backfillDelay(backfillThrottleMs);
   }
-  await requestWhatsAppHistory(groupId);
+  if (waSocket) await requestWhatsAppHistory(waSocket, groupId);
 }
 
 function subscribeGroupSelections() {
@@ -532,7 +946,7 @@ function subscribeGroupSelections() {
 }
 
 function scheduleWhatsAppReconnect(reason?: unknown) {
-  if (mockMode || reconnectTimer || lifecycleStatus === "reauth_required" || lifecycleStatus === "stopped") return;
+  if (mockMode || onboardingOnly || !accountLease || reconnectTimer || lifecycleStatus === "reauth_required" || lifecycleStatus === "stopped") return;
   connected = false;
   waSocket = null;
   reconnectAttempts = Math.min(reconnectAttempts + 1, 10);
@@ -554,6 +968,12 @@ async function connectWhatsApp() {
     await mkdir(activeAuthDir, { recursive: true });
     await restoreAuthSnapshot(activeAuthDir);
     const { state, saveCreds } = await useMultiFileAuthState(activeAuthDir);
+    const activeAccountId = accountLease?.account.accountId;
+    const originalKeySet = state.keys.set.bind(state.keys);
+    state.keys.set = async (data) => {
+      await originalKeySet(data);
+      if (activeAccountId) scheduleAuthSnapshotPersist(activeAuthDir, activeAccountId);
+    };
     // WhatsApp currently terminates Baileys sessions that advertise the
     // macOS/DARWIN desktop sub-platform before sending the QR event. Use the
     // browser profile so fresh linked-device registration reaches pair-device.
@@ -561,12 +981,28 @@ async function connectWhatsApp() {
       auth: state,
       browser: Browsers.ubuntu("Chrome"),
       printQRInTerminal: false,
-      syncFullHistory: syncHistory || initialActivation,
+      // Do not request Baileys' global full-history/app-state sync here. It
+      // can fail on large linked-device accounts before selected groups are
+      // available. The controlled per-group fetch below is the authoritative
+      // backfill path and keeps the configured time window intact.
+      syncFullHistory: false,
+      // Still process explicit fetchMessageHistory responses. Initial RECENT
+      // and FULL notifications stay disabled, so Baileys does not trigger a
+      // global app-state sync for the account.
+      shouldSyncHistoryMessage: (history) => history.syncType === proto.Message.HistorySyncNotification.HistorySyncType.ON_DEMAND,
       // This connector is read-only. Baileys' optional props/blocklist/privacy
       // init queries can time out on an otherwise healthy linked-device socket;
       // skipping them avoids a noisy 60-second error without affecting group
       // discovery, message reception, or media downloads.
       fireInitQueries: false,
+      // Status updates and direct device-to-device chats are not part of the
+      // selected WhatsApp group data. They can arrive encrypted for a device
+      // whose Signal session is unavailable here and otherwise cause repeated
+      // retry/Bad-MAC noise. Group JIDs (@g.us) remain fully enabled.
+      shouldIgnoreJid: (jid) => jid === "status@broadcast"
+        || Boolean(jid?.endsWith("@lid"))
+        || Boolean(jid?.endsWith("@s.whatsapp.net"))
+        || Boolean(jid?.endsWith("@c.us")),
     });
     waSocket = socket;
     socket.ev.on("creds.update", async () => {
@@ -574,32 +1010,49 @@ async function connectWhatsApp() {
       await persistAuthSnapshot(activeAuthDir).catch((error) => console.warn("WhatsApp session snapshot failed", error));
     });
     socket.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
-    if (qr) { latestQr = qr; void setStatus("pairing", "QR-Code zur erneuten Anmeldung scannen"); qrcode.generate(qr, { small: true }); }
+    if (qr) {
+      latestQr = qr;
+      void setStatus("pairing", "QR-Code zur erneuten Anmeldung scannen");
+      if (onboardingOnly && accountLease) void accountLease.updateQR({ status: "qr", qrPayload: qr, expiresAt: new Date(Date.now() + 60_000), workerId: poolWorkerId });
+    }
     connected = connection === "open";
     if (connection === "connecting") void setStatus("connecting", "WhatsApp-Verbindung wird aufgebaut");
     if (connection === "open") {
+      if (onboardingOnly && !socket.user) return;
       reconnectAttempts = 0;
       connectedAt = new Date().toISOString();
       latestQr = null;
+      if (onboardingOnly && accountLease) void accountLease.updateQR({ status: "connected", qrPayload: null, expiresAt: null, workerId: poolWorkerId });
       void setStatus("syncing", `${initialActivation ? "Erst-" : "Neustart-"}Backfill der letzten ${backfillDays} Tage läuft`);
       startGroupRefreshTimer();
       void (async () => {
         await refreshAllWhatsAppGroupNames(socket);
+        if (onboardingOnly) {
+          if (accountLease) await accountLease.updateOnboardingRequest("connected", null, onboardingRequest?.id);
+          await backfillDelay(500);
+          await finishOnboarding();
+          return;
+        }
         await backfillSelectedWhatsAppGroups(socket);
         void retryMissingWhatsAppMedia(socket)
           .catch((error) => console.warn("WhatsApp missing-media repair failed", error));
         await setStatus("ready", `WhatsApp verbunden; ${backfillDays}-Tage-Backfill eingeplant, Medienreparatur läuft im Hintergrund`);
+        await finishProcessingCycle();
       })().catch((error) => void setStatus("degraded", "WhatsApp-Backfill konnte nicht vollständig gestartet werden", error));
     }
     if (connection === "close") {
       const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
-      if (statusCode === DisconnectReason.loggedOut) void setStatus("reauth_required", "Session abgemeldet; erneutes QR-Pairing erforderlich");
+      if (statusCode === DisconnectReason.loggedOut) {
+        if (onboardingOnly) void finishOnboarding("failed", new Error("WhatsApp session logged out"));
+        else void setStatus("reauth_required", "Session abgemeldet; erneutes QR-Pairing erforderlich");
+      } else if (onboardingOnly) void finishOnboarding("failed", lastDisconnect?.error ?? new Error("WhatsApp onboarding connection closed"));
       else scheduleWhatsAppReconnect(lastDisconnect?.error);
     }
   });
     socket.ev.on("groups.upsert", async (groups) => {
       try {
         for (const group of groups) {
+          if (group.participants?.length) await persistWhatsAppContacts(group.participants as WhatsAppParticipant[]);
           const subject = group.subject?.trim() || group.id;
           await upsertGroup({ groupId: group.id, subject, ownerJid: group.owner ?? undefined, participantCount: group.participants?.length ?? 0, isSelected: allowlistedGroup(group.id), platform: "whatsapp", chatType: "group" });
           await refreshGroupName(socket, group.id, subject);
@@ -609,14 +1062,33 @@ async function connectWhatsApp() {
       }
     });
     socket.ev.on("messages.upsert", async ({ messages }) => {
+      if (onboardingOnly) return;
       for (const message of messages) {
         try { await persistMessage(message); }
         catch (error) { console.warn("WhatsApp message persistence failed", message.key.id, error); }
       }
     });
-    (socket.ev as any).on("messaging-history.set", async (history: { messages?: WAMessage[]; chats?: Array<{ id: string; name?: string; subject?: string; participants?: unknown[] }> }) => {
+    (socket.ev as any).on("contacts.upsert", async (contacts: WhatsAppParticipant[]) => {
+      try { await persistWhatsAppContacts(contacts); }
+      catch (error) { console.warn("WhatsApp contact persistence failed", error); }
+    });
+    (socket.ev as any).on("contacts.update", async (contacts: WhatsAppParticipant[]) => {
+      try {
+        await persistWhatsAppContacts(contacts);
+        await repairStoredWhatsAppSenderNames();
+      } catch (error) { console.warn("WhatsApp contact update persistence failed", error); }
+    });
+    (socket.ev as any).on("messaging-history.set", async (history: { messages?: WAMessage[]; contacts?: WhatsAppParticipant[]; chats?: Array<{ id: string; name?: string; subject?: string; participants?: unknown[] }> }) => {
       try {
         void setStatus("syncing", "WhatsApp-History wird kontrolliert übernommen");
+        const historyGroupIds = new Set<string>([
+          ...(history.chats ?? []).map((chat) => chat.id),
+          ...(history.messages ?? []).map((message) => message.key.remoteJid ?? ""),
+        ].filter((groupId) => groupId.endsWith("@g.us")));
+        if (history.contacts?.length) {
+          await persistWhatsAppContacts(history.contacts);
+          await repairStoredWhatsAppSenderNames();
+        }
         for (const chat of history.chats ?? []) {
           if (chat.id.endsWith("@g.us")) {
             const subject = chat.name?.trim() || chat.subject?.trim() || chat.id;
@@ -624,10 +1096,14 @@ async function connectWhatsApp() {
             await refreshGroupName(socket, chat.id, subject);
           }
         }
+        if (onboardingOnly) return;
         for (const message of history.messages ?? []) {
           try { await queueOrPersistHistory(message); }
           catch (error) { console.warn("WhatsApp history message failed", message.key.id, error); }
           await backfillDelay(backfillThrottleMs);
+        }
+        for (const groupId of historyGroupIds) {
+          notifyWhatsAppHistory(groupId, (history.messages ?? []).filter((message) => message.key.remoteJid === groupId).length);
         }
         if (initialActivation) {
           await completeInitialActivation();
@@ -638,6 +1114,7 @@ async function connectWhatsApp() {
       }
     });
     (socket.ev as any).on("messages.update", async (updates: Array<{ key: WAMessage["key"]; update?: { message?: WAMessage["message"] } }>) => {
+      if (onboardingOnly) return;
       for (const update of updates) {
         try {
           if (update.update?.message) await persistMessage({ key: update.key, message: update.update.message } as WAMessage);
@@ -645,6 +1122,7 @@ async function connectWhatsApp() {
       }
     });
     (socket.ev as any).on("messages.delete", async (payload: { keys?: WAMessage["key"][] }) => {
+      if (onboardingOnly) return;
       try {
         for (const key of payload.keys ?? []) {
           if (!key.remoteJid || !key.id) continue;
@@ -775,7 +1253,7 @@ const server = createServer(async (request, response) => {
     if (request.url === "/healthz") return respond(response, 200, { status: "ok", service: "wa-connector" });
     if (request.url === "/readyz") return respond(response, lifecycleStatus === "ready" || mockMode ? 200 : 503, { status: lifecycleStatus, mode: mockMode ? "mock" : "baileys", lastError });
     if (request.url === "/status" || request.url === "/pairing") {
-      return respond(response, 200, { connector: "whatsapp", status: lifecycleStatus, connected, qr: latestQr, connectedAt, lastError, mode: mockMode ? "mock" : "baileys", historySync: syncHistory || initialActivation, initialBackfillActive: initialActivation, backfillDays, backfillThrottleMs, backfillGroupDelayMs });
+      return respond(response, 200, { connector: "whatsapp", status: lifecycleStatus, connected, connectedAt, lastError, mode: mockMode ? "mock" : "baileys", historySync: syncHistory || initialActivation, initialBackfillActive: initialActivation, backfillDays, backfillThrottleMs, backfillGroupDelayMs, qrRouting: "api-account" });
     }
     if (request.method === "GET" && request.url === "/groups") {
       const groups = await pool.query("SELECT id, subject, participant_count, is_selected, discovered_at FROM wa_groups ORDER BY subject");
@@ -795,22 +1273,28 @@ const server = createServer(async (request, response) => {
 });
 
 async function main() {
+  if (connectorStartDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, connectorStartDelayMs));
   nc = await connect({ servers: natsUrl });
   await ensureEventStream();
   subscribeGroupSelections();
   await pool.query("SELECT 1");
-  await prepareInitialActivation();
-  let poolReady = true;
-  try {
-    poolReady = await initializePoolLease();
-  } catch (error) {
-    poolReady = false;
-    console.error("WhatsApp connector pool initialization failed", error);
-    await setStatus("error", "Connector-Pool konnte nicht initialisiert werden", error);
+  if (!onboardingOnly) await prepareInitialActivation();
+  let poolReady = onboardingOnly ? false : true;
+  if (!onboardingOnly) {
+    try {
+      poolReady = await initializePoolLease();
+    } catch (error) {
+      poolReady = false;
+      console.error("WhatsApp connector pool initialization failed", error);
+      await setStatus("error", "Connector-Pool konnte nicht initialisiert werden", error);
+    }
   }
+  if (onboardingOnly) await setStatus("starting", "WhatsApp-Onboarding wartet auf eine QR-Anforderung");
   server.listen(port, () => console.log(`wa-connector listening on :${port} (${mockMode ? "mock" : "baileys"})`));
   if (mockMode) { connected = true; connectedAt = new Date().toISOString(); await setStatus("syncing", initialActivation ? `Mock-Backfill der letzten ${backfillDays} Tage läuft` : "Mock-Daten aktiv"); await seedMockData(); await completeInitialActivation(); await setStatus("ready", "Mock-Daten aktiv"); }
-  else if (poolReady) {
+  else if (onboardingOnly) {
+    startOnboardingPoller();
+  } else if (poolReady) {
     try {
       await connectWhatsApp();
     } catch (error) {
@@ -819,14 +1303,8 @@ async function main() {
     }
   } else if (poolEnabled) {
     console.warn("WhatsApp connector is paused because no account lease is available");
-    const retryTimer = setInterval(() => {
-      if (accountLease) return;
-      void initializePoolLease().then((ready) => {
-        if (ready) void connectWhatsApp().catch((error) => scheduleWhatsAppReconnect(error));
-      }).catch((error) => console.warn("WhatsApp connector pool retry failed", error));
-    }, 10_000);
-    retryTimer.unref?.();
   }
+  if (poolEnabled && !onboardingOnly) startProcessingPoller();
 }
 
 void main().catch((error) => { console.error(error); process.exitCode = 1; });

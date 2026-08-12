@@ -10,13 +10,17 @@
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
-    "@wagi/contracts": "file:../../packages/contracts",
     "@wagi/connector-sdk": "file:../../packages/connector-sdk",
+    "@wagi/contracts": "file:../../packages/contracts",
     "@whiskeysockets/baileys": "^6.7.18",
     "nats": "^2.28.2",
     "pg": "^8.12.0",
-    "pino": "^9.3.2",
-    "qrcode-terminal": "^0.12.0"
+    "pino": "^9.3.2"
   },
-  "devDependencies": {"@types/node": "^22.5.4", "@types/pg": "^8.11.10", "@types/qrcode-terminal": "^0.12.2", "tsx": "^4.19.1", "typescript": "^5.5.4"}
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4"
+  }
 }

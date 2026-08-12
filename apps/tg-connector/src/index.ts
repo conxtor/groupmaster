@@ -8,7 +8,7 @@ import { Api, TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
 import { subjects, type ConnectorLifecycleStatus, type EventEnvelope, type GroupDiscovered, type GroupSelectionChanged, type WhatsAppMessageReceived } from "@wagi/contracts";
-import { acquireConnectorAccount, ensureConnectorAccount, type ConnectorAccountLease, type ConnectorSQLStore } from "@wagi/connector-sdk";
+import { acquireConnectorAccount, claimConnectorOnboardingRequest, type ConnectorAccountLease, type ConnectorSQLStore, type ConnectorOnboardingRequest } from "@wagi/connector-sdk";
 
 const port = Number(process.env.TG_PORT ?? process.env.PORT ?? 3002);
 const databaseUrl = process.env.DATABASE_URL ?? "postgres://wagi_app:app@localhost:5432/app";
@@ -36,10 +36,16 @@ const mediaCleanupToken = (process.env.MEDIA_CLEANUP_TOKEN ?? "").trim();
 const allowlist = new Set((process.env.TG_GROUP_ALLOWLIST ?? "").split(",").map((value) => value.trim()).filter(Boolean));
 const directMode = apiId > 0 && Boolean(apiHash);
 const poolEnabled = (process.env.CONNECTOR_POOL_ENABLED ?? "false").toLowerCase() === "true";
-const poolWorkerId = process.env.CONNECTOR_WORKER_ID ?? `tg-${process.pid}`;
+const poolWorkerId = (process.env.CONNECTOR_WORKER_ID ?? "").trim() || `tg-${process.env.HOSTNAME ?? process.pid}`;
 const poolLeaseSeconds = Math.max(30, Number(process.env.CONNECTOR_LEASE_SECONDS ?? 90));
 const poolSlotSeconds = Math.max(0, Number(process.env.CONNECTOR_ACCOUNT_SLOT_SECONDS ?? 1800));
-const poolBootstrapEmail = (process.env.WAGI_BOOTSTRAP_ADMIN_EMAIL ?? "volker@kerkhoff.es").trim();
+const connectorStartDelayMs = Math.max(0, Number(process.env.CONNECTOR_START_DELAY_MS ?? 0));
+const poolRetryDelayMs = Math.max(5_000, Number(process.env.CONNECTOR_POOL_RETRY_DELAY_MS ?? 10_000));
+const connectorRole = (process.env.CONNECTOR_ROLE ?? "processing").trim().toLowerCase();
+const onboardingOnly = poolEnabled && connectorRole === "onboarding" && directMode;
+const connectorPoolSize = Math.max(1, Number(process.env.TG_CONNECTOR_POOL_SIZE ?? process.env.CONNECTOR_POOL_SIZE ?? 1));
+const connectorOnboardingSlots = Math.max(1, Number(process.env.TG_ONBOARDING_SLOTS ?? process.env.CONNECTOR_ONBOARDING_SLOTS ?? 1));
+const connectorSyncIntervalSeconds = Math.max(30, Number(process.env.CONNECTOR_SYNC_INTERVAL_SECONDS ?? 300));
 
 const pool = new Pool({ connectionString: databaseUrl });
 const sc = StringCodec();
@@ -63,26 +69,177 @@ let groupRefreshTimer: NodeJS.Timeout | null = null;
 let groupRefreshInProgress = false;
 let accountLease: ConnectorAccountLease | null = null;
 let accountRotationTimer: NodeJS.Timeout | null = null;
+let onboardingRequest: ConnectorOnboardingRequest | null = null;
+let onboardingPollTimer: NodeJS.Timeout | null = null;
+let processingPollTimer: NodeJS.Timeout | null = null;
+let processingAcquireInProgress = false;
+let onboardingAcquireInProgress = false;
+let accountUserIsAdmin = false;
+let processingCycleFinished = false;
 const sqlStore = pool as unknown as ConnectorSQLStore;
+
+async function loadAccountRole(lease: ConnectorAccountLease) {
+  const result = await pool.query<{ is_admin: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM user_roles
+       WHERE user_id=$1::uuid AND role_name='admin'
+     ) AS is_admin`,
+    [lease.account.userId],
+  );
+  accountUserIsAdmin = Boolean(result.rows[0]?.is_admin);
+}
+
+async function destroyDirectClient() {
+  const client = directClient;
+  directClient = null;
+  directRuntimeStarted = false;
+  if (!client) return;
+  try {
+    // GramJS' disconnect() leaves its background update loop alive. A pool
+    // cycle must destroy the client so its ping loop cannot reconnect after
+    // the account lease was released and emit repeated TIMEOUT errors.
+    await client.destroy();
+  } catch (error) {
+    console.warn("Telegram client shutdown failed", summarizeTelegramError(error));
+  }
+}
+
+async function stopAfterLeaseLoss(expectedLease: ConnectorAccountLease, error: unknown) {
+  if (accountLease !== expectedLease) return;
+  accountLease = null;
+  accountUserIsAdmin = false;
+  directRuntimeStarted = false;
+  directQrAuthPromise = null;
+  if (accountRotationTimer) clearTimeout(accountRotationTimer);
+  accountRotationTimer = null;
+  await destroyDirectClient();
+  await expectedLease.release().catch((releaseError) => console.warn("Telegram lease release after loss failed", releaseError));
+  console.warn("Telegram worker stopped after losing its account lease", summarizeTelegramError(error));
+}
 
 async function initializePoolLease() {
   if (!poolEnabled || !directMode) return true;
   const preferredAccountId = (process.env.CONNECTOR_ACCOUNT_ID ?? "").trim() || undefined;
-  if (!preferredAccountId) await ensureConnectorAccount(sqlStore, "telegram", poolBootstrapEmail, "Telegram");
-  accountLease = await acquireConnectorAccount(sqlStore, "telegram", poolWorkerId, preferredAccountId, poolLeaseSeconds);
-  if (!accountLease) {
+  const lease = await acquireConnectorAccount(sqlStore, "telegram", poolWorkerId, preferredAccountId, poolLeaseSeconds, {
+    leaseKind: "processing",
+    poolSize: connectorPoolSize,
+    onboardingSlots: connectorOnboardingSlots,
+  });
+  if (!lease) {
     await setStatus("degraded", "Kein freies Telegram-Connector-Konto; Worker wartet auf eine Lease");
     return false;
   }
-  accountLease.startRenewal((error) => console.warn("Telegram connector lease renewal failed", error));
+  accountLease = lease;
+  await loadAccountRole(lease);
+  lease.startRenewal((error) => void stopAfterLeaseLoss(lease, error));
   if (poolSlotSeconds > 0) {
     if (accountRotationTimer) clearTimeout(accountRotationTimer);
     accountRotationTimer = setTimeout(() => void rotatePoolAccount(), poolSlotSeconds * 1000);
     accountRotationTimer.unref?.();
   }
-  await accountLease.setStatus("connecting");
-  console.log(`Telegram worker ${poolWorkerId} leased account ${accountLease.account.accountId} for ${accountLease.account.label}`);
+  await lease.setStatus("connecting");
+  processingCycleFinished = false;
+  console.log(`Telegram worker ${poolWorkerId} leased account ${lease.account.accountId} for ${lease.account.label}`);
   return true;
+}
+
+async function initializeOnboardingLease() {
+  if (!onboardingOnly || !directMode || accountLease) return false;
+  const request = await claimConnectorOnboardingRequest(sqlStore, "telegram", poolWorkerId);
+  if (!request) return false;
+  const lease = await acquireConnectorAccount(sqlStore, "telegram", poolWorkerId, request.accountId, poolLeaseSeconds, {
+    leaseKind: "onboarding",
+    poolSize: connectorPoolSize,
+    onboardingSlots: connectorOnboardingSlots,
+  });
+  if (!lease) {
+    await pool.query("UPDATE connector_onboarding_requests SET status='pending', worker_id=NULL, updated_at=NOW() WHERE id=$1::uuid", [request.id]);
+    return false;
+  }
+  onboardingRequest = request;
+  accountLease = lease;
+  await loadAccountRole(lease);
+  // A user explicitly requested a new QR, so do not let an expired MTProto
+  // session bypass the QR callback.
+  await lease.saveSession(Buffer.from("", "utf8"));
+  lease.startRenewal((error) => {
+    if (accountLease === lease) void finishOnboarding("failed", error);
+  });
+  await lease.updateOnboardingRequest("claimed", null, request.id);
+  await lease.setStatus("pairing");
+  console.log(`Telegram onboarding worker ${poolWorkerId} handles account ${request.accountId}`);
+  return true;
+}
+
+async function finishOnboarding(status = "completed", error?: unknown) {
+  const lease = accountLease;
+  const request = onboardingRequest;
+  if (!lease || !request) return;
+  const message = error ? String(error) : null;
+  const ownership = await pool.query<{ status: string }>(
+    "SELECT status FROM connector_onboarding_requests WHERE id=$1::uuid AND worker_id=$2 AND status IN ('claimed','connected')",
+    [request.id, poolWorkerId],
+  );
+  if (ownership.rows.length) {
+    await lease.updateQR({ status: error ? "failed" : status, qrPayload: null, expiresAt: null, error: message });
+    await lease.updateOnboardingRequest(error ? "failed" : status, message, request.id);
+  }
+  if (ownership.rows.length && !error) {
+    await lease.setStatus("paused");
+    // Make the newly paired account eligible for the next processing-pool
+    // cycle immediately instead of waiting on an old/null schedule value.
+    await pool.query("UPDATE connector_accounts SET next_sync_at=NOW(), last_error=NULL, updated_at=NOW() WHERE id=$1::uuid", [lease.account.accountId]);
+  }
+  await destroyDirectClient();
+  accountLease = null;
+  accountUserIsAdmin = false;
+  onboardingRequest = null;
+  directQr = null;
+  directQrExpiresAt = null;
+  await lease.release().catch((releaseError) => console.warn("Telegram onboarding lease release failed", releaseError));
+}
+
+function startOnboardingPoller() {
+  if (!onboardingOnly || onboardingPollTimer) return;
+  const poll = () => {
+    if (accountLease || onboardingAcquireInProgress) return;
+    onboardingAcquireInProgress = true;
+    void initializeOnboardingLease().then((claimed) => {
+      if (claimed) return startDirectConnector();
+    }).catch((error) => console.warn("Telegram onboarding poll failed", summarizeTelegramError(error)))
+      .finally(() => { onboardingAcquireInProgress = false; });
+  };
+  onboardingPollTimer = setInterval(poll, Math.min(poolRetryDelayMs, 2_000));
+  onboardingPollTimer.unref?.();
+  poll();
+}
+
+function startProcessingPoller() {
+  if (!poolEnabled || onboardingOnly || !directMode || processingPollTimer) return;
+  processingPollTimer = setInterval(() => {
+    if (accountLease || directRuntimeStarted || directQrAuthPromise || processingAcquireInProgress) return;
+    processingAcquireInProgress = true;
+    void initializePoolLease().then((ready) => {
+      if (ready) return startDirectConnector().catch((error) => void setStatus("error", "Direct Telegram Initialisierung fehlgeschlagen", error));
+      return undefined;
+    }).catch((error) => console.warn("Telegram processing pool poll failed", summarizeTelegramError(error)))
+      .finally(() => { processingAcquireInProgress = false; });
+  }, poolRetryDelayMs);
+  processingPollTimer.unref?.();
+}
+
+async function finishProcessingCycle() {
+  if (!poolEnabled || onboardingOnly || !accountLease || processingCycleFinished) return;
+  processingCycleFinished = true;
+  const lease = accountLease;
+  if (accountRotationTimer) clearTimeout(accountRotationTimer);
+  accountRotationTimer = null;
+  await lease.completeSync(new Date(Date.now() + connectorSyncIntervalSeconds * 1000)).catch((error) => console.warn("Telegram sync completion persistence failed", error));
+  await destroyDirectClient();
+  accountLease = null;
+  accountUserIsAdmin = false;
+  await lease.release().catch((error) => console.warn("Telegram processing lease release failed", error));
+  console.log(`Telegram worker ${poolWorkerId} released account ${lease.account.accountId} after sync`);
 }
 
 async function rotatePoolAccount() {
@@ -90,10 +247,9 @@ async function rotatePoolAccount() {
   const previousLease = accountLease;
   accountRotationTimer = null;
   lifecycleStatus = "stopped";
-  directRuntimeStarted = false;
-  try { await directClient?.disconnect(); } catch (error) { console.warn("Telegram client rotation close failed", error); }
-  directClient = null;
+  await destroyDirectClient();
   accountLease = null;
+  accountUserIsAdmin = false;
   await previousLease.setStatus("paused", null).catch(() => undefined);
   await previousLease.release().catch((error) => console.warn("Telegram account lease release failed", error));
   try {
@@ -127,7 +283,7 @@ async function completeInitialActivation() {
 
 async function setStatus(status: ConnectorLifecycleStatus, detail?: string, error?: unknown) {
   lifecycleStatus = status;
-  if (error) lastError = String(error);
+  lastError = error ? String(error) : (status === "error" || status === "reauth_required" ? lastError : null);
   if (accountLease) await accountLease.setStatus(status, lastError).catch((dbError) => console.warn("connector account status persistence failed", dbError));
   await pool.query(
     `INSERT INTO connector_states (connector, status, detail, last_error, connected_at)
@@ -214,7 +370,13 @@ async function cleanupRemovedGroups(platform: "whatsapp" | "telegram", groupIds:
   );
   const result = JSON.parse(sc.decode(response.data)) as { ok?: boolean; error?: string };
   if (!result.ok) throw new Error(result.error ?? "Medienbereinigung fehlgeschlagen");
-  await pool.query("DELETE FROM wa_groups WHERE platform=$1 AND id=ANY($2::text[])", [platform, uniqueIds]);
+  const ownerUserId = accountLease?.account.userId;
+  if (ownerUserId) {
+    await pool.query("DELETE FROM user_group_access WHERE user_id=$1::uuid AND group_id=ANY($2::text[])", [ownerUserId, uniqueIds]);
+    await pool.query("DELETE FROM wa_groups g WHERE g.platform=$1 AND g.id=ANY($2::text[]) AND NOT EXISTS (SELECT 1 FROM user_group_access uga WHERE uga.group_id=g.id)", [platform, uniqueIds]);
+  } else {
+    await pool.query("DELETE FROM wa_groups WHERE platform=$1 AND id=ANY($2::text[])", [platform, uniqueIds]);
+  }
   console.log(`Removed ${uniqueIds.length} departed ${platform} group(s) and related data`);
 }
 
@@ -313,14 +475,21 @@ async function upsertDirectGroup(entity: any) {
   const allowlisted = allowlist.has(chatId) || allowlist.has(groupId) || Boolean(username && (allowlist.has(username) || allowlist.has(`@${username}`)));
   const chatType: "group" | "supergroup" | "channel" = entity.className === "Channel" ? (entity.broadcast ? "channel" : "supergroup") : "group";
   const group: GroupDiscovered = { groupId, subject: String(entity.title ?? entity.username ?? groupId), ownerJid: `tg:direct:${chatId}`, participantCount: Number(entity.participantsCount ?? 0), isSelected: allowlisted, platform: "telegram", chatType };
-  const result = await pool.query<{ is_selected: boolean }>(
-    `INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id)
-     VALUES ($1, $2, $3, $4, $5, 'telegram', $6, $1)
+  const ownerUserId = accountLease?.account.userId ?? null;
+  await pool.query(
+    `INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id, owner_user_id)
+     VALUES ($1, $2, $3, $4, $5, 'telegram', $6, $1, $7)
      ON CONFLICT (id) DO UPDATE SET subject = EXCLUDED.subject, owner_jid = EXCLUDED.owner_jid,
        participant_count = EXCLUDED.participant_count, platform = 'telegram', chat_type = EXCLUDED.chat_type,
-       external_chat_id = EXCLUDED.external_chat_id, updated_at = NOW()
-     RETURNING is_selected`,
-    [group.groupId, group.subject, group.ownerJid, group.participantCount ?? 0, group.isSelected, chatType],
+       external_chat_id = EXCLUDED.external_chat_id, owner_user_id = COALESCE(wa_groups.owner_user_id, EXCLUDED.owner_user_id), updated_at = NOW()`,
+    [group.groupId, group.subject, group.ownerJid, group.participantCount ?? 0, group.isSelected, chatType, ownerUserId],
+  );
+  if (ownerUserId) await pool.query(`INSERT INTO user_group_access (user_id,group_id,can_read,can_manage,is_selected) VALUES ($1::uuid,$2,TRUE,TRUE,$3) ON CONFLICT (user_id,group_id) DO NOTHING`, [ownerUserId, group.groupId, group.isSelected]);
+  const result = await pool.query<{ is_selected: boolean }>(
+    accountUserIsAdmin
+      ? `SELECT g.is_selected FROM wa_groups g WHERE g.id=$1`
+      : `SELECT COALESCE(uga.is_selected,FALSE) AS is_selected FROM wa_groups g LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$2::uuid WHERE g.id=$1`,
+    accountUserIsAdmin ? [group.groupId] : [group.groupId, ownerUserId],
   );
   const selected = result.rows[0]?.is_selected ?? group.isSelected;
   await publish(subjects.groupDiscovered, subjects.groupDiscovered, { ...group, isSelected: selected });
@@ -347,15 +516,22 @@ async function upsertDirectTopic(entity: any, topic: { id: number; title?: strin
     parentGroupId,
     topicId: String(topicId),
   };
-  const result = await pool.query<{ is_selected: boolean }>(
+  const ownerUserId = accountLease?.account.userId ?? null;
+  await pool.query(
     `INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id, parent_group_id, topic_id, topic_root_message_id)
      VALUES ($1, $2, $3, $4, $5, 'telegram', 'topic', $6, $7, $8, $9)
      ON CONFLICT (id) DO UPDATE SET subject = EXCLUDED.subject, owner_jid = EXCLUDED.owner_jid,
        participant_count = EXCLUDED.participant_count, platform = 'telegram', chat_type = 'topic',
        external_chat_id = EXCLUDED.external_chat_id, parent_group_id = EXCLUDED.parent_group_id,
-       topic_id = EXCLUDED.topic_id, topic_root_message_id = EXCLUDED.topic_root_message_id, updated_at = NOW()
-     RETURNING is_selected`,
+       topic_id = EXCLUDED.topic_id, topic_root_message_id = EXCLUDED.topic_root_message_id, updated_at = NOW()`,
     [groupId, group.subject, group.ownerJid, group.participantCount ?? 0, group.isSelected, `${entity.id}:${topicId}`, parentGroupId, topicId, Number(topic.topMessage ?? 0) || null],
+  );
+  if (ownerUserId) await pool.query(`INSERT INTO user_group_access (user_id,group_id,can_read,can_manage,is_selected) VALUES ($1::uuid,$2,TRUE,TRUE,$3) ON CONFLICT (user_id,group_id) DO NOTHING`, [ownerUserId, group.groupId, group.isSelected]);
+  const result = await pool.query<{ is_selected: boolean }>(
+    accountUserIsAdmin
+      ? `SELECT g.is_selected FROM wa_groups g WHERE g.id=$1`
+      : `SELECT COALESCE(uga.is_selected,FALSE) AS is_selected FROM wa_groups g LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$2::uuid WHERE g.id=$1`,
+    accountUserIsAdmin ? [group.groupId] : [group.groupId, ownerUserId],
   );
   const selected = result.rows[0]?.is_selected ?? group.isSelected;
   await publish(subjects.groupDiscovered, subjects.groupDiscovered, { ...group, isSelected: selected });
@@ -460,6 +636,7 @@ function scheduleDirectMediaRetry(message: any, entity: any, mediaKey: string) {
 }
 
 async function persistDirectMessage(message: any, entity: any) {
+  if (onboardingOnly) return;
   if (entity?.className === "Channel" && entity.forum && !directTopicGroups.has(`tg:${String(entity.id)}`)) {
     await discoverDirectTopics(entity);
   }
@@ -535,7 +712,7 @@ async function discoverDirectGroups() {
       if (!await discoverDirectTopics(entity)) throw new Error(`Telegram-Topics für ${group.groupId} konnten nicht vollständig gelesen werden`);
       for (const topic of directTopicGroups.get(group.groupId)?.values() ?? []) presentIds.add(topic.groupId);
     }
-    const stored = await pool.query<{ id: string }>("SELECT id FROM wa_groups WHERE platform='telegram'");
+    const stored = await pool.query<{ id: string }>("SELECT id FROM wa_groups WHERE platform='telegram' AND ($1::uuid IS NULL OR owner_user_id=$1::uuid)", [accountLease?.account.userId ?? null]);
     const stale = stored.rows.map((row) => row.id).filter((id) => !presentIds.has(id));
     await cleanupRemovedGroups("telegram", stale);
   } finally {
@@ -579,7 +756,7 @@ async function backfillDirectGroup(groupId: string) {
 async function handleGroupSelection(data: GroupSelectionChanged) {
   if (data.platform && data.platform !== "telegram") return;
   if (!data.groupId.startsWith("tg:")) return;
-  await pool.query("UPDATE wa_groups SET is_selected=$1, updated_at=NOW() WHERE id=$2", [data.selected, data.groupId]);
+  await pool.query("UPDATE user_group_access SET is_selected=$1 WHERE user_id=$3::uuid AND group_id=$2", [data.selected, data.groupId, accountLease?.account.userId ?? null]);
   if (data.selected) {
     await delay(backfillGroupDelayMs);
     try { await backfillDirectGroup(data.groupId); } catch (error) { console.warn("Telegram selected-group backfill failed", data.groupId, error); }
@@ -601,7 +778,13 @@ function subscribeGroupSelections() {
 }
 
 async function backfillSelectedDirectGroups() {
-  const selected = await pool.query<{ id: string }>("SELECT id FROM wa_groups WHERE platform='telegram' AND is_selected=TRUE ORDER BY subject");
+  const selected = await pool.query<{ id: string }>(
+    accountUserIsAdmin
+      ? "SELECT g.id FROM wa_groups g WHERE g.platform='telegram' AND g.is_selected=TRUE ORDER BY g.subject"
+      : "SELECT g.id FROM wa_groups g JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$1::uuid WHERE g.platform='telegram' AND uga.is_selected=TRUE ORDER BY g.subject",
+    accountUserIsAdmin ? [] : [accountLease?.account.userId ?? null],
+  );
+  console.log(`Telegram worker ${poolWorkerId} backfills ${selected.rows.length} selected group(s) for ${accountLease?.account.label ?? "account"}`);
   for (const [index, group] of selected.rows.entries()) {
     if (index > 0) await delay(backfillGroupDelayMs);
     try { await backfillDirectGroup(group.id); } catch (error) { console.warn("Telegram selected-group startup backfill failed", group.id, error); }
@@ -621,10 +804,17 @@ async function startDirectRuntime() {
   }, new NewMessage({ incoming: true }));
   await discoverDirectGroups();
   startGroupRefreshTimer();
-  await backfillSelectedDirectGroups();
+  if (!onboardingOnly) await backfillSelectedDirectGroups();
+  if (onboardingOnly) {
+    if (accountLease) await accountLease.updateOnboardingRequest("connected", null, onboardingRequest?.id);
+    await delay(500);
+    await finishOnboarding();
+    return;
+  }
   await completeInitialActivation();
   connectedAt = new Date().toISOString();
   await setStatus("ready", "Direct Telegram verbunden");
+  await finishProcessingCycle();
 }
 
 async function ensureDirectConnection() {
@@ -639,11 +829,18 @@ async function ensureDirectConnection() {
 }
 
 async function startDirectConnector() {
+  // A previous failed pool attempt may have left a client object behind.
+  // Never replace it without destroying its background update loop first.
+  if (directClient) await destroyDirectClient();
   const session = await loadDirectSession();
   directClient = createDirectClient(session);
   if (session) {
     await ensureDirectConnection();
     if (await directClient.checkAuthorization()) { await startDirectRuntime(); return; }
+  }
+  if (onboardingOnly) {
+    await beginDirectQrAuth();
+    return;
   }
   await setStatus("reauth_required", "Keine gültige Direct-Telegram-Session. Session einmalig mit `npm run auth --workspace=@wagi/tg-connector` erzeugen.");
 }
@@ -662,12 +859,14 @@ async function beginDirectQrAuth() {
       qrCode: async ({ token, expires }) => {
         directQr = `tg://login?token=${token.toString("base64url")}`;
         directQrExpiresAt = expires > 10_000_000_000 ? expires : expires * 1000;
+        if (onboardingOnly && accountLease) await accountLease.updateQR({ status: "qr", qrPayload: directQr, expiresAt: new Date(directQrExpiresAt), workerId: poolWorkerId });
         await setStatus("pairing", "Telegram-QR mit der mobilen Telegram-App scannen");
       },
       password: async () => { throw new Error("DIRECT_TELEGRAM_2FA_REQUIRED: QR-Anmeldung benötigt das 2FA-Passwort; nutze einmalig den lokalen Auth-Befehl."); },
       onError: async (error) => { lastError = String(error); return true; },
     },
   ).then(async () => {
+    if (onboardingOnly && accountLease) await accountLease.updateQR({ status: "connected", qrPayload: null, expiresAt: null, workerId: poolWorkerId });
     directQr = null;
     directQrExpiresAt = null;
     await saveDirectSession();
@@ -675,6 +874,7 @@ async function beginDirectQrAuth() {
   }).catch(async (error) => {
     directQr = null;
     directQrExpiresAt = null;
+    if (onboardingOnly) await finishOnboarding("failed", error);
     await setStatus("error", String(error).includes("DIRECT_TELEGRAM_2FA_REQUIRED") ? "Telegram-QR wurde gescannt, aber 2FA erfordert den lokalen Auth-Befehl" : "Telegram-QR-Anmeldung fehlgeschlagen", error);
   }).finally(() => { directQrAuthPromise = null; });
 }
@@ -705,14 +905,16 @@ async function upsertGroup(chat: TelegramChat) {
     platform: "telegram",
     chatType: chat.type,
   };
-  const result = await pool.query<{ is_selected: boolean }>(
-    `INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id)
-     VALUES ($1, $2, $3, $4, $5, 'telegram', $6, $1)
+  const ownerUserId = accountLease?.account.userId ?? null;
+  await pool.query(
+    `INSERT INTO wa_groups (id, subject, owner_jid, participant_count, is_selected, platform, chat_type, external_chat_id, owner_user_id)
+     VALUES ($1, $2, $3, $4, $5, 'telegram', $6, $1, $7)
      ON CONFLICT (id) DO UPDATE SET subject = EXCLUDED.subject, owner_jid = EXCLUDED.owner_jid,
-       platform = 'telegram', chat_type = EXCLUDED.chat_type, external_chat_id = EXCLUDED.external_chat_id, updated_at = NOW()
-     RETURNING is_selected`,
-    [group.groupId, group.subject, group.ownerJid, 0, group.isSelected, group.chatType],
+       platform = 'telegram', chat_type = EXCLUDED.chat_type, external_chat_id = EXCLUDED.external_chat_id, owner_user_id = COALESCE(wa_groups.owner_user_id, EXCLUDED.owner_user_id), updated_at = NOW()`,
+    [group.groupId, group.subject, group.ownerJid, 0, group.isSelected, group.chatType, ownerUserId],
   );
+  if (ownerUserId) await pool.query(`INSERT INTO user_group_access (user_id,group_id,can_read,can_manage,is_selected) VALUES ($1::uuid,$2,TRUE,TRUE,$3) ON CONFLICT (user_id,group_id) DO NOTHING`, [ownerUserId, group.groupId, group.isSelected]);
+  const result = await pool.query<{ is_selected: boolean }>(`SELECT COALESCE(uga.is_selected,g.is_selected) AS is_selected FROM wa_groups g LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$2::uuid WHERE g.id=$1`, [group.groupId, ownerUserId]);
   await publish(subjects.groupDiscovered, subjects.groupDiscovered, { ...group, isSelected: result.rows[0]?.is_selected ?? group.isSelected });
 }
 
@@ -767,7 +969,7 @@ async function downloadTelegramMedia(fileId: string, mediaKey: string) {
 async function persistMessage(message: TelegramMessage) {
   if (!isTargetChat(message.chat)) return;
   await upsertGroup(message.chat);
-  const selected = await pool.query<{ is_selected: boolean }>("SELECT is_selected FROM wa_groups WHERE id = $1", [normalizedChatId(message.chat.id)]);
+  const selected = await pool.query<{ is_selected: boolean }>(`SELECT (g.is_selected OR COALESCE(uga.is_selected,FALSE)) AS is_selected FROM wa_groups g LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$2::uuid WHERE g.id=$1`, [normalizedChatId(message.chat.id), accountLease?.account.userId ?? null]);
   if (!selected.rows[0]?.is_selected) return;
 
   const groupId = normalizedChatId(message.chat.id);
@@ -922,12 +1124,10 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   if (request.url === "/healthz") return respond(response, 200, { status: "ok", service: "tg-connector" });
   if (request.url === "/readyz") return respond(response, lifecycleStatus === "ready" ? 200 : 503, { status: lifecycleStatus, mode: directMode ? "telegram-direct" : "telegram-bot", lastError });
   if (request.url === "/status") {
-    return respond(response, 200, { connector: "telegram", status: lifecycleStatus, mode: directMode ? "telegram-direct" : "telegram-bot", connected: directRuntimeStarted || Boolean(botInfo && polling), connectedAt, lastError, qr: directQr, qrExpiresAt: directQrExpiresAt, qrLoginActive: Boolean(directQrAuthPromise), initialBackfillActive: initialActivation, backfillDays, backfillThrottleMs, backfillGroupDelayMs, backfillNote: directMode ? `Direct Telegram liest beim Neustart die letzten ${backfillDays} Tage aus ausgewählten Dialogen und drosselt die Verarbeitung.` : "Die Telegram Bot API stellt keine rückwirkende Gruppenhistorie bereit; verarbeitet werden alle noch verfügbaren Updates." });
+    return respond(response, 200, { connector: "telegram", status: lifecycleStatus, mode: directMode ? "telegram-direct" : "telegram-bot", connected: directRuntimeStarted || Boolean(botInfo && polling), connectedAt, lastError, qrRouting: "api-account", initialBackfillActive: initialActivation, backfillDays, backfillThrottleMs, backfillGroupDelayMs, backfillNote: directMode ? `Direct Telegram liest beim Neustart die letzten ${backfillDays} Tage aus ausgewählten Dialogen und drosselt die Verarbeitung.` : "Die Telegram Bot API stellt keine rückwirkende Gruppenhistorie bereit; verarbeitet werden alle noch verfügbaren Updates." });
   }
   if (request.method === "POST" && request.url === "/auth/qr") {
-    if (!directMode) return respond(response, 400, { error: "Telegram-Direkt-QR benötigt TG_API_ID und TG_API_HASH in .env" });
-    void beginDirectQrAuth().catch((error) => { void setStatus("error", "Telegram-QR konnte nicht gestartet werden", error); });
-    return respond(response, 202, { status: "pairing", message: "Telegram-QR wird erzeugt" });
+    return respond(response, 410, { error: "QR wird ausschließlich über die authentifizierte API und ein konkretes Nutzerkonto gestartet" });
   }
   if (request.url === "/bot") {
     return respond(response, 200, {
@@ -954,33 +1154,32 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
 });
 
 async function main() {
+  if (connectorStartDelayMs > 0) await delay(connectorStartDelayMs);
   nc = await connect({ servers: natsUrl });
   await ensureEventStream();
   subscribeGroupSelections();
   await pool.query("SELECT 1");
-  await prepareInitialActivation();
-  let poolReady = true;
-  try {
-    poolReady = await initializePoolLease();
-  } catch (error) {
-    poolReady = false;
-    console.error("Telegram connector pool initialization failed", error);
-    await setStatus("error", "Connector-Pool konnte nicht initialisiert werden", error);
+  if (!onboardingOnly) await prepareInitialActivation();
+  let poolReady = onboardingOnly ? false : true;
+  if (!onboardingOnly) {
+    try {
+      poolReady = await initializePoolLease();
+    } catch (error) {
+      poolReady = false;
+      console.error("Telegram connector pool initialization failed", error);
+      await setStatus("error", "Connector-Pool konnte nicht initialisiert werden", error);
+    }
   }
+  if (onboardingOnly) await setStatus("starting", "Telegram-Onboarding wartet auf eine QR-Anforderung");
   server.listen(port, () => console.log(`tg-connector listening on :${port} (${directMode ? "direct" : botToken ? "bot-api" : "waiting for Telegram credentials"})`));
-  if (directMode && poolReady) void startDirectConnector().catch((error) => { void setStatus("error", "Direct Telegram Initialisierung fehlgeschlagen", error); console.error(error); });
+  if (onboardingOnly) startOnboardingPoller();
+  else if (directMode && poolReady) void startDirectConnector().catch((error) => { void setStatus("error", "Direct Telegram Initialisierung fehlgeschlagen", error); console.error(error); });
   else if (botToken) void pollTelegram().catch((error) => { polling = false; void setStatus("error", "Telegram-Initialisierung fehlgeschlagen", error); console.error(error); });
   else if (!poolEnabled) void setStatus("starting", "TG_API_ID/TG_API_HASH oder TG_BOT_TOKEN ist noch nicht konfiguriert");
   else {
     console.warn("Telegram connector is paused because no account lease is available");
-    const retryTimer = setInterval(() => {
-      if (accountLease || !directMode) return;
-      void initializePoolLease().then((ready) => {
-        if (ready) void startDirectConnector().catch((error) => void setStatus("error", "Direct Telegram Initialisierung fehlgeschlagen", error));
-      }).catch((error) => console.warn("Telegram connector pool retry failed", error));
-    }, 10_000);
-    retryTimer.unref?.();
   }
+  if (poolEnabled && !onboardingOnly) startProcessingPoller();
 }
 
 void main().catch((error) => { console.error(error); process.exitCode = 1; });

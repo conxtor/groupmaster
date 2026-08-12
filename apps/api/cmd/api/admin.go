@@ -16,18 +16,6 @@ type adminUserView struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-type adminGroupAccessView struct {
-	GroupID       string  `json:"groupId"`
-	Subject       string  `json:"subject"`
-	Platform      string  `json:"platform"`
-	ChatType      string  `json:"chatType"`
-	ParentGroupID *string `json:"parentGroupId,omitempty"`
-	TopicID       *int64  `json:"topicId,omitempty"`
-	IsSelected    bool    `json:"isSelected"`
-	CanRead       bool    `json:"canRead"`
-	CanManage     bool    `json:"canManage"`
-}
-
 func (a *app) adminUsers(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/users")
 	if path == "" || path == "/" {
@@ -123,68 +111,6 @@ func (a *app) updateAdminUser(w http.ResponseWriter, r *http.Request, userID str
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "user update unavailable"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-func (a *app) adminGroupAccess(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		a.listAdminGroupAccess(w, r)
-		return
-	}
-	if r.Method == http.MethodPut {
-		a.setAdminGroupAccess(w, r)
-		return
-	}
-	w.Header().Set("allow", "GET, PUT")
-	writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-}
-
-func (a *app) listAdminGroupAccess(w http.ResponseWriter, r *http.Request) {
-	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
-	if userID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId is required"})
-		return
-	}
-	rows, err := a.db.Query(r.Context(), `
-		SELECT g.id, g.subject, g.platform, g.chat_type, g.parent_group_id, g.topic_id, g.is_selected,
-		       COALESCE(uga.can_read,FALSE), COALESCE(uga.can_manage,FALSE)
-		FROM wa_groups g
-		LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$1::uuid
-		ORDER BY g.platform, COALESCE(g.parent_group_id,g.id), CASE WHEN g.chat_type='topic' THEN 1 ELSE 0 END, g.subject`, userID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "group access unavailable"})
-		return
-	}
-	defer rows.Close()
-	result := make([]adminGroupAccessView, 0)
-	for rows.Next() {
-		var item adminGroupAccessView
-		if err := rows.Scan(&item.GroupID, &item.Subject, &item.Platform, &item.ChatType, &item.ParentGroupID, &item.TopicID, &item.IsSelected, &item.CanRead, &item.CanManage); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "group access unavailable"})
-			return
-		}
-		result = append(result, item)
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-func (a *app) setAdminGroupAccess(w http.ResponseWriter, r *http.Request) {
-	var request groupPermissionRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.UserID == "" || request.GroupID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId and groupId are required"})
-		return
-	}
-	if !request.CanRead {
-		request.CanManage = false
-	}
-	_, err := a.db.Exec(r.Context(), `
-		INSERT INTO user_group_access (user_id, group_id, can_read, can_manage)
-		VALUES ($1::uuid,$2,$3,$4)
-		ON CONFLICT (user_id,group_id) DO UPDATE SET can_read=EXCLUDED.can_read, can_manage=EXCLUDED.can_manage`, request.UserID, request.GroupID, request.CanRead, request.CanManage)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "group access could not be saved"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

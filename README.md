@@ -19,7 +19,7 @@ Danach:
 - Gruppenauswahl: http://localhost:3000/groups
 - Knowledge Base: http://localhost:3000/knowledge
 - Go API: http://localhost:8080/readyz
-- Connector-Einrichtung: http://localhost:3000 (QR-Setup im Dashboard)
+- Connector-Einrichtung: http://localhost:3000/connectors
 - Connector-Status: http://localhost:3001/healthz und http://localhost:3002/readyz
 - NATS Monitoring: http://localhost:8222
 - MinIO Console: http://localhost:9001
@@ -50,18 +50,20 @@ Für das verwendete Supabase-Postgres-Image muss `POSTGRES_USER` auf
 Standard; ein vorhandener `.env`-Eintrag mit `POSTGRES_USER=postgres` sollte
 entsprechend angepasst werden.
 
-### Connector-Setup im Dashboard
+### Connector-Setup auf eigener Seite
 
-Die erstmalige Einrichtung von WhatsApp und Telegram erfolgt im Dashboard über
-QR-Codes. Ein Setup-Token ist dafür nicht erforderlich. Der WhatsApp-Connector
-bleibt lokal gebunden; der Telegram-Connector ist für die lokale Testumgebung
-an allen Interfaces verfügbar.
+Die erstmalige Einrichtung von WhatsApp und Telegram erfolgt auf der separaten
+Seite `http://localhost:3000/connectors` über QR-Codes. Ein Setup-Token ist dafür nicht erforderlich. Der QR-Code wird immer
+für das authentifizierte Nutzerkonto angefordert und über die API an genau
+diesen Nutzer zurückgeroutet; globale Connector-Endpunkte liefern keinen QR
+mehr aus. Der Telegram-Connector ist für die lokale Testumgebung an allen
+Interfaces verfügbar.
 
-Der Telegram-Status ist unter `http://<host>:3002/status` erreichbar; der
-tokenfreie QR-Start erfolgt per `POST http://<host>:3002/auth/qr`. Beide
-Endpunkte sind bewusst ohne Token und ohne Origin-Einschränkung freigegeben,
-damit ein Dashboard über ein beliebiges Interface den Connector konfigurieren
-kann.
+Der technische Telegram-Status ist unter `http://<host>:3002/status` erreichbar;
+der QR-Start erfolgt ausschließlich per authentifizierter API für ein konkretes
+Connector-Konto (`POST /api/v1/connectors/accounts/{accountId}/qr`). Die
+Connector-Endpunkte bleiben für Healthchecks erreichbar, geben aber keinen
+globalen QR-Code mehr aus.
 
 Die Auswahl der zu verarbeitenden Quellen erfolgt separat unter
 `http://localhost:3000/groups`. Das Haupt-Dashboard zeigt ausschließlich
@@ -76,14 +78,15 @@ Anschließend die Konnektoren und das Web-Dashboard neu erstellen:
 docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector tg-connector web
 ```
 
-Das Dashboard ruft die lokalen Connectoren automatisch ab. Danach gilt:
+Die Connector-Seite ruft die lokalen Connectoren automatisch ab. Danach gilt:
 
-1. WhatsApp zeigt den aktuellen Linked-Device-QR-Code an. In der WhatsApp-App
+1. Auf der Connector-Seite beim gewünschten Nutzerkonto **WhatsApp-QR starten** wählen.
+   WhatsApp zeigt dann den aktuellen Linked-Device-QR-Code an. In der WhatsApp-App
    unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen.
 2. Telegram zeigt im Direktmodus nach **Telegram-QR starten** einen QR-Code
    an. Diesen in der Telegram-App unter **Einstellungen** → **Geräte** →
    **Desktop-Gerät verknüpfen** scannen.
-3. Status, Ablaufzeit des QR-Codes und erneute Anmeldung werden im Dashboard
+3. Status, Ablaufzeit des QR-Codes und erneute Anmeldung werden auf der Connector-Seite
    angezeigt.
 
 Für Telegram müssen zusätzlich `TG_API_ID` und `TG_API_HASH` gesetzt sein.
@@ -119,13 +122,16 @@ WA_SYNC_HISTORY=false
 WA_BACKFILL_DAYS=7
 WA_BACKFILL_THROTTLE_MS=250
 WA_BACKFILL_GROUP_DELAY_MS=1500
+WA_HISTORY_PAGE_SIZE=50
+WA_HISTORY_MAX_PAGES=20
+WA_HISTORY_WAIT_MS=20000
 ```
 
 Für ein echtes Konto:
 
 1. `WA_MOCK_MODE=false` in `.env` setzen.
 2. Den Konnektor starten: `docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector`.
-3. Das Dashboard öffnen und den angezeigten QR-Code in WhatsApp unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen. Alternativ kann der QR-Code weiterhin mit `docker-compose --env-file .env -f infra/docker/docker-compose.yml logs -f wa-connector` betrachtet werden.
+3. Die Connector-Seite öffnen und den angezeigten QR-Code in WhatsApp unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen. QR-Payloads werden aus Sicherheitsgründen nicht in Docker-Logs ausgegeben.
 4. Den persistenten Compose-Speicher `wa_auth` beibehalten. Dadurch muss das Gerät nach Neustarts nicht erneut gekoppelt werden.
 5. Gruppen im Dashboard auswählen oder bereits beim Einlesen mit `WA_GROUP_ALLOWLIST` begrenzen.
 
@@ -139,9 +145,12 @@ Dashboard geändert werden.
 Bei der ersten Aktivierung und bei jedem Systemneustart eines WhatsApp-
 Konnektors werden nur Nachrichten innerhalb des Zeitfensters
 `WA_BACKFILL_DAYS` (Standard: sieben Tage) persistiert und an die Medien-/KI-
-Pipeline weitergegeben. `WA_BACKFILL_THROTTLE_MS` pausiert zwischen einzelnen
-Nachrichten, `WA_BACKFILL_GROUP_DELAY_MS` zwischen Gruppen. Beide Werte sind
-konfigurierbar und begrenzen die Belastung der WhatsApp-Schnittstelle.
+Pipeline weitergegeben. Pro Gruppe werden History-Seiten mit maximal
+`WA_HISTORY_PAGE_SIZE` Nachrichten angefordert und vollständig abgewartet,
+bevor der Worker seinen Pool-Slot freigibt. `WA_HISTORY_MAX_PAGES` begrenzt die
+Anzahl der Seiten pro Gruppe; `WA_HISTORY_WAIT_MS` ist die maximale Wartezeit
+auf eine History-Antwort. `WA_BACKFILL_THROTTLE_MS` pausiert zwischen einzelnen
+Nachrichten, `WA_BACKFILL_GROUP_DELAY_MS` zwischen Gruppen.
 
 Die WhatsApp-Gruppenliste wird nach jeder erfolgreichen Verbindung und danach
 regelmäßig aktualisiert. Das Intervall wird über
@@ -153,11 +162,12 @@ Medienreferenzen werden per Datenbank-Cascade gelöscht; die referenzierten
 Objekte in MinIO und lokale Mediendateien werden vorher ebenfalls entfernt.
 Bei einem fehlgeschlagenen Snapshot findet keine automatische Löschung statt.
 
-Status und Pairing-Informationen sind im Dashboard sowie unter
+Status und Pairing-Informationen sind auf der Connector-Seite sowie unter
 `http://localhost:3001/healthz`, `http://localhost:3001/readyz` und
 `http://localhost:3001/status` sowie `http://localhost:3001/pairing` verfügbar.
-Die Endpunkte sind für den lokalen Dashboard-Zugriff ohne Setup-Token verfügbar.
-Der QR-Code wird zusätzlich in den Connector-Logs ausgegeben.
+Die Endpunkte sind für den lokalen Zugriff ohne Setup-Token verfügbar. QR-Payloads
+werden ausschließlich über die authentifizierte API an das jeweilige Nutzerkonto
+ausgeliefert und nicht in Connector-Logs geschrieben.
 
 Wichtig: Baileys ist keine offizielle WhatsApp-Business-API. Der Abschnitt
 setzt daher ein privates Testkonto, die Zustimmung der Gruppenmitglieder und
@@ -417,13 +427,17 @@ npm run dev --workspace=@wagi/web
 
 Die API und Worker werden primär über Compose gestartet. Die Datenbankmigrationen laufen automatisch beim ersten Start eines frischen `postgres_data`-Volumes. Für einen erneuten lokalen Test kann das Volume gezielt über Compose entfernt werden.
 
-Bei einer bereits bestehenden Datenbank muss die neue Auth-/Pool-Migration
+Bei einer bereits bestehenden Datenbank müssen die Auth-/Pool-Migrationen
 einmal manuell ausgeführt werden, weil PostgreSQL Init-Skripte nur für ein
 frisches Volume ausführt:
 
 ```bash
 docker-compose exec -T db psql -U supabase_admin -d app \
   -f /docker-entrypoint-initdb.d/006_auth_multitenancy.sql
+docker-compose exec -T db psql -U supabase_admin -d app \
+  -f /docker-entrypoint-initdb.d/007_connector_onboarding_pool.sql
+docker-compose exec -T db psql -U supabase_admin -d app \
+  -f /docker-entrypoint-initdb.d/008_whatsapp_contacts.sql
 ```
 
 Danach den API-Dienst neu starten. Er legt den Bootstrap-Administrator beim
@@ -434,10 +448,11 @@ ersten erfolgreichen Start an.
 - `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/me`
 - `POST /api/v1/auth/register` für normale Nutzerkonten
 - `GET/POST /api/v1/connectors/accounts` für eigene persistente Connector-Konten
-- `GET /api/v1/admin/users` und `GET/PUT /api/v1/admin/groups/access` für Administratoren
+- `GET /api/v1/admin/users` und `PATCH /api/v1/admin/users/{id}` für Administratoren
 - `GET /healthz` und `GET /readyz`
 - `GET /api/v1/groups`
 - `PUT /api/v1/groups/{groupId}/select` mit `{ "selected": true|false }`
+- Die Gruppenverwaltung erfolgt ausschließlich nutzerbezogen unter `/groups`; Administratoren verwalten dort keine Gruppenrechte mehr.
 - `GET /api/v1/messages?limit=100` (alle Nachrichten) oder mit
   `&relevant=true` (nur relevante Nachrichten)
 - `GET /api/v1/knowledge` oder `GET /api/v1/knowledge?groupId=<selected-group>`
@@ -458,25 +473,29 @@ zufällige, gehashte Token in PostgreSQL gespeichert und als HttpOnly-Cookie
 `WAGI_CORS_ORIGIN` muss auf die tatsächliche Web-URL zeigen.
 
 Die Connectoren unterstützen bei `CONNECTOR_POOL_ENABLED=true` den gemeinsamen
-PostgreSQL-Control-Plane. Ein Worker übernimmt ein verfügbares Konto über eine
-exklusive Lease, erneuert diese regelmäßig und speichert Sitzungsdaten sowie
-den letzten Cursor je Gruppe in PostgreSQL. Dadurch darf dieselbe WhatsApp-
-oder Telegram-Session nie gleichzeitig von zwei Workern verwendet werden.
-Nach `CONNECTOR_ACCOUNT_SLOT_SECONDS` (Standard: 1800 Sekunden) gibt ein
-Worker sein Konto kontrolliert frei und übernimmt das nächste freie Konto.
-Das ist bewusst ein zeitgesteuerter Wechsel, da die Anwendung nicht
-Echtzeit-kritisch ist.
+PostgreSQL-Control-Plane. Ein Worker übernimmt ein verfügbares Nutzerkonto über
+eine exklusive Lease, erneuert diese regelmäßig und speichert Sitzungsdaten
+sowie den letzten Cursor je Gruppe in PostgreSQL. Dadurch darf dieselbe
+WhatsApp- oder Telegram-Session nie gleichzeitig von zwei Workern verwendet
+werden. Nach dem kontrollierten Backfill und dem Erreichen des aktuellen
+Nachrichtenstands wird die Lease automatisch freigegeben;
+`CONNECTOR_SYNC_INTERVAL_SECONDS` bestimmt den nächsten Turnus.
 Mehrere Worker lassen sich mit Compose starten, zum Beispiel:
 
 ```bash
 docker-compose up -d --scale wa-connector-worker=4 --scale tg-connector-worker=4
 ```
 
-Zusammen mit dem jeweils einen lokalen QR-/Statusdienst laufen damit fünf
-Worker pro Plattform. Die Zahl der Konten kann kleiner oder größer als die
-Workerzahl sein. Freie Worker warten dann auf eine Lease. Ein Konto pro Plattform wird beim Start für
-den Bootstrap-Administrator angelegt; weitere Nutzerkonten werden nach der
-Registrierung über `POST /api/v1/connectors/accounts` angelegt. Für einen
+`WA_CONNECTOR_POOL_SIZE` und `TG_CONNECTOR_POOL_SIZE` begrenzen die logische
+Zahl paralleler Verarbeitungsslots. `WA_ONBOARDING_SLOTS` und
+`TG_ONBOARDING_SLOTS` reservieren standardmäßig je einen dedizierten
+Onboarding-Konnektor. Diese Dienste lesen keine Nachrichten: Sie nehmen eine
+QR-Anfrage für genau ein Nutzerkonto an, lesen nur dessen Gruppen/Topics ein
+und geben die Lease danach frei. Die eigentliche Nachrichten- und
+Backlog-Verarbeitung erfolgt turnusmäßig durch die Processing-Worker.
+Die Zahl der Konten kann kleiner oder größer als die Workerzahl sein. Freie
+Worker warten dann auf eine Lease. Nutzerkonten werden nach der Registrierung
+über `POST /api/v1/connectors/accounts` angelegt. Für einen
 bestimmten Worker kann `WA_CONNECTOR_ACCOUNT_ID` bzw. `TG_CONNECTOR_ACCOUNT_ID`
 gesetzt werden. Die Baileys-Auth-Dateien werden zusätzlich als Binärdaten in
 `connector_accounts.session_data` gespiegelt; der aktuelle MVP verwendet dafür
@@ -488,7 +507,10 @@ Neustart wird weiterhin der Sieben-Tage-Zeitraum gedrosselt geprüft, bereits
 verarbeitete Telegram-Nachrichten werden aber ab dem gespeicherten Telegram-
 Message-ID-Cursor fortgesetzt. Bei WhatsApp dient der persistierte Cursor der
 Nachvollziehbarkeit und die Baileys-History-Abfrage zusätzlich der
-Duplikatvermeidung.
+Duplikatvermeidung. Gruppen werden automatisch dem Nutzerkonto zugeordnet;
+die Auswahl in `/groups` ist pro Nutzer getrennt gespeichert. Entfernte
+Gruppen werden aus dessen Auswahl und – falls kein anderer Nutzer mehr Zugriff
+hat – mitsamt Nachrichten und Medienbereinigung entfernt.
 
 Events werden weiterhin aus `message_analyses.events` im Dashboard separat
 dargestellt. Thematische Fakten und Erkenntnisse werden zusätzlich durch den
