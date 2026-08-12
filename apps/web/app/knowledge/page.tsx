@@ -46,7 +46,7 @@ type KnowledgeItem = {
 type KnowledgeTopic = { id: string; groupId: string; groupSubject: string; topicKey: string; title: string; summary: string; confidence: number; sourceMessageIds: string[]; items: KnowledgeItem[]; updatedAt: string };
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
 
-const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 function itemTypeLabel(itemType: KnowledgeItem["itemType"], t: Translator) {
   return t(itemType);

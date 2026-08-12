@@ -30,7 +30,7 @@ type Group = {
 };
 
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
-const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 function groupTypeLabel(group: Group, t: Translator) {
   if (group.chatType === "topic") return t("topic");

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 
-export const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+export const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export type AuthUser = {
   id: string;

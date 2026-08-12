@@ -1038,10 +1038,13 @@ func (a *app) metrics(w http.ResponseWriter, _ *http.Request) {
 }
 
 func cors(origin string, next http.Handler) http.Handler {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		// The normal deployment is same-origin through the NGINX /api/ proxy.
+		// Browsers do not apply CORS to those relative requests.
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if origin == "" {
-			origin = "*"
-		}
 		w.Header().Set("access-control-allow-origin", origin)
 		w.Header().Set("access-control-allow-methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		w.Header().Set("access-control-allow-headers", "content-type")
@@ -1082,7 +1085,7 @@ func main() {
 		js:                js,
 		mediaDir:          env("MEDIA_DIR", "/data/media"),
 		mediaSecret:       env("MEDIA_SIGNING_SECRET", uuid.NewString()),
-		corsOrigin:        env("WAGI_CORS_ORIGIN", "http://localhost:3000"),
+		corsOrigin:        env("WAGI_CORS_ORIGIN", ""),
 		waPoolSize:        envInt("WA_CONNECTOR_POOL_SIZE", 5),
 		tgPoolSize:        envInt("TG_CONNECTOR_POOL_SIZE", 5),
 		waOnboardingSlots: envInt("WA_ONBOARDING_SLOTS", 1),

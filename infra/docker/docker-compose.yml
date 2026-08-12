@@ -7,7 +7,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-supabase_admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
       POSTGRES_DB: ${POSTGRES_DB:-app}
-    ports: ["5432:5432"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../migrations:/docker-entrypoint-initdb.d:ro
@@ -20,7 +19,6 @@ services:
   nats:
     image: nats:2.10-alpine
     command: ["-js", "-m", "8222"]
-    ports: ["4222:4222", "8222:8222"]
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/healthz >/dev/null"]
       interval: 5s
@@ -33,7 +31,6 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
-    ports: ["9000:9000", "9001:9001"]
     volumes: ["minio_data:/data"]
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
@@ -51,7 +48,7 @@ services:
       PORT: 8080
       MEDIA_DIR: /data/media
       MEDIA_SIGNING_SECRET: ${MEDIA_SIGNING_SECRET:-}
-      WAGI_CORS_ORIGIN: ${WAGI_CORS_ORIGIN:-http://localhost:3000}
+      WAGI_CORS_ORIGIN: ${WAGI_CORS_ORIGIN:-}
       WAGI_COOKIE_SECURE: ${WAGI_COOKIE_SECURE:-false}
       WAGI_BOOTSTRAP_ADMIN_EMAIL: ${WAGI_BOOTSTRAP_ADMIN_EMAIL:-volker@kerkhoff.es}
       WAGI_BOOTSTRAP_ADMIN_NAME: ${WAGI_BOOTSTRAP_ADMIN_NAME:-Volker Kerkhoff}
@@ -60,7 +57,6 @@ services:
       TG_CONNECTOR_POOL_SIZE: ${TG_CONNECTOR_POOL_SIZE:-5}
       WA_ONBOARDING_SLOTS: ${WA_ONBOARDING_SLOTS:-1}
       TG_ONBOARDING_SLOTS: ${TG_ONBOARDING_SLOTS:-1}
-    ports: ["8080:8080"]
     volumes:
       - media_data:/data/media:ro
     depends_on:
@@ -101,7 +97,6 @@ services:
       CONNECTOR_LEASE_SECONDS: ${CONNECTOR_LEASE_SECONDS:-90}
       CONNECTOR_ACCOUNT_SLOT_SECONDS: ${CONNECTOR_ACCOUNT_SLOT_SECONDS:-1800}
       WAGI_BOOTSTRAP_ADMIN_EMAIL: ${WAGI_BOOTSTRAP_ADMIN_EMAIL:-volker@kerkhoff.es}
-    ports: ["127.0.0.1:3001:3001"]
     volumes:
       - wa_auth:/data/wa-auth
       - media_data:/data/media
@@ -146,7 +141,6 @@ services:
       CONNECTOR_LEASE_SECONDS: ${CONNECTOR_LEASE_SECONDS:-90}
       CONNECTOR_ACCOUNT_SLOT_SECONDS: ${CONNECTOR_ACCOUNT_SLOT_SECONDS:-1800}
       WAGI_BOOTSTRAP_ADMIN_EMAIL: ${WAGI_BOOTSTRAP_ADMIN_EMAIL:-volker@kerkhoff.es}
-    ports: ["3002:3002"]
     volumes:
       - tg_state:/data/tg-state
       - media_data:/data/media
@@ -319,12 +313,20 @@ services:
       context: ../..
       dockerfile: apps/web/Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
     environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
       HOSTNAME: 0.0.0.0
-    ports: ["3000:3000"]
     depends_on: [api]
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ["${WAGI_PUBLIC_PORT:-3000}:80"]
+    volumes:
+      - ../nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api: {condition: service_started}
+      web: {condition: service_started}
 
 volumes:
   postgres_data:

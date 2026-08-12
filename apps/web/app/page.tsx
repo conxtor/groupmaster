@@ -30,7 +30,7 @@ type EventRecord = { key: string; groupId: string; groupSubject: string; groupPl
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
 type ServiceStatus = { connectors: Array<{ connector: string; status: string; detail?: string; lastError?: string; updatedAt: string; queuePosition?: number | null; queueLength?: number | null; waitReason?: string | null }>; audioJobs: Record<string, number>; recentAudioErrors: Array<{ id: string; error?: string; attempts: number; groupSubject: string }>; aiProcessing: { total: number; completed: number; pending: number; model?: string; promptVersion?: string; updatedAt?: string } };
 
-const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
 const demoTimestamp = "2026-08-10T12:00:00.000Z";
 const sampleGroups: Group[] = [
   { id: "120363mock@g.us", subject: "Barcelona Wochenende", participantCount: 6, isSelected: true, discoveredAt: demoTimestamp },

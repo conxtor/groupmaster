@@ -13,16 +13,25 @@ cp .env.example .env
 docker-compose --env-file .env -f infra/docker/docker-compose.yml up --build
 ```
 
+Danach stellt der NGINX-Gateway Web-App und API über denselben Host und Port
+bereit. Standardmäßig ist das `http://localhost:3000`; der öffentliche Port kann
+mit `WAGI_PUBLIC_PORT` geändert werden.
+
 Danach:
 
 - Dashboard: http://localhost:3000
 - Gruppenauswahl: http://localhost:3000/groups
 - Knowledge Base: http://localhost:3000/knowledge
-- Go API: http://localhost:8080/readyz
+- Go API über denselben Einstiegspunkt: http://localhost:3000/readyz
 - Connector-Einrichtung: http://localhost:3000/connectors
-- Connector-Status: http://localhost:3001/healthz und http://localhost:3002/readyz
-- NATS Monitoring: http://localhost:8222
-- MinIO Console: http://localhost:9001
+- Connector-Status: in der Connector-Einrichtung unter `/connectors`
+- NATS und MinIO: intern im Docker-Netz, standardmäßig ohne Host-Portfreigabe
+
+Die API-Route ist unter `/api/` erreichbar, zum Beispiel
+`http://localhost:3000/api/v1/auth/me`. Der Go-API-Port 8080 und der Next.js-
+Port 3000 werden im Compose-Standard nicht direkt auf den Host veröffentlicht;
+NGINX leitet intern `/api/` an die API und alle übrigen Anfragen an die
+Web-App weiter.
 
 ## Konfiguration
 
@@ -50,6 +59,16 @@ Für das verwendete Supabase-Postgres-Image muss `POSTGRES_USER` auf
 Standard; ein vorhandener `.env`-Eintrag mit `POSTGRES_USER=postgres` sollte
 entsprechend angepasst werden.
 
+### Gemeinsamer Web-/API-Einstiegspunkt
+
+Für das spätere öffentliche Deployment muss in der Regel nur der NGINX-Port
+veröffentlicht und dort TLS vorgeschaltet werden. Die Web-App verwendet im
+Standard relative API-URLs (`/api/...`), daher bleiben Cookies und Medien-URLs
+im selben Origin. `NEXT_PUBLIC_API_URL` bleibt dafür leer. Nur wenn ein
+separates Frontend oder ein Browser-Client direkt von einer anderen Origin auf
+die API zugreifen soll, wird dort eine vollständige API-URL eingetragen und
+zusätzlich `WAGI_CORS_ORIGIN` auf diese Origin gesetzt.
+
 ### Connector-Setup auf eigener Seite
 
 Die erstmalige Einrichtung von WhatsApp und Telegram erfolgt auf der separaten
@@ -59,8 +78,8 @@ diesen Nutzer zurückgeroutet; globale Connector-Endpunkte liefern keinen QR
 mehr aus. Der Telegram-Connector ist für die lokale Testumgebung an allen
 Interfaces verfügbar.
 
-Der technische Telegram-Status ist unter `http://<host>:3002/status` erreichbar;
-der QR-Start erfolgt ausschließlich per authentifizierter API für ein konkretes
+Der technische Telegram-Status ist nur innerhalb des Compose-Netzes unter
+`http://tg-connector:3002/status` erreichbar; der QR-Start erfolgt ausschließlich per authentifizierter API für ein konkretes
 Connector-Konto (`POST /api/v1/connectors/accounts/{accountId}/qr`). Die
 Connector-Endpunkte bleiben für Healthchecks erreichbar, geben aber keinen
 globalen QR-Code mehr aus.
@@ -75,7 +94,7 @@ ausgewählten Untergruppe gespeichert.
 Anschließend die Konnektoren und das Web-Dashboard neu erstellen:
 
 ```bash
-docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector tg-connector web
+docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build nginx wa-connector tg-connector
 ```
 
 Die Connector-Seite ruft die lokalen Connectoren automatisch ab. Danach gilt:
@@ -162,10 +181,10 @@ Medienreferenzen werden per Datenbank-Cascade gelöscht; die referenzierten
 Objekte in MinIO und lokale Mediendateien werden vorher ebenfalls entfernt.
 Bei einem fehlgeschlagenen Snapshot findet keine automatische Löschung statt.
 
-Status und Pairing-Informationen sind auf der Connector-Seite sowie unter
-`http://localhost:3001/healthz`, `http://localhost:3001/readyz` und
-`http://localhost:3001/status` sowie `http://localhost:3001/pairing` verfügbar.
-Die Endpunkte sind für den lokalen Zugriff ohne Setup-Token verfügbar. QR-Payloads
+Status und Pairing-Informationen sind auf der Connector-Seite verfügbar. Die
+technischen Connector-Endpunkte bleiben für interne Docker-Healthchecks unter
+`wa-connector:3001` und `tg-connector:3002` erreichbar, werden aber nicht auf
+Host-Ports veröffentlicht. QR-Payloads
 werden ausschließlich über die authentifizierte API an das jeweilige Nutzerkonto
 ausgeliefert und nicht in Connector-Logs geschrieben.
 
@@ -264,7 +283,8 @@ Einrichtung des optionalen Bot-Fallbacks:
 3. In Gruppen den Bot als Administrator setzen oder beim BotFather mit `/setprivacy` den Privacy Mode deaktivieren, damit normale Gruppennachrichten zugestellt werden.
 4. In Channels den Bot als Mitglied hinzufügen; für administrative Bot-Aktionen sind passende Rechte erforderlich.
 5. Den Konnektor starten: `docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build tg-connector`.
-6. Unter `http://localhost:3000` den Telegram-Status prüfen; `http://localhost:3002/bot` und `http://localhost:3002/readyz` bleiben als technische Status-Endpunkte verfügbar.
+6. Unter `http://localhost:3000/connectors` den Telegram-Status prüfen. Die
+technischen Connector-Endpunkte bleiben intern im Compose-Netz verfügbar.
 
 Mit `TG_GROUP_ALLOWLIST` kann die Verarbeitung begrenzt werden. Unterstützt
 werden die numerische Chat-ID, die Form `tg:<chat-id>` oder ein öffentlicher
@@ -470,7 +490,11 @@ selbst registrieren. Sie sehen zunächst keine Gruppen; ein Administrator gibt
 in `/admin` Lese- und Verwaltungsrechte pro Gruppe frei. Sitzungen werden als
 zufällige, gehashte Token in PostgreSQL gespeichert und als HttpOnly-Cookie
 `wagi_session` geführt. Für HTTPS ist `WAGI_COOKIE_SECURE=true` zu setzen.
-`WAGI_CORS_ORIGIN` muss auf die tatsächliche Web-URL zeigen.
+Im Standardbetrieb über den gemeinsamen NGINX-Einstiegspunkt ist CORS nicht
+nötig, weil Browser-Anfragen an `/api/...` same-origin sind. Bei leerem
+`WAGI_CORS_ORIGIN` sendet die API deshalb keine CORS-Header. Für einen
+separaten Frontend-Host oder einen direkten Browserzugriff auf die API kann
+`WAGI_CORS_ORIGIN` weiterhin auf genau diese Origin gesetzt werden.
 
 Die Connectoren unterstützen bei `CONNECTOR_POOL_ENABLED=true` den gemeinsamen
 PostgreSQL-Control-Plane. Ein Worker übernimmt ein verfügbares Nutzerkonto über
