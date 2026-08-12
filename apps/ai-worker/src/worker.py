@@ -46,7 +46,12 @@ HERMES_ENABLED = _HERMES_CONFIGURED
 HERMES_URL = os.getenv("AI_HERMES_URL", "").strip() or os.getenv("AI_ENDPOINT", "").strip()
 HERMES_API_KEY = os.getenv("AI_HERMES_API_KEY", "").strip() or os.getenv("AI_API_KEY", "").strip()
 HERMES_MODEL = os.getenv("AI_HERMES_MODEL", "hermes-agent").strip()
-HERMES_TIMEOUT_SECONDS = max(5.0, float(os.getenv("AI_HERMES_TIMEOUT_MS", "30000")) / 1000)
+HERMES_TIMEOUT_SECONDS = max(5.0, float(os.getenv("AI_HERMES_TIMEOUT_MS", "60000")) / 1000)
+HERMES_CONNECT_TIMEOUT_SECONDS = max(2.0, float(os.getenv("AI_HERMES_CONNECT_TIMEOUT_MS", "10000")) / 1000)
+HERMES_RETRY_ATTEMPTS = max(1, min(5, int(os.getenv("AI_HERMES_RETRY_ATTEMPTS", "3"))))
+HERMES_RETRY_BASE_SECONDS = max(0.1, float(os.getenv("AI_HERMES_RETRY_BASE_MS", "1500")) / 1000)
+HERMES_RETRY_MAX_SECONDS = max(HERMES_RETRY_BASE_SECONDS, float(os.getenv("AI_HERMES_RETRY_MAX_MS", "10000")) / 1000)
+HERMES_FAILURE_COOLDOWN_SECONDS = max(0.0, float(os.getenv("AI_HERMES_FAILURE_COOLDOWN_SECONDS", "60")))
 HERMES_REVIEW_ALL = os.getenv("AI_HERMES_REVIEW_ALL", "false").lower() in {"1", "true", "yes", "on"}
 HERMES_MIN_CONFIDENCE = float(os.getenv("AI_HERMES_MIN_CONFIDENCE", "0.78"))
 AI_CONTEXT_MAX_MESSAGES = max(20, int(os.getenv("AI_CONTEXT_MAX_MESSAGES", "80")))
@@ -301,6 +306,7 @@ class HermesReviewer:
     def __init__(self):
         self.enabled = HERMES_ENABLED and bool(HERMES_URL)
         self.endpoint = self._normalize_endpoint(HERMES_URL) if self.enabled else ""
+        self._failure_cooldown_until = 0.0
         if self.enabled:
             log.info("Hermes knowledge verifier enabled at %s", self.endpoint)
 
@@ -331,8 +337,51 @@ class HermesReviewer:
             except json.JSONDecodeError:
                 return {}
 
+    @staticmethod
+    def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
+        if response is not None:
+            retry_after = response.headers.get("retry-after", "").strip()
+            if retry_after:
+                try:
+                    return min(HERMES_RETRY_MAX_SECONDS, max(0.0, float(retry_after)))
+                except ValueError:
+                    pass
+        return min(HERMES_RETRY_MAX_SECONDS, HERMES_RETRY_BASE_SECONDS * (2**attempt))
+
+    async def _post_with_retry(self, client: httpx.AsyncClient, headers: dict, request_body: dict) -> httpx.Response:
+        """Retry only transient Hermes failures; preserve client errors for validation/fallback."""
+        for attempt in range(HERMES_RETRY_ATTEMPTS):
+            try:
+                response = await client.post(self.endpoint, headers=headers, json=request_body)
+                transient_status = response.status_code in {408, 425, 429} or response.status_code >= 500
+                if not transient_status or attempt + 1 >= HERMES_RETRY_ATTEMPTS:
+                    return response
+                delay = self._retry_delay(attempt, response)
+                log.warning(
+                    "Hermes returned HTTP %s; retrying in %.1fs (%d/%d)",
+                    response.status_code,
+                    delay,
+                    attempt + 1,
+                    HERMES_RETRY_ATTEMPTS - 1,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError) as error:
+                if attempt + 1 >= HERMES_RETRY_ATTEMPTS:
+                    raise
+                delay = self._retry_delay(attempt)
+                log.warning(
+                    "Hermes request failed with %s; retrying in %.1fs (%d/%d)",
+                    type(error).__name__,
+                    delay,
+                    attempt + 1,
+                    HERMES_RETRY_ATTEMPTS - 1,
+                )
+            await asyncio.sleep(delay)
+        raise RuntimeError("Hermes retry loop ended unexpectedly")
+
     async def review(self, item: KnowledgeItem, message_text: str, language: str) -> HermesDecision | None:
         if not self.enabled:
+            return None
+        if time.monotonic() < self._failure_cooldown_until:
             return None
         system = (
             "You are a strict multilingual knowledge-base verifier. "
@@ -360,7 +409,8 @@ class HermesReviewer:
         if HERMES_API_KEY:
             headers["authorization"] = f"Bearer {HERMES_API_KEY}"
         try:
-            async with httpx.AsyncClient(timeout=HERMES_TIMEOUT_SECONDS) as client:
+            timeout = httpx.Timeout(HERMES_TIMEOUT_SECONDS, connect=HERMES_CONNECT_TIMEOUT_SECONDS)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 request_body = {
                     "model": HERMES_MODEL,
                     "temperature": 0,
@@ -370,21 +420,29 @@ class HermesReviewer:
                     ],
                     "response_format": {"type": "json_object"},
                 }
-                response = await client.post(self.endpoint, headers=headers, json=request_body)
+                response = await self._post_with_retry(client, headers, request_body)
                 # Some OpenAI-compatible Hermes deployments do not expose
                 # response_format; the strict JSON instruction remains active.
                 if response.status_code == 400:
                     request_body.pop("response_format", None)
-                    response = await client.post(self.endpoint, headers=headers, json=request_body)
+                    response = await self._post_with_retry(client, headers, request_body)
                 response.raise_for_status()
                 payload = response.json()
             content = payload["choices"][0]["message"]["content"]
             decision = HermesDecision.model_validate(self._extract_json(content))
             if decision.topicKey not in {"travel", "technology", "radio", "shopping", "people", "places", None}:
                 decision.topicKey = None
+            self._failure_cooldown_until = 0.0
             return decision
-        except Exception:
-            log.exception("Hermes knowledge verification failed; keeping deterministic result")
+        except Exception as error:
+            self._failure_cooldown_until = time.monotonic() + HERMES_FAILURE_COOLDOWN_SECONDS
+            log.warning(
+                "Hermes knowledge verification failed after up to %d attempts; keeping deterministic result: %s: %s",
+                HERMES_RETRY_ATTEMPTS,
+                type(error).__name__,
+                str(error)[:500],
+            )
+            log.debug("Hermes knowledge verification traceback", exc_info=True)
             return None
 
 

@@ -419,6 +419,10 @@ AI_HERMES_API_KEY=replace-with-hermes-api-key
 AI_HERMES_MODEL=hermes-agent
 AI_HERMES_REVIEW_ALL=false
 AI_HERMES_MIN_CONFIDENCE=0.78
+AI_HERMES_TIMEOUT_MS=60000
+AI_HERMES_RETRY_ATTEMPTS=3
+AI_HERMES_RETRY_BASE_MS=1500
+AI_HERMES_FAILURE_COOLDOWN_SECONDS=60
 ```
 
 Bei nicht gesetzter Hermes-URL oder einem temporären Hermes-Fehler bleibt die
@@ -429,7 +433,14 @@ Key müssen daher bewusst gesetzt werden.
 Hermes ist optional und bleibt ein Fallback: Der Dienst wird nur aktiviert,
 wenn `AI_HERMES_ENABLED=true` und eine URL gesetzt sind. Die lokale Kaskade
 bleibt die Primärquelle; Hermes prüft nur unsichere Knowledge-Kandidaten.
-Bei Fehlern oder Timeout wird das lokale Ergebnis beibehalten.
+Bei Fehlern oder Timeout wird das lokale Ergebnis beibehalten. Temporäre
+Timeouts, Verbindungsfehler und HTTP-Fehler 408/425/429/5xx werden bis zu
+`AI_HERMES_RETRY_ATTEMPTS`-mal mit exponentiellem Backoff wiederholt. Nach
+einem endgültigen Ausfall pausiert der Verifier für
+`AI_HERMES_FAILURE_COOLDOWN_SECONDS`, damit ein nicht erreichbarer Remote-Dienst
+keine Nachrichtenverarbeitung blockiert. Der Read-Timeout beträgt standardmäßig
+60 Sekunden; `AI_HERMES_CONNECT_TIMEOUT_MS` begrenzt den Verbindungsaufbau
+separat.
 
 Audiotranskriptionen laufen lokal mit `whisper.cpp` und dem multilingualen
 `medium`-Modell. Die relevanten Einstellungen sind:
