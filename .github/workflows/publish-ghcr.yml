@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       image_owner:
-        description: "GitHub/GHCR owner, for example ea7klk"
+        description: "GitHub/GHCR owner"
         required: false
+        default: conxtor
         type: string
       tag:
         description: "Image tag used by the Dockge deployment"
@@ -56,7 +57,7 @@ jobs:
         env:
           INPUT_IMAGE_OWNER: ${{ inputs.image_owner }}
         run: |
-          owner="${INPUT_IMAGE_OWNER:-${GITHUB_REPOSITORY_OWNER}}"
+          owner="${INPUT_IMAGE_OWNER:-conxtor}"
           owner="$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')"
           echo "owner=$owner" >> "$GITHUB_OUTPUT"
 
