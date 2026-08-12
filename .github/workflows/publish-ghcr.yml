@@ -87,24 +87,19 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           provenance: false
 
-      - name: Set GHCR package visibility to public
+      - name: Verify GHCR package is publicly pullable
         env:
-          # GITHUB_TOKEN works when the workflow repository has package admin
-          # access. GHCR_ADMIN_TOKEN can be supplied as an org/repository
-          # secret when GitHub requires an owner-level package permission.
-          GH_TOKEN: ${{ secrets.GHCR_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
           IMAGE_OWNER: ${{ steps.image.outputs.owner }}
           PACKAGE_NAME: ${{ matrix.image }}
+          IMAGE_TAG: ${{ inputs.tag }}
         run: |
-          response="$(gh api --method PATCH \
-            "/orgs/${IMAGE_OWNER}/packages/container/${PACKAGE_NAME}" \
-            -H 'Accept: application/vnd.github+json' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            -f visibility=public)"
-          visibility="$(printf '%s' "$response" | jq -r '.visibility // empty')"
-          if [ "$visibility" != "public" ]; then
-            echo "GHCR package ${IMAGE_OWNER}/${PACKAGE_NAME} was not made public." >&2
-            printf '%s\n' "$response" >&2
+          image_url="https://ghcr.io/v2/${IMAGE_OWNER}/${PACKAGE_NAME}/manifests/${IMAGE_TAG}"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "$image_url")"
+          if [ "$status" != "200" ]; then
+            echo "GHCR package ${IMAGE_OWNER}/${PACKAGE_NAME}:${IMAGE_TAG} is not publicly pullable (HTTP ${status})." >&2
+            echo "Set the package visibility to Public in GitHub before rerunning this workflow." >&2
             exit 1
           fi
-          echo "GHCR package ${IMAGE_OWNER}/${PACKAGE_NAME} is public."
+          echo "GHCR package ${IMAGE_OWNER}/${PACKAGE_NAME}:${IMAGE_TAG} is public."
