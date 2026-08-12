@@ -17,7 +17,7 @@ services:
       retries: 20
       start_period: 10s
   migrate:
-    image: postgres:15-alpine
+    image: ghcr.io/${GHCR_IMAGE_OWNER:-conxtor}/wagi-migrate:${GHCR_IMAGE_TAG:-latest}
     restart: "no"
     environment:
       DB_HOST: postgres
@@ -25,14 +25,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-app}
       WAGI_DB_PASSWORD: ${WAGI_DB_PASSWORD:?WAGI_DB_PASSWORD must be set}
-    volumes:
-      - ./infra/migrations:/migrations:ro
-      - ./infra/migration-runner:/runner:ro
     command:
       - /bin/sh
       - -ec
       - |
-        /runner/run.sh
+        /usr/local/bin/wagi-migrate
         export PGPASSWORD="$${POSTGRES_PASSWORD}"
         psql -h "$${DB_HOST}" -U "$${DB_USER}" -d "$${POSTGRES_DB}" -v ON_ERROR_STOP=1 -v wagi_db_password="$${WAGI_DB_PASSWORD}" -c "ALTER ROLE wagi_app WITH PASSWORD :'wagi_db_password'"
     depends_on:

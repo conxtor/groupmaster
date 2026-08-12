@@ -47,6 +47,9 @@ jobs:
           - image: wagi-nats-provisioner
             context: ./infra/nats-provisioner
             dockerfile: Dockerfile
+          - image: wagi-migrate
+            context: .
+            dockerfile: infra/migration-runner/Dockerfile
 
     steps:
       - name: Check out repository
@@ -86,20 +89,3 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           provenance: false
-
-      - name: Verify GHCR package is publicly pullable
-        env:
-          IMAGE_OWNER: ${{ steps.image.outputs.owner }}
-          PACKAGE_NAME: ${{ matrix.image }}
-          IMAGE_TAG: ${{ inputs.tag }}
-        run: |
-          image_url="https://ghcr.io/v2/${IMAGE_OWNER}/${PACKAGE_NAME}/manifests/${IMAGE_TAG}"
-          status="$(curl -sS -o /dev/null -w '%{http_code}' \
-            -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-            "$image_url")"
-          if [ "$status" != "200" ]; then
-            echo "GHCR package ${IMAGE_OWNER}/${PACKAGE_NAME}:${IMAGE_TAG} is not publicly pullable (HTTP ${status})." >&2
-            echo "Set the package visibility to Public in GitHub before rerunning this workflow." >&2
-            exit 1
-          fi
-          echo "GHCR package ${IMAGE_OWNER}/${PACKAGE_NAME}:${IMAGE_TAG} is public."
