@@ -101,6 +101,21 @@ def transcribe_with_whisper_cpp(source_path: str) -> tuple[str, str, float]:
         return transcript, detected_language, confidence
 
 
+async def repair_placeholder_audio_jobs(db):
+    """Requeue old MVP placeholders so they can be transcribed for real."""
+    if not WHISPER_ENABLED:
+        return
+    result = await db.execute(
+        """UPDATE audio_jobs
+           SET status='queued', transcript=NULL, language=NULL, confidence=NULL,
+               error='MVP-Platzhalter wurde als ungültige Transkription erkannt',
+               next_attempt_at=NOW(), updated_at=NOW()
+           WHERE status='completed' AND transcript LIKE 'Audio-MVP:%'"""
+    )
+    if result != "UPDATE 0":
+        log.warning("requeued %s old placeholder audio job(s)", result.split()[-1])
+
+
 async def publish(js, data: dict):
     subject = data.pop("_subject", "media.audio.transcribed")
     event_type = data.pop("_type", subject)
@@ -361,15 +376,17 @@ async def main():
                 await message.ack()
                 return
             await db.execute("UPDATE audio_jobs SET status='processing', attempts=attempts+1, next_attempt_at=NULL, updated_at=NOW() WHERE id=$1", job_id)
-            source = data.get("objectPath") or (await db.fetchval("SELECT object_path FROM audio_jobs WHERE id=$1", job_id)) or data.get("mediaKey", "unknown")
-            if WHISPER_ENABLED and os.path.exists(source):
+            source = data.get("objectPath") or (await db.fetchval("SELECT object_path FROM audio_jobs WHERE id=$1", job_id))
+            if WHISPER_ENABLED:
+                if not source or not os.path.isfile(source):
+                    raise FileNotFoundError(f"Audioquelle nicht verfügbar: {source or data.get('mediaKey', 'unbekannt')}")
                 # whisper.cpp can run for minutes with the medium model. Keep
                 # the asyncio/NATS loop responsive so media jobs and JetStream
                 # heartbeats continue while transcription is in progress.
                 transcript, language, confidence = await asyncio.to_thread(transcribe_with_whisper_cpp, source)
                 provider = "whisper.cpp"
             else:
-                transcript, language, confidence = transcribe_placeholder(source)
+                transcript, language, confidence = transcribe_placeholder(source or data.get("mediaKey", "unknown"))
                 provider = "placeholder-mvp"
             await publish(js, {"jobId": job_id, "messageId": data["messageId"], "transcript": transcript, "language": language, "confidence": confidence, "provider": provider})
             await db.execute("UPDATE audio_jobs SET status='completed', transcript=$1, language=$2, confidence=$3, error=NULL, updated_at=NOW() WHERE id=$4", transcript, language, confidence, job_id)
@@ -430,6 +447,7 @@ async def main():
 
     await js.subscribe("media.objects.requested", durable="WAGI_MEDIA_OBJECTS", stream="WAGI_EVENTS", cb=lambda message: on_media(db, js, message))
     await js.subscribe("media.audio.requested", durable="WAGI_MEDIA_AUDIO", stream="WAGI_EVENTS", cb=on_audio)
+    await repair_placeholder_audio_jobs(db)
     asyncio.create_task(repair_local_media(db, js))
     asyncio.create_task(republish_due_audio_jobs())
     async def on_cleanup_request(message):

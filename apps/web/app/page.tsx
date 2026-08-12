@@ -10,6 +10,7 @@ import {
   isSupportedLocale,
   localeCodes,
   localeNames,
+  localizeRuntimeError,
   readLocaleCookie,
   supportedLocales,
   translate,
@@ -27,7 +28,7 @@ type MessageNode = Message & { children: MessageNode[] };
 type EventVersion = { event: Event; place?: Place; updatedAt: string; sourceMessageIds: string[]; updateMessage?: Message };
 type EventRecord = { key: string; groupId: string; groupSubject: string; groupPlatform?: string; versions: EventVersion[] };
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
-type ServiceStatus = { connectors: Array<{ connector: string; status: string; detail?: string; lastError?: string; updatedAt: string; queuePosition?: number | null; queueLength?: number | null; waitReason?: string | null }>; audioJobs: Record<string, number>; recentAudioErrors: Array<{ id: string; error?: string; attempts: number; groupSubject: string }> };
+type ServiceStatus = { connectors: Array<{ connector: string; status: string; detail?: string; lastError?: string; updatedAt: string; queuePosition?: number | null; queueLength?: number | null; waitReason?: string | null }>; audioJobs: Record<string, number>; recentAudioErrors: Array<{ id: string; error?: string; attempts: number; groupSubject: string }>; aiProcessing: { total: number; completed: number; pending: number; model?: string; promptVersion?: string; updatedAt?: string } };
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 const demoTimestamp = "2026-08-10T12:00:00.000Z";
@@ -55,18 +56,20 @@ function ProcessingStatus({ locale, status }: { locale: Locale; status: ServiceS
   const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
   if (!status) return null;
   const jobEntries = Object.entries(status.audioJobs);
+  const ai = status.aiProcessing ?? { total: 0, completed: 0, pending: 0 };
   return <section className="statusPanel panel">
     <div className="panelHead"><div><p className="eyebrow">{t("processingStatus")}</p><h2>{t("connectionStatus")}</h2></div><span className="count">{status.connectors.length}</span></div>
     <div className="statusPanelBody">
       <div className="statusGroup"><strong>{t("connectionStatus")}</strong>{status.connectors.length ? status.connectors.map((connector) => <div className="statusLine" key={connector.connector}><span className={`statusBadge ${connector.status === "ready" || connector.status === "paused" ? "ok" : connector.status === "error" || connector.status === "reauth_required" ? "error" : "pending"}`}>{connector.status}</span><span>{connector.connector}</span>{connector.waitReason && <small>{t("connectorQueueWaiting")}{typeof connector.queuePosition === "number" && typeof connector.queueLength === "number" ? ` · ${t("connectorQueuePosition", { position: connector.queuePosition, count: connector.queueLength })}` : ""}</small>}{connector.lastError && <small>{t("lastError", { error: connector.lastError })}</small>}</div>) : <p className="muted">{t("noConnectorStatus")}</p>}</div>
       <div className="statusGroup"><strong>{t("audioStatus")}</strong>{jobEntries.length ? jobEntries.map(([jobStatus, count]) => <span className="jobCount" key={jobStatus}>{count} · {jobStatusLabel(jobStatus, t)}</span>) : <p className="muted">{t("noConnectorStatus")}</p>}</div>
-      {status.recentAudioErrors.length > 0 && <div className="statusErrors"><strong>{t("audioFailed")}</strong>{status.recentAudioErrors.slice(0, 3).map((job) => <p key={job.id}>{job.groupSubject} · {t("audioAttempts", { count: job.attempts })}{job.error ? ` · ${job.error}` : ""}</p>)}</div>}
+      <div className="statusGroup"><strong>{t("aiProcessing")}</strong><span className="jobCount">{ai.pending} · {t("messagesPending")}</span><span className="jobCount">{ai.completed}/{ai.total} · {t("messagesAnalyzed")}</span>{ai.model && <small className="statusMeta">{t("aiModel", { model: ai.model })}</small>}{ai.promptVersion && <small className="statusMeta">{t("aiPrompt", { version: ai.promptVersion })}</small>}</div>
+      {status.recentAudioErrors.length > 0 && <div className="statusErrors"><strong>{t("audioFailed")}</strong>{status.recentAudioErrors.slice(0, 3).map((job) => <p key={job.id}>{job.groupSubject} · {t("audioAttempts", { count: job.attempts })}{job.error ? ` · ${localizeRuntimeError(locale, job.error)}` : ""}</p>)}</div>}
     </div>
   </section>;
 }
 
 function time(value: string, locale: Locale) {
-  return new Intl.DateTimeFormat(localeCodes[locale], { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Madrid" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeCodes[locale], { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Madrid" }).format(new Date(value));
 }
 
 function kindLabel(kind: string, locale: Locale) {
@@ -270,7 +273,7 @@ function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscript
       {(message.kind === "audio" || message.audioStatus || message.transcript) && <div className={`audioJobPanel ${message.audioStatus === "failed" ? "failed" : ""}`}>
         <div className="audioJobHead"><strong>{t("audioStatus")}</strong><span>{audioStatusLabel(message.audioStatus, t)}</span></div>
         {typeof message.audioAttempts === "number" && <small>{t("audioAttempts", { count: message.audioAttempts })}</small>}
-        {message.audioError && <p className="audioJobError">{t("audioError", { error: message.audioError })}</p>}
+        {message.audioError && <p className="audioJobError">{t("audioError", { error: localizeRuntimeError(locale, message.audioError) })}</p>}
         {actionError && <p className="audioJobError">{actionError}</p>}
         {message.audioStatus === "failed" && message.audioJobId && onRetryAudio && <button className="textButton" type="button" onClick={async () => { setActionError(null); try { await onRetryAudio(message); } catch (error) { setActionError(error instanceof Error ? error.message : t("connectorError")); } }}>{t("retryAudio")}</button>}
         {(message.transcript || message.audioJobId) && <details className="transcriptReview" open={Boolean(message.transcript)}><summary>{t("reviewTranscript")}</summary><textarea value={transcriptDraft} onChange={(event) => setTranscriptDraft(event.target.value)} placeholder={t("transcriptPlaceholder")} /><button className="primaryButton" type="button" disabled={!onTranscriptSaved || !transcriptDraft.trim() || savingTranscript} onClick={async () => { if (!onTranscriptSaved) return; setActionError(null); setSavingTranscript(true); try { await onTranscriptSaved(message.id, transcriptDraft.trim()); } catch (error) { setActionError(error instanceof Error ? error.message : t("connectorError")); } finally { setSavingTranscript(false); } }}>{savingTranscript ? t("retryingAudio") : t("saveTranscript")}</button></details>}
@@ -302,12 +305,17 @@ export default function Dashboard() {
   const [eventOnly, setEventOnly] = useState(false);
   const [placeOnly, setPlaceOnly] = useState(false);
   const [showAllMessages, setShowAllMessages] = useState(false);
+  const [messageOffset, setMessageOffset] = useState(0);
+  const [messagesHasMore, setMessagesHasMore] = useState(false);
+  const [messagesLoading, setMessagesLoading] = useState(false);
   const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [locale, setLocale] = useState<Locale>("de");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
 
   const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
+  const messagePageSize = 50;
+  const queryGroupId = selectedGroup !== "all" ? selectedGroup : groupFilter;
 
   useEffect(() => {
     const savedLocale = readLocaleCookie(document.cookie);
@@ -322,34 +330,41 @@ export default function Dashboard() {
   }, [locale]);
 
   useEffect(() => {
+    setMessageOffset(0);
+  }, [locale, showAllMessages, searchQuery, queryGroupId, kindFilter, fromFilter, toFilter, eventOnly, placeOnly]);
+
+  useEffect(() => {
     let active = true;
     async function loadDashboard() {
+      if (active) setMessagesLoading(true);
       try {
         const filters = new URLSearchParams();
-        filters.set("limit", "100");
+        filters.set("limit", String(messagePageSize));
+        filters.set("offset", String(messageOffset));
         if (!showAllMessages) filters.set("relevant", "true");
         if (searchQuery.trim()) filters.set("q", searchQuery.trim());
-        if (groupFilter !== "all") filters.set("groupId", groupFilter);
+        if (queryGroupId !== "all") filters.set("groupId", queryGroupId);
         if (kindFilter !== "all") filters.set("kind", kindFilter);
         if (fromFilter) filters.set("from", new Date(fromFilter).toISOString());
         if (toFilter) filters.set("to", new Date(toFilter).toISOString());
         if (eventOnly) filters.set("event", "true");
         if (placeOnly) filters.set("place", "true");
-        const sourceFilters = new URLSearchParams({ limit: "300" });
-        if (groupFilter !== "all") sourceFilters.set("groupId", groupFilter);
+        const sourceFilters = new URLSearchParams({ limit: "200", offset: "0" });
+        if (queryGroupId !== "all") sourceFilters.set("groupId", queryGroupId);
         const [groupsResponse, messagesResponse, sourceMessagesResponse, statusResponse] = await Promise.all([apiFetch("/api/v1/groups"), apiFetch(`/api/v1/messages?${filters.toString()}`), apiFetch(`/api/v1/messages?${sourceFilters.toString()}`), apiFetch("/api/v1/status")]);
         if (!groupsResponse.ok || !messagesResponse.ok) throw new Error("API nicht erreichbar");
         const nextGroups = await groupsResponse.json() as Group[];
         const nextMessages = await messagesResponse.json() as Message[];
         const nextSourceMessages = sourceMessagesResponse.ok ? await sourceMessagesResponse.json() as Message[] : nextMessages;
         const nextStatus = statusResponse.ok ? await statusResponse.json() as ServiceStatus : null;
-        if (active) { setGroups(nextGroups); setMessages(nextMessages); setEventSourceMessages(nextSourceMessages); setServiceStatus(nextStatus); setLive(true); setError(null); }
+        if (active) { setGroups(nextGroups); setMessages(nextMessages); setEventSourceMessages(nextSourceMessages); setMessagesHasMore(messagesResponse.headers.get("x-has-more") === "true"); setServiceStatus(nextStatus); setLive(true); setError(null); }
       } catch { if (active) setError(t("demoNotice")); }
+      finally { if (active) setMessagesLoading(false); }
     }
     void loadDashboard();
     const timer = window.setInterval(() => void loadDashboard(), 5000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [locale, showAllMessages, searchQuery, groupFilter, kindFilter, fromFilter, toFilter, eventOnly, placeOnly]);
+  }, [locale, showAllMessages, searchQuery, queryGroupId, kindFilter, fromFilter, toFilter, eventOnly, placeOnly, messageOffset]);
 
   const visibleMessages = useMemo(() => selectedGroup === "all" ? messages : messages.filter((message) => message.groupId === selectedGroup), [messages, selectedGroup]);
   const messageThreads = useMemo(() => buildMessageHierarchy(visibleMessages), [visibleMessages]);
@@ -376,6 +391,7 @@ export default function Dashboard() {
   }
 
   function clearFilters() {
+    setSelectedGroup("all");
     setGroupFilter("all");
     setSearchQuery("");
     setKindFilter("all");
@@ -383,6 +399,11 @@ export default function Dashboard() {
     setToFilter("");
     setEventOnly(false);
     setPlaceOnly(false);
+  }
+
+  function selectGroup(groupId: string) {
+    setSelectedGroup(groupId);
+    setGroupFilter(groupId);
   }
 
   async function retryAudio(message: Message) {
@@ -411,10 +432,10 @@ export default function Dashboard() {
       <section className="hero"><div><p className="eyebrow">{t("signalCheck")}</p><p className="heroNumber">{visibleMessages.filter((item) => item.analysis?.relevant).length || 1}</p><p className="muted">{t("relevantSignals", { scope })}</p></div><div className="heroNote"><span>✦</span><p>{t("heroNote")}</p></div></section>
       {error && <div className="notice">{error}</div>}
       <ProcessingStatus locale={locale} status={serviceStatus} />
-      <section className="panel filterPanel"><div className="panelHead"><div><p className="eyebrow">{t("searchMessages")}</p><h2>{t("messageStream")}</h2></div><button className="textButton" type="button" onClick={clearFilters}>{t("clearFilters")}</button></div><div className="filterGrid"><label><span>{t("searchMessages")}</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={t("searchMessages")} /></label><label><span>{t("filterGroup")}</span><select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="all">{t("allSelected")}</option>{selectedGroups.map((group) => <option key={group.id} value={group.id}>{group.subject}</option>)}</select></label><label><span>{t("filterKind")}</span><select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">{t("allKinds")}</option>{["text", "audio", "image", "video", "location", "document"].map((kind) => <option key={kind} value={kind}>{kindLabel(kind, locale)}</option>)}</select></label><label><span>{t("filterFrom")}</span><input type="datetime-local" value={fromFilter} onChange={(event) => setFromFilter(event.target.value)} /></label><label><span>{t("filterTo")}</span><input type="datetime-local" value={toFilter} onChange={(event) => setToFilter(event.target.value)} /></label><label className="filterCheck"><input type="checkbox" checked={eventOnly} onChange={(event) => setEventOnly(event.target.checked)} /><span>{t("filterEvents")}</span></label><label className="filterCheck"><input type="checkbox" checked={placeOnly} onChange={(event) => setPlaceOnly(event.target.checked)} /><span>{t("filterPlaces")}</span></label></div></section>
+      <section className="panel filterPanel"><div className="panelHead"><div><p className="eyebrow">{t("searchMessages")}</p><h2>{t("messageStream")}</h2></div><button className="textButton" type="button" onClick={clearFilters}>{t("clearFilters")}</button></div><div className="filterGrid"><label><span>{t("searchMessages")}</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={t("searchMessages")} /></label><label><span>{t("filterGroup")}</span><select value={groupFilter} onChange={(event) => selectGroup(event.target.value)}><option value="all">{t("allSelected")}</option>{selectedGroups.map((group) => <option key={group.id} value={group.id}>{group.subject}</option>)}</select></label><label><span>{t("filterKind")}</span><select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">{t("allKinds")}</option>{["text", "audio", "image", "video", "location", "document"].map((kind) => <option key={kind} value={kind}>{kindLabel(kind, locale)}</option>)}</select></label><label><span>{t("filterFrom")}</span><input type="datetime-local" value={fromFilter} onChange={(event) => setFromFilter(event.target.value)} /></label><label><span>{t("filterTo")}</span><input type="datetime-local" value={toFilter} onChange={(event) => setToFilter(event.target.value)} /></label><label className="filterCheck"><input type="checkbox" checked={eventOnly} onChange={(event) => setEventOnly(event.target.checked)} /><span>{t("filterEvents")}</span></label><label className="filterCheck"><input type="checkbox" checked={placeOnly} onChange={(event) => setPlaceOnly(event.target.checked)} /><span>{t("filterPlaces")}</span></label></div></section>
       <div className="grid">
-        <aside className="panel groupsPanel"><div className="panelHead"><div><h2>{t("selectedGroupsOnly")}</h2><p className="muted groupSelectionHint">{t("groupSelectionHint")}</p></div><span className="count">{selectedGroups.length}</span></div><Link className="manageGroupsLink" href="/groups">{t("manageGroups")}</Link><button className={`groupRow ${selectedGroup === "all" ? "active" : ""}`} onClick={() => setSelectedGroup("all")}><span className="avatar all">✦</span><span><strong>{t("allSelected")}</strong><small>{t("liveOverview")}</small></span></button>{dashboardHierarchy.map((node) => <DashboardGroupBranch key={node.group.id} node={node} selectedGroup={selectedGroup} onSelect={setSelectedGroup} t={t} />)}</aside>
-        <section className="panel feedPanel"><EventBoard events={eventRecords} messages={eventSourceMessages} locale={locale} /><div className="panelHead"><div><h2>{showAllMessages ? t("allMessages") : t("relevantMessages")}</h2><p className="muted">{showAllMessages ? t("allMessagesSubtitle") : t("relevantMessagesSubtitle")}</p></div><div className="feedControls"><button className={`textButton ${!showAllMessages ? "active" : ""}`} type="button" aria-pressed={!showAllMessages} onClick={() => setShowAllMessages(false)}>{t("relevantOnly")}</button><button className={`textButton ${showAllMessages ? "active" : ""}`} type="button" aria-pressed={showAllMessages} onClick={() => setShowAllMessages(true)}>{t("allMessages")}</button><span className="count">{visibleMessages.length}</span></div></div><div className="feed">{messageThreads.map((message) => <MessageCard key={message.id} message={message} locale={locale} t={t} onRetryAudio={retryAudio} onTranscriptSaved={saveTranscript} />)}</div></section>
+        <aside className="panel groupsPanel"><div className="panelHead"><div><h2>{t("selectedGroupsOnly")}</h2><p className="muted groupSelectionHint">{t("groupSelectionHint")}</p></div><span className="count">{selectedGroups.length}</span></div><Link className="manageGroupsLink" href="/groups">{t("manageGroups")}</Link><button className={`groupRow ${selectedGroup === "all" ? "active" : ""}`} onClick={() => selectGroup("all")}><span className="avatar all">✦</span><span><strong>{t("allSelected")}</strong><small>{t("liveOverview")}</small></span></button>{dashboardHierarchy.map((node) => <DashboardGroupBranch key={node.group.id} node={node} selectedGroup={selectedGroup} onSelect={selectGroup} t={t} />)}</aside>
+        <section className="panel feedPanel"><EventBoard events={eventRecords} messages={eventSourceMessages} locale={locale} /><div className="panelHead"><div><h2>{showAllMessages ? t("allMessages") : t("relevantMessages")}</h2><p className="muted">{showAllMessages ? t("allMessagesSubtitle") : t("relevantMessagesSubtitle")}</p></div><div className="feedControls"><button className={`textButton ${!showAllMessages ? "active" : ""}`} type="button" aria-pressed={!showAllMessages} onClick={() => setShowAllMessages(false)}>{t("relevantOnly")}</button><button className={`textButton ${showAllMessages ? "active" : ""}`} type="button" aria-pressed={showAllMessages} onClick={() => setShowAllMessages(true)}>{t("allMessages")}</button><span className="count">{visibleMessages.length}</span></div></div><div className="feed">{messageThreads.map((message) => <MessageCard key={message.id} message={message} locale={locale} t={t} onRetryAudio={retryAudio} onTranscriptSaved={saveTranscript} />)}</div><div className="paginationControls" aria-label={t("messagePagination")}><button className="textButton" type="button" disabled={messageOffset === 0 || messagesLoading} onClick={() => setMessageOffset((current) => Math.max(0, current - messagePageSize))}>{t("previousPage")}</button><span>{t("messagePage", { page: Math.floor(messageOffset / messagePageSize) + 1 })}{messagesLoading ? ` · ${t("loadingMessages")}` : ""}</span><button className="textButton" type="button" disabled={!messagesHasMore || messagesLoading} onClick={() => setMessageOffset((current) => current + messagePageSize)}>{t("nextPage")}</button></div></section>
       </div>
       <footer><span>{t("footer")}</span><span>{t("build")}</span></footer>
     </main>

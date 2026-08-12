@@ -27,6 +27,7 @@ const backfillThrottleMs = Math.max(0, Number(process.env.WA_BACKFILL_THROTTLE_M
 const backfillGroupDelayMs = Math.max(0, Number(process.env.WA_BACKFILL_GROUP_DELAY_MS ?? 1500));
 const mediaDownloadTimeoutMs = Math.max(10_000, Number(process.env.WA_MEDIA_DOWNLOAD_TIMEOUT_MS ?? 30_000));
 const mediaDownloadAttempts = Math.max(1, Number(process.env.WA_MEDIA_DOWNLOAD_ATTEMPTS ?? 3));
+const mediaRetryIntervalMs = Math.max(30_000, Number(process.env.WA_MEDIA_RETRY_INTERVAL_MS ?? 60_000));
 const mockMode = (process.env.WA_MOCK_MODE ?? "false").toLowerCase() === "true";
 const groupRefreshIntervalMs = Math.max(30_000, Number(process.env.GROUP_REFRESH_INTERVAL_MS ?? 60_000));
 const mediaCleanupToken = (process.env.MEDIA_CLEANUP_TOKEN ?? "").trim();
@@ -66,6 +67,7 @@ type WhatsAppParticipant = { id?: string; lid?: string; jid?: string; name?: str
 type WhatsAppSenderIdentity = { senderJid: string; senderName?: string };
 const senderIdentityCache = new Map<string, { identity: WhatsAppSenderIdentity; expiresAt: number }>();
 let groupRefreshTimer: NodeJS.Timeout | null = null;
+let mediaRepairTimer: NodeJS.Timeout | null = null;
 let groupRefreshInProgress = false;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let reconnectAttempts = 0;
@@ -512,6 +514,16 @@ function startGroupRefreshTimer() {
   groupRefreshTimer.unref?.();
 }
 
+function startMediaRepairTimer() {
+  if (mediaRepairTimer) return;
+  mediaRepairTimer = setInterval(() => {
+    if (connected && waSocket) {
+      void retryMissingWhatsAppMedia(waSocket).catch((error) => console.warn("WhatsApp scheduled media repair failed", error));
+    }
+  }, mediaRetryIntervalMs);
+  mediaRepairTimer.unref?.();
+}
+
 function allowlistedGroup(groupId: string) {
   return allowlist.has(groupId);
 }
@@ -804,12 +816,31 @@ async function persistMessage(message: WAMessage) {
     await publish(subjects.mediaRequested, subjects.mediaRequested, { messageId, mediaKey, objectPath, mediaMime, platform: "whatsapp" });
   }
   if (kind === "audio") {
-    const existing = await pool.query<{ id: string }>("SELECT id FROM audio_jobs WHERE message_id = $1 ORDER BY created_at DESC LIMIT 1", [data.messageId]);
+    const existing = await pool.query<{ id: string; status: string; transcript: string | null }>("SELECT id, status, transcript FROM audio_jobs WHERE message_id = $1 ORDER BY created_at DESC LIMIT 1", [data.messageId]);
     const jobId = existing.rows[0]?.id ?? randomUUID();
     if (!existing.rows[0]) {
       await pool.query("INSERT INTO audio_jobs (id, message_id, media_key, media_mime, object_path) VALUES ($1,$2,$3,$4,$5)", [jobId, data.messageId, data.mediaKey, data.mediaMime ?? null, objectPath ?? null]);
+    } else if (objectPath) {
+      const oldJob = existing.rows[0];
+      const needsProcessing = oldJob.status !== "completed" || !oldJob.transcript || oldJob.transcript.startsWith("Audio-MVP:");
+      await pool.query(
+        `UPDATE audio_jobs
+         SET object_path=$1, media_mime=COALESCE($2, media_mime),
+             status=CASE WHEN $4 THEN 'queued' ELSE status END,
+             attempts=CASE WHEN $4 THEN 0 ELSE attempts END,
+             transcript=CASE WHEN $4 THEN NULL ELSE transcript END,
+             language=CASE WHEN $4 THEN NULL ELSE language END,
+             confidence=CASE WHEN $4 THEN NULL ELSE confidence END,
+             error=CASE WHEN $4 THEN NULL ELSE error END,
+             next_attempt_at=CASE WHEN $4 THEN NOW() ELSE next_attempt_at END,
+             updated_at=NOW()
+         WHERE id=$3`,
+        [objectPath, data.mediaMime ?? null, jobId, needsProcessing],
+      );
     }
-    await publish(subjects.audioRequested, subjects.audioRequested, { jobId, messageId: data.messageId, mediaKey: data.mediaKey!, mediaMime: data.mediaMime, objectPath });
+    if (objectPath) {
+      await publish(subjects.audioRequested, subjects.audioRequested, { jobId, messageId: data.messageId, mediaKey: data.mediaKey!, mediaMime: data.mediaMime, objectPath });
+    }
   }
   if (accountLease) await accountLease.saveCursor(groupId, { externalMessageId: waMessageId, receivedAt: data.receivedAt, sequenceNo: timestamp });
 }
@@ -895,13 +926,13 @@ async function retryMissingWhatsAppMedia(socket: ReturnType<typeof makeWASocket>
        WHERE mo.message_id = m.id AND mo.status='completed' AND mo.object_path IS NOT NULL
        LIMIT 1
      ) stored ON TRUE
-     WHERE m.platform='whatsapp' AND m.has_media=TRUE AND m.kind IN ('image','video')
+     WHERE m.platform='whatsapp' AND m.has_media=TRUE AND m.kind IN ('audio','image','video','document')
        AND m.received_at >= $1 AND stored.message_id IS NULL
      ORDER BY m.received_at DESC`,
     [backfillCutoff, accountLease?.account.userId ?? null],
   );
   if (!rows.rows.length) return;
-  console.log(`Retrying ${rows.rows.length} missing WhatsApp image/video file(s)`);
+  console.log(`Retrying ${rows.rows.length} missing WhatsApp media file(s)`);
   for (const row of rows.rows) {
     if (!connected || waSocket !== socket) return;
     try {
@@ -1025,6 +1056,7 @@ async function connectWhatsApp() {
       if (onboardingOnly && accountLease) void accountLease.updateQR({ status: "connected", qrPayload: null, expiresAt: null, workerId: poolWorkerId });
       void setStatus("syncing", `${initialActivation ? "Erst-" : "Neustart-"}Backfill der letzten ${backfillDays} Tage läuft`);
       startGroupRefreshTimer();
+      startMediaRepairTimer();
       void (async () => {
         await refreshAllWhatsAppGroupNames(socket);
         if (onboardingOnly) {

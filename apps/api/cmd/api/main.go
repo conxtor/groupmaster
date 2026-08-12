@@ -116,10 +116,20 @@ type connectorStatusView struct {
 	WaitReason    *string   `json:"waitReason,omitempty"`
 }
 
+type aiProcessingView struct {
+	Total         int64      `json:"total"`
+	Completed     int64      `json:"completed"`
+	Pending       int64      `json:"pending"`
+	Model         *string    `json:"model,omitempty"`
+	PromptVersion *string    `json:"promptVersion,omitempty"`
+	UpdatedAt     *time.Time `json:"updatedAt,omitempty"`
+}
+
 type serviceStatusView struct {
 	Connectors        []connectorStatusView `json:"connectors"`
 	AudioJobs         map[string]int        `json:"audioJobs"`
 	RecentAudioErrors []audioJobView        `json:"recentAudioErrors"`
+	AIProcessing      aiProcessingView      `json:"aiProcessing"`
 }
 
 type knowledgeItem struct {
@@ -263,6 +273,12 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
 	args := make([]any, 0)
 	arg := func(value any) string { args = append(args, value); return fmt.Sprintf("$%d", len(args)) }
 	conditions := []string{groupSelectedCondition(user, "g", &args)}
@@ -292,8 +308,12 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 	if value := strings.TrimSpace(r.URL.Query().Get("to")); value != "" {
 		conditions = append(conditions, "m.received_at < "+arg(value))
 	}
-	args = append(args, limit)
+	// Fetch one extra row so the client can render a reliable next-page state
+	// without changing the long-standing array response shape.
+	args = append(args, limit+1)
 	limitArg := fmt.Sprintf("$%d", len(args))
+	args = append(args, offset)
+	offsetArg := fmt.Sprintf("$%d", len(args))
 	rows, err := a.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT m.id, m.group_id, g.subject, m.wa_message_id, m.sender_jid, m.sender_name, m.kind,
 		       COALESCE(NULLIF(aj.transcript, ''), m.text),
@@ -310,7 +330,7 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN message_analyses a ON a.message_id = m.id
 		LEFT JOIN LATERAL (SELECT object_path, thumbnail_path, ocr_text FROM media_objects WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) mo ON TRUE
 		LEFT JOIN LATERAL (SELECT id, transcript, status, attempts, error, next_attempt_at FROM audio_jobs WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) aj ON TRUE
-		WHERE %s ORDER BY m.received_at DESC LIMIT %s`, strings.Join(conditions, " AND "), limitArg), args...)
+		WHERE %s ORDER BY m.received_at DESC LIMIT %s OFFSET %s`, strings.Join(conditions, " AND "), limitArg, offsetArg), args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -340,6 +360,14 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 		}
 		result = append(result, item)
 	}
+	hasMore := len(result) > limit
+	if hasMore {
+		result = result[:limit]
+	}
+	w.Header().Set("X-Has-More", strconv.FormatBool(hasMore))
+	w.Header().Set("X-Next-Offset", strconv.Itoa(offset+limit))
+	w.Header().Set("X-Page-Offset", strconv.Itoa(offset))
+	w.Header().Set("X-Page-Limit", strconv.Itoa(limit))
 	writeJSON(w, 200, result)
 }
 
@@ -949,6 +977,34 @@ func (a *app) status(w http.ResponseWriter, r *http.Request) {
 		result.AudioJobs[status] = count
 	}
 	jobRows.Close()
+	aiArgs := make([]any, 0, 1)
+	aiConditions := []string{groupSelectedCondition(user, "g", &aiArgs), groupReadCondition(user, "g", &aiArgs)}
+	if err := a.db.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT COUNT(*)::bigint,
+		       COUNT(a.message_id)::bigint,
+		       COUNT(*) FILTER (WHERE a.message_id IS NULL)::bigint,
+		       MAX(a.updated_at)
+		FROM messages m
+		JOIN wa_groups g ON g.id=m.group_id
+		LEFT JOIN message_analyses a ON a.message_id=m.id
+		WHERE %s AND %s`, aiConditions[0], aiConditions[1]), aiArgs...).Scan(&result.AIProcessing.Total, &result.AIProcessing.Completed, &result.AIProcessing.Pending, &result.AIProcessing.UpdatedAt); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+		return
+	}
+	var latestModel, latestPromptVersion *string
+	if err := a.db.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT NULLIF(a.model, ''), NULLIF(a.prompt_version, '')
+		FROM message_analyses a
+		JOIN messages m ON m.id=a.message_id
+		JOIN wa_groups g ON g.id=m.group_id
+		WHERE %s AND %s
+		ORDER BY a.updated_at DESC
+		LIMIT 1`, aiConditions[0], aiConditions[1]), aiArgs...).Scan(&latestModel, &latestPromptVersion); err != nil && err != pgx.ErrNoRows {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+		return
+	}
+	result.AIProcessing.Model = latestModel
+	result.AIProcessing.PromptVersion = latestPromptVersion
 	errorArgs := make([]any, 0, 1)
 	errorVisibility := groupReadCondition(user, "g", &errorArgs)
 	errorRows, err := a.db.Query(r.Context(), fmt.Sprintf(`
@@ -990,6 +1046,7 @@ func cors(origin string, next http.Handler) http.Handler {
 		w.Header().Set("access-control-allow-methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		w.Header().Set("access-control-allow-headers", "content-type")
 		w.Header().Set("access-control-allow-credentials", "true")
+		w.Header().Set("access-control-expose-headers", "X-Has-More, X-Next-Offset, X-Page-Offset, X-Page-Limit")
 		w.Header().Set("vary", "Origin")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
