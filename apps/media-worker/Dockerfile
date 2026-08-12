@@ -6,7 +6,6 @@ RUN cmake -S /src/whisper.cpp -B /src/whisper.cpp/build \
     -DWHISPER_BUILD_TESTS=OFF \
     -DWHISPER_BUILD_SERVER=OFF \
     -DGGML_NATIVE=OFF \
-    -DGGML_CPU_ARM_ARCH=armv8-a \
     && cmake --build /src/whisper.cpp/build --config Release --target whisper-cli -j2
 RUN mkdir -p /tmp/whisper-libs && find /src/whisper.cpp/build -type f -name 'lib*.so*' -exec cp {} /tmp/whisper-libs/ \;
 

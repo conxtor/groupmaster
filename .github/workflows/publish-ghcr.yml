@@ -1,4 +1,4 @@
-name: Publish WAGI images to GHCR
+name: Publish public WAGI linux/amd64 images to GHCR
 
 on:
   workflow_dispatch:
@@ -76,8 +76,35 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.context }}/${{ matrix.dockerfile }}
+          # Production servers use Intel/AMD x86_64. Publish only this target
+          # so every GHCR image has a deterministic production architecture.
+          platforms: linux/amd64
           push: true
           tags: ghcr.io/${{ steps.image.outputs.owner }}/${{ matrix.image }}:${{ inputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/conxtor/groupmaster
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           provenance: false
+
+      - name: Set GHCR package visibility to public
+        env:
+          # GITHUB_TOKEN works when the workflow repository has package admin
+          # access. GHCR_ADMIN_TOKEN can be supplied as an org/repository
+          # secret when GitHub requires an owner-level package permission.
+          GH_TOKEN: ${{ secrets.GHCR_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+          IMAGE_OWNER: ${{ steps.image.outputs.owner }}
+          PACKAGE_NAME: ${{ matrix.image }}
+        run: |
+          response="$(gh api --method PATCH \
+            "/orgs/${IMAGE_OWNER}/packages/container/${PACKAGE_NAME}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -f visibility=public)"
+          visibility="$(printf '%s' "$response" | jq -r '.visibility // empty')"
+          if [ "$visibility" != "public" ]; then
+            echo "GHCR package ${IMAGE_OWNER}/${PACKAGE_NAME} was not made public." >&2
+            printf '%s\n' "$response" >&2
+            exit 1
+          fi
+          echo "GHCR package ${IMAGE_OWNER}/${PACKAGE_NAME} is public."
