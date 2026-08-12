@@ -31,7 +31,9 @@ services:
       - |
         /usr/local/bin/wagi-migrate
         export PGPASSWORD="$${POSTGRES_PASSWORD}"
-        psql -h "$${DB_HOST}" -U "$${DB_USER}" -d "$${POSTGRES_DB}" -v ON_ERROR_STOP=1 -v wagi_db_password="$${WAGI_DB_PASSWORD}" -c "ALTER ROLE wagi_app WITH PASSWORD :'wagi_db_password'"
+        psql -h "$${DB_HOST}" -U "$${DB_USER}" -d "$${POSTGRES_DB}" -v ON_ERROR_STOP=1 -v wagi_db_password="$${WAGI_DB_PASSWORD}" <<'SQL'
+        ALTER ROLE wagi_app WITH PASSWORD :'wagi_db_password';
+        SQL
     depends_on:
       postgres: {condition: service_healthy}
   nats:
@@ -100,14 +102,7 @@ services:
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
     labels:
-      - traefik.enable=true
-      - traefik.http.services.wagi-api.loadbalancer.server.port=8080
-      - traefik.http.routers.wagi-api.rule=Host(`${TRAEFIK_HOST:-conxtor.com}`) && PathPrefix(`/api/`)
-      - traefik.http.routers.wagi-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
-      - traefik.http.routers.wagi-api.tls=true
-      - traefik.http.routers.wagi-api.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
-      - traefik.http.routers.wagi-api.service=wagi-api
-      - traefik.http.routers.wagi-api.priority=100
+      - traefik.enable=false
 
   wa-connector:
     image: ghcr.io/${GHCR_IMAGE_OWNER:-conxtor}/wagi-wa-connector:${GHCR_IMAGE_TAG:-latest}
@@ -364,6 +359,7 @@ services:
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: ""
+      API_INTERNAL_URL: ${API_INTERNAL_URL:-http://api:8080}
       HOSTNAME: 0.0.0.0
     depends_on:
       api: {condition: service_started}
