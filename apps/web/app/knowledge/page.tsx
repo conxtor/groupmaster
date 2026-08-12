@@ -14,6 +14,7 @@ import {
   type TranslationValues,
 } from "../i18n";
 import { AuthGate, apiFetch } from "../auth";
+import { AudioPlayer } from "../media-player";
 
 type Group = { id: string; subject: string; isSelected: boolean; platform?: string; chatType?: string; language?: "de" | "es" | "ca" | "en" | "fr" };
 type KnowledgeSourceMessage = {
@@ -47,6 +48,49 @@ type KnowledgeTopic = { id: string; groupId: string; groupSubject: string; topic
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
+
+function keepUsableSignedMediaUrl(previousValue: string | undefined, nextValue: string | undefined) {
+  if (!previousValue || !nextValue) return nextValue;
+  try {
+    const previousUrl = new URL(previousValue, window.location.origin);
+    const nextUrl = new URL(nextValue, window.location.origin);
+    if (previousUrl.pathname !== nextUrl.pathname || previousUrl.searchParams.get("thumbnail") !== nextUrl.searchParams.get("thumbnail")) return nextValue;
+    const expires = Number(previousUrl.searchParams.get("expires"));
+    if (Number.isFinite(expires) && expires <= Math.floor(Date.now() / 1000) + 60) return nextValue;
+    return previousValue;
+  } catch {
+    return nextValue;
+  }
+}
+
+function collectKnowledgeSources(items: KnowledgeItem[], target: Map<string, KnowledgeSourceMessage>) {
+  for (const item of items) {
+    for (const source of item.sourceMessages ?? []) target.set(source.id, source);
+    collectKnowledgeSources(item.children ?? [], target);
+  }
+}
+
+function stabilizeKnowledgeItem(item: KnowledgeItem, previousSources: Map<string, KnowledgeSourceMessage>): KnowledgeItem {
+  return {
+    ...item,
+    sourceMessages: item.sourceMessages?.map((source) => {
+      const previous = previousSources.get(source.id);
+      if (!previous) return source;
+      return {
+        ...source,
+        mediaUrl: keepUsableSignedMediaUrl(previous.mediaUrl, source.mediaUrl),
+        thumbnailUrl: keepUsableSignedMediaUrl(previous.thumbnailUrl, source.thumbnailUrl),
+      };
+    }),
+    children: item.children?.map((child) => stabilizeKnowledgeItem(child, previousSources)),
+  };
+}
+
+function preserveKnowledgeMedia(previousTopics: KnowledgeTopic[], nextTopics: KnowledgeTopic[]) {
+  const previousSources = new Map<string, KnowledgeSourceMessage>();
+  for (const topic of previousTopics) collectKnowledgeSources(topic.items ?? [], previousSources);
+  return nextTopics.map((topic) => ({ ...topic, items: (topic.items ?? []).map((item) => stabilizeKnowledgeItem(item, previousSources)) }));
+}
 
 function itemTypeLabel(itemType: KnowledgeItem["itemType"], t: Translator) {
   return t(itemType);
@@ -90,15 +134,16 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
   const video = resolveMediaUrl(source.mediaUrl);
   const displayText = source.kind === "audio" && source.transcript ? source.transcript : source.text || source.transcript || t("noText");
   const [imageOpen, setImageOpen] = useState(false);
+  const [videoOpen, setVideoOpen] = useState(false);
 
   useEffect(() => {
-    if (!imageOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") setImageOpen(false); };
+    if (!imageOpen && !videoOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") { setImageOpen(false); setVideoOpen(false); } };
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     document.addEventListener("keydown", onKeyDown);
     return () => { document.body.style.overflow = previousOverflow; document.removeEventListener("keydown", onKeyDown); };
-  }, [imageOpen]);
+  }, [imageOpen, videoOpen]);
 
   const imageCaption = source.mediaUrl ? t("knowledgeSourceImage") : t("mockImageCaption");
   const imageAlt = source.mediaUrl ? t("knowledgeSourceImage") : t("mockImageAlt");
@@ -108,6 +153,7 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
       <time dateTime={source.receivedAt}>{formatKnowledgeDate(source.receivedAt, locale)}</time>
     </div>
     <p className="knowledgeSourceMessageText">{displayText}</p>
+    {source.kind === "audio" && original && <AudioPlayer messageId={source.id} src={original} label={t("originalAudio")} unsupported={t("audioUnsupported")} />}
     {source.kind === "image" && preview && <figure className="knowledgeSourceMessageFigure">
       <button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}>
         <img crossOrigin="use-credentials" src={preview} alt={imageAlt} loading="lazy" />
@@ -115,13 +161,19 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
       <figcaption>{imageCaption}</figcaption>
     </figure>}
     {source.kind === "video" && video && <figure className="knowledgeSourceMessageFigure">
-      <video crossOrigin="use-credentials" className="embeddedVideo" controls preload="metadata" poster={preview || undefined} src={video}>{t("videoUnsupported")}</video>
+      <button className="videoPreviewButton" type="button" onClick={() => setVideoOpen(true)} aria-label={t("openVideo")}><video crossOrigin="use-credentials" className="embeddedVideo" muted playsInline preload="metadata" poster={preview || undefined} style={{ aspectRatio: "16 / 9", minHeight: "180px" }} src={video}>{t("videoUnsupported")}</video></button>
       <figcaption>{t("embeddedVideo")}</figcaption>
     </figure>}
     {imageOpen && original && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={imageAlt} onClick={() => setImageOpen(false)}>
       <div className="imageModal" onClick={(event) => event.stopPropagation()}>
         <button className="imageModalClose" type="button" onClick={() => setImageOpen(false)} aria-label={t("closeImage")}>×</button>
         <img crossOrigin="use-credentials" className="imageModalImage" src={original} alt={imageAlt} />
+      </div>
+    </div>}
+    {videoOpen && video && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={t("embeddedVideo")} onClick={() => setVideoOpen(false)}>
+      <div className="imageModal" onClick={(event) => event.stopPropagation()}>
+        <button className="imageModalClose" type="button" onClick={() => setVideoOpen(false)} aria-label={t("closeVideo")}>×</button>
+        <video crossOrigin="use-credentials" className="videoModalVideo" controls autoPlay preload="metadata" src={video}>{t("videoUnsupported")}</video>
       </div>
     </div>}
   </article>;
@@ -185,7 +237,7 @@ export default function KnowledgePage() {
         const nextTopics = await knowledgeResponse.json() as KnowledgeTopic[];
         if (active) {
           setGroups(nextGroups);
-          setTopics(nextTopics);
+          setTopics((current) => preserveKnowledgeMedia(current, nextTopics));
           setSelectedGroup((current) => current !== "all" && nextGroups.some((group) => group.id === current) ? current : "all");
           setLive(true);
           setError(null);

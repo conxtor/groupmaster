@@ -23,11 +23,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgres://wagi_app:app@localhost:5432
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
 MODEL = os.getenv("AI_MODEL", "heuristic-mvp")
 AI_PROVIDER = os.getenv("AI_PROVIDER", "hybrid").lower()
-PROMPT_VERSION = os.getenv("AI_PROMPT_VERSION", "phase1-v2-precision")
+PROMPT_VERSION = os.getenv("AI_PROMPT_VERSION", "cascade-v4")
 SCHEMA_VERSION = "1.1"
 SUPPORTED_GROUP_LANGUAGES = ("de", "es", "ca", "en", "fr")
 _HERMES_CONFIGURED = os.getenv("AI_HERMES_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-_CONFIGURED_KNOWLEDGE_VERSION = os.getenv("AI_KNOWLEDGE_VERSION", "hierarchy-v3")
+_CONFIGURED_KNOWLEDGE_VERSION = os.getenv("AI_KNOWLEDGE_VERSION", "cascade-v4")
 KNOWLEDGE_REBUILD_VERSION = _CONFIGURED_KNOWLEDGE_VERSION + ("-hermes" if _HERMES_CONFIGURED and not _CONFIGURED_KNOWLEDGE_VERSION.endswith("-hermes") else "")
 KNOWLEDGE_STATE_CONNECTOR = "ai-worker-knowledge"
 EMBEDDING_DIMENSIONS = 384
@@ -45,6 +45,9 @@ HERMES_MODEL = os.getenv("AI_HERMES_MODEL", "hermes-agent").strip()
 HERMES_TIMEOUT_SECONDS = max(5.0, float(os.getenv("AI_HERMES_TIMEOUT_MS", "30000")) / 1000)
 HERMES_REVIEW_ALL = os.getenv("AI_HERMES_REVIEW_ALL", "false").lower() in {"1", "true", "yes", "on"}
 HERMES_MIN_CONFIDENCE = float(os.getenv("AI_HERMES_MIN_CONFIDENCE", "0.78"))
+AI_CONTEXT_MAX_MESSAGES = max(20, int(os.getenv("AI_CONTEXT_MAX_MESSAGES", "80")))
+AI_EVENT_WINDOW_HOURS = max(2.0, float(os.getenv("AI_EVENT_WINDOW_HOURS", "36")))
+AI_EVENT_MIN_CONFIDENCE = min(0.99, max(0.4, float(os.getenv("AI_EVENT_MIN_CONFIDENCE", "0.7"))))
 
 LANGUAGE_MARKERS = {
     "de": {"der", "die", "das", "und", "für", "nicht", "mit", "ist", "sind", "auf", "von", "eine", "einer", "morgen", "heute", "treffen", "danke", "bitte", "auch", "wird", "straße"},
@@ -146,6 +149,7 @@ class Entity(BaseModel):
 
 
 class Event(BaseModel):
+    eventKey: str | None = None
     title: str
     startsAt: str | None = None
     location: str | None = None
@@ -196,6 +200,13 @@ class Analysis(BaseModel):
 class HermesDecision(BaseModel):
     decision: Literal["accept", "reject", "review"]
     topicKey: str | None = None
+    confidence: float = Field(ge=0, le=1)
+    reason: str = ""
+
+
+class HermesEventDecision(BaseModel):
+    decision: Literal["accept", "reject", "review"]
+    event: Event | None = None
     confidence: float = Field(ge=0, le=1)
     reason: str = ""
 
@@ -419,73 +430,162 @@ def reply_target(item: dict) -> str | None:
     return None
 
 
+EVENT_ACTION_TERMS = (
+    "treffen", "wanderung", "meeting", "termin", "event", "fahren", "fahrt", "ausflug", "reserv",
+    "reunión", "reunion", "quedada", "viaje", "excursión", "excursion", "rendez-vous", "sortie",
+    "trobem", "trobada", "viatge", "excursió", "meet", "gather", "go to", "let's go",
+)
+EVENT_TIME_TERMS = (
+    "morgen", "heute", "samstag", "sonntag", "freitag", "montag", "dienstag", "mittwoch", "donnerstag",
+    "mañana", "hoy", "sábado", "domingo", "demà", "avui", "dissabte", "diumenge", "tomorrow", "today",
+    "saturday", "sunday", "demain", "aujourd", "samedi", "dimanche",
+)
+EVENT_CUE_TERMS = ("um", "uhr", "a las", "a la", "a les", "at", "às", "à", "gegen", "around", "vers")
+
+
+def has_any_term(text: str, terms: tuple[str, ...]) -> bool:
+    return any(has_term(text, term) for term in terms)
+
+
+def explicit_time(text: str) -> str | None:
+    match = re.search(r"(?:\b(?:um|a las|a la|a les|at|às|à|gegen|around|vers)\s+|\b)(\d{1,2})(?::(\d{2}))?\s*(?:uhr|h|hrs?|am|pm)?\b", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    if hour > 23:
+        return None
+    return f"{hour:02d}:{match.group(2) or '00'}"
+
+
 def is_event_anchor(text: str) -> bool:
-    normalized = text.lower()
-    return any(word in normalized for word in (
-        "morgen", "heute", "samstag", "sonntag", "treffen", "wanderung", "meeting", "termin",
-        "event", "fahren", "fahrt", "domingo", "dimanche", "reunion", "mañana", "hoy", "sábado", "domingo",
-        "demà", "avui", "dissabte", "diumenge", "tomorrow", "today", "saturday", "sunday", "rendez-vous",
-    ))
+    normalized = " ".join(text.casefold().split())
+    if not normalized or len(normalized) < 10:
+        return False
+    action = has_any_term(normalized, EVENT_ACTION_TERMS)
+    temporal = has_any_term(normalized, EVENT_TIME_TERMS) or explicit_time(normalized) is not None
+    return action and (temporal or has_any_term(normalized, EVENT_CUE_TERMS))
 
 
 def starts_at(text: str) -> str | None:
-    match = re.search(
-        r"\b(morgen|heute|samstag|sonntag|domingo|dimanche|mañana|hoy|sábado|demà|avui|dissabte|diumenge|tomorrow|today|saturday|sunday)\b(?:\s+\w+){0,4}\s+(\d{1,2})(?::(\d{2}))?\s*(?:uhr|h|hrs?)?",
-        text,
+    normalized = " ".join(text.split())
+    weekday = re.search(
+        r"\b(morgen|heute|samstag|sonntag|freitag|montag|dienstag|mittwoch|donnerstag|domingo|dimanche|mañana|hoy|sábado|demà|avui|dissabte|diumenge|tomorrow|today|saturday|sunday|demain|aujourd|samedi)\b",
+        normalized,
         flags=re.IGNORECASE,
     )
-    if not match:
+    clock = explicit_time(normalized)
+    if weekday and clock:
+        return f"{weekday.group(1).capitalize()} {clock}"
+    date = re.search(r"\b(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\b", normalized)
+    if date and clock:
+        return f"{date.group(1)} {clock}"
+    return f"Zeit {clock}" if clock and has_any_term(normalized, EVENT_ACTION_TERMS) else None
+
+
+def event_key_slug(value: str, limit: int = 64) -> str:
+    value = re.sub(r"\b\d{1,2}(?::\d{2})?\b", " ", value.casefold())
+    value = re.sub(r"\b(?:morgen|heute|mañana|hoy|demà|avui|tomorrow|today|demain|aujourd)\b", " ", value)
+    value = re.sub(r"[^a-z0-9à-ÿäöüß]+", "-", value, flags=re.IGNORECASE).strip("-")
+    return value[:limit].strip("-")
+
+
+def stable_event_key(anchor_text: str, location: str | None) -> str:
+    anchor = event_key_slug(anchor_text) or "event"
+    place = event_key_slug(location or "")
+    return f"{anchor}:{place}" if place else anchor
+
+
+def event_evidence(item: dict) -> dict:
+    text = str(item.get("text") or "")
+    return {
+        "action": has_any_term(text, EVENT_ACTION_TERMS),
+        "temporal": has_any_term(text, EVENT_TIME_TERMS) or explicit_time(text) is not None or bool(re.search(r"\b\d{1,2}[./-]\d{1,2}\b", text)),
+        "cue": has_any_term(text, EVENT_CUE_TERMS),
+        "time": starts_at(text),
+        "location": location_details(item),
+    }
+
+
+def item_time(item: dict) -> datetime | None:
+    value = item.get("receivedAt")
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
         return None
-    return f"{match.group(1).capitalize()} {int(match.group(2)):02d}:{match.group(3) or '00'}"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def within_event_window(left: dict, right: dict) -> bool:
+    left_time = item_time(left)
+    right_time = item_time(right)
+    if not left_time or not right_time:
+        return True
+    return abs((left_time - right_time).total_seconds()) <= AI_EVENT_WINDOW_HOURS * 3600
 
 
 def multi_message_events(message_id: str, context: list[dict]) -> list[Event]:
-    ordered = sorted((item for item in context if item.get("id")), key=lambda item: str(item.get("receivedAt") or ""))
+    ordered = sorted((item for item in context if item.get("id")), key=lambda item: item_time(item) or datetime.min.replace(tzinfo=timezone.utc))
+    current = next((item for item in ordered if str(item.get("id")) == str(message_id)), None)
+    if not current:
+        return []
     anchors = [item for item in ordered if item.get("text") and is_event_anchor(str(item["text"]))]
-    locations = [(item, location_details(item)) for item in ordered]
-    locations = [(item, location) for item, location in locations if location]
-    if not anchors or not locations:
-        return []
-
-    anchor = anchors[0]
-    current_location = next(((item, location) for item, location in locations if item.get("id") == message_id), None)
-    if current_location is None:
-        current = next((item for item in ordered if str(item.get("id")) == message_id), None)
-        reply_wa_id = reply_target(current) if current else None
-        current_location = next(
-            ((item, location) for item, location in locations if str(item.get("waMessageId")) == str(reply_wa_id)),
-            None,
-        )
-    location_item, location = current_location or min(
-        locations,
-        key=lambda pair: abs(ordered.index(pair[0]) - ordered.index(anchor)),
-    )
-    source_ids = [str(anchor["id"]), str(location_item["id"])]
-    source_wa_ids = {str(anchor.get("waMessageId")), str(location_item.get("waMessageId"))}
-    for item in ordered:
-        if reply_target(item) in source_wa_ids:
-            source_ids.append(str(item["id"]))
-
-    current = next((item for item in ordered if str(item.get("id")) == message_id), None)
-    current_is_related = message_id in source_ids or (current is not None and reply_target(current) in source_wa_ids)
-    if not current_is_related or len(set(source_ids)) < 2:
-        return []
-
-    anchor_text = str(anchor["text"]).strip()
-    title = f"{anchor_text[:100]} — {location['name']}"
-    return [Event(
-        title=title,
-        startsAt=starts_at(anchor_text),
-        location=location["label"],
-        confidence=0.82,
-        sourceMessageIds=list(dict.fromkeys(source_ids)),
-    )]
+    candidates: list[Event] = []
+    for anchor in anchors:
+        evidence = event_evidence(anchor)
+        nearby = [item for item in ordered if within_event_window(anchor, item)]
+        nearby_locations = [(item, location_details(item)) for item in nearby if location_details(item)]
+        location_item, location = (None, None)
+        if nearby_locations:
+            location_item, location = min(nearby_locations, key=lambda pair: abs((ordered.index(pair[0]) - ordered.index(anchor))))
+        related_ids = [str(anchor["id"])]
+        if location_item:
+            related_ids.append(str(location_item["id"]))
+        anchor_refs = {str(anchor.get("waMessageId")), str(anchor.get("id"))}
+        if location_item:
+            anchor_refs.update({str(location_item.get("waMessageId")), str(location_item.get("id"))})
+        for item in nearby:
+            target = reply_target(item)
+            if target and target in anchor_refs:
+                related_ids.append(str(item["id"]))
+            if item is not anchor and item.get("text") and event_evidence(item)["time"] and within_event_window(anchor, item):
+                related_ids.append(str(item["id"]))
+        related_ids = list(dict.fromkeys(related_ids))
+        current_related = str(current["id"]) in related_ids or str(reply_target(current)) in anchor_refs
+        has_place = location is not None
+        valid = bool(evidence["action"] and (evidence["temporal"] or (has_place and evidence["cue"])))
+        if not valid or not current_related:
+            continue
+        support_time = evidence["time"] or next((event_evidence(item)["time"] for item in nearby if event_evidence(item)["time"]), None)
+        confidence = 0.48
+        confidence += 0.18 if evidence["action"] else 0
+        confidence += 0.18 if evidence["temporal"] or support_time else 0
+        confidence += 0.12 if has_place else 0
+        confidence += 0.06 if len(related_ids) > 1 else 0
+        confidence += 0.04 if any(reply_target(item) in anchor_refs for item in nearby) else 0
+        if confidence < AI_EVENT_MIN_CONFIDENCE:
+            continue
+        anchor_text = " ".join(str(anchor["text"]).split())
+        location_label = location["label"] if location else None
+        title = f"{anchor_text[:140]} — {location_label}" if location_label else anchor_text[:140]
+        candidates.append(Event(
+            eventKey=stable_event_key(anchor_text, location_label),
+            title=title,
+            startsAt=support_time,
+            location=location_label,
+            confidence=round(min(0.98, confidence), 4),
+            sourceMessageIds=related_ids,
+        ))
+    return candidates
 
 
 def heuristic_analysis(message_id: str, text: str, context: list[dict], language: str = "de") -> Analysis:
     normalized = text.strip()
-    keywords = ("morgen", "heute", "treffen", "termin", "event", "wichtig", "ort", "straße", "bahnhof", "meeting", "samstag", "sonntag", "costa", "montserrat", "mañana", "hoy", "reunión", "estación", "lugar", "demà", "avui", "trobem", "estació", "lloc", "tomorrow", "today", "saturday", "sunday", "meeting", "station", "place", "rendez-vous", "demain", "aujourd", "gare", "lieu")
-    hits = sum(1 for word in keywords if word in normalized.lower())
+    keywords = ("morgen", "heute", "treffen", "termin", "event", "wichtig", "ort", "straße", "bahnhof", "meeting", "samstag", "sonntag", "costa", "montserrat", "mañana", "hoy", "reunión", "estación", "lugar", "demà", "avui", "trobem", "estació", "lloc", "tomorrow", "today", "saturday", "sunday", "station", "place", "rendez-vous", "demain", "aujourd", "gare", "lieu")
+    hits = term_hits(normalized, keywords)
     score = min(0.25 + hits * 0.12, 0.98)
     events = multi_message_events(message_id, context)
     if events:
@@ -494,9 +594,9 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
         str(item.get("id")) == message_id and item.get("kind") in {"image", "video", "audio", "document", "location"}
         for item in context
     )
-    if media_signal:
-        score = max(score, 0.55)
-    relevant = score >= 0.45 or bool(events) or media_signal
+    if media_signal and normalized:
+        score = max(score, 0.38)
+    relevant = score >= 0.45 or bool(events) or (media_signal and bool(normalized))
     facts = [Fact(text=normalized, confidence=0.64)] if normalized else []
     entities = []
     for match in re.finditer(r"\b[A-ZÄÖÜ][\wÄÖÜäöüß-]{2,}\b", normalized):
@@ -506,10 +606,6 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
         if match.start() == 0 or candidate.casefold() in {"bitte", "treffen", "morgen", "heute", "danke", "hallo"}:
             continue
         entities.append(Entity(name=candidate, type="mention", confidence=0.55))
-    event = {}
-    event_signal = any(word in normalized.lower() for word in ("morgen", "heute", "termin", "treffen", "mañana", "hoy", "reunión", "demà", "avui", "trobem", "tomorrow", "today", "meeting", "rendez-vous", "demain", "aujourd"))
-    if event_signal:
-        event = {"title": normalized[:120], "confidence": 0.58}
     current = next((item for item in context if str(item.get("id")) == message_id), {})
     location = location_details(current)
     place = {}
@@ -529,7 +625,7 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
         summary=normalized[:180] or "Leere Nachricht ohne Text",
         facts=facts,
         entities=entities[:10],
-        events=events or ([Event(**event)] if event else []),
+        events=events,
         places=[place] if place else [],
         knowledge=knowledge_items_for_message(message_id, normalized, context, entities, [place] if place else [], language),
         provenance=provenance,
@@ -538,14 +634,22 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
 
 
 def deduplicate_events(events: list[Event]) -> list[Event]:
-    merged: dict[tuple[str, str | None, str | None], Event] = {}
+    merged: dict[str, Event] = {}
     for event in events:
-        key = (event.title.strip().lower(), event.startsAt, event.location.strip().lower() if event.location else None)
+        key = event.eventKey or stable_event_key(event.title, event.location)
+        event.eventKey = key
         if key not in merged:
             merged[key] = event
         else:
+            existing = merged[key]
             merged[key].sourceMessageIds = list(dict.fromkeys(merged[key].sourceMessageIds + event.sourceMessageIds))
             merged[key].confidence = max(merged[key].confidence, event.confidence)
+            if event.startsAt and not existing.startsAt:
+                existing.startsAt = event.startsAt
+            if event.location and not existing.location:
+                existing.location = event.location
+            if len(event.title) > len(existing.title):
+                existing.title = event.title
     return list(merged.values())
 
 
@@ -690,6 +794,15 @@ def knowledge_topic_is_supported(topic_key: str, text: str) -> tuple[bool, int, 
     return supported, keyword_count, detail_count
 
 
+def stable_knowledge_item_key(topic_key: str, text: str, entities: list[Entity], places: list[dict], message_id: str) -> str:
+    named = [entity.name for entity in entities[:3]]
+    named.extend(str(place.get("name") or "") for place in places[:2])
+    source = " ".join(named) or text
+    words = [word for word in re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", source.casefold()) if word not in KNOWLEDGE_STOPWORDS and len(word) >= 3]
+    slug = re.sub(r"[^a-z0-9äöüß]+", "-", "-".join(words[:10]), flags=re.IGNORECASE).strip("-")
+    return f"{topic_key}:{slug[:120]}" if slug else f"{topic_key}:{message_id}"
+
+
 def knowledge_items_for_message(message_id: str, text: str, context: list[dict], entities: list[Entity], places: list[dict], language: str = "de") -> list[KnowledgeItem]:
     normalized = " ".join(text.split()).strip()
     if not normalized or not is_informative_text(normalized):
@@ -718,7 +831,7 @@ def knowledge_items_for_message(message_id: str, text: str, context: list[dict],
                 and is_informative_text(" ".join(str(item.get("text") or "").split()))
             )
         source_ids = list(dict.fromkeys([message_id, *related_ids]))[:12]
-        item_key = re.sub(r"[^a-z0-9äöüß]+", "-", normalized.casefold(), flags=re.IGNORECASE).strip("-")[:180] or message_id
+        item_key = stable_knowledge_item_key(topic_key, normalized, entities, places, message_id)
         confidence = min(0.96, 0.7 + 0.04 * min(keyword_count, 3) + 0.04 * min(detail_count, 3) + 0.04 * min(len(source_ids) - 1, 3))
         if topic_key in {"places", "entities"}:
             confidence = min(0.96, confidence + 0.04)
@@ -769,6 +882,31 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
     normalized = " ".join(text.split()).strip()
     if not group_id or not is_informative_text(normalized):
         return items
+    try:
+        aliases = await db.fetch(
+            "SELECT alias, canonical_key, topic_key FROM ai_canonical_aliases WHERE group_id=$1 ORDER BY updated_at DESC",
+            group_id,
+        )
+    except Exception:
+        aliases = []
+    canonical_items = list(items)
+    for alias_row in aliases:
+        alias = str(alias_row["alias"] or "").strip()
+        topic_key = str(alias_row["topic_key"] or "").strip()
+        canonical_key = str(alias_row["canonical_key"] or "").strip()
+        if not alias or not canonical_key or topic_key not in SEMANTIC_TOPIC_DESCRIPTIONS:
+            continue
+        if has_term(normalized, alias) and not any(item.topicKey == topic_key and item.itemKey == f"canonical:{canonical_key}" for item in canonical_items):
+            canonical_items.append(KnowledgeItem(
+                topicKey=topic_key,
+                topicTitle=localized_topic_title(topic_key, language),
+                itemKey=f"canonical:{canonical_key}",
+                itemType="entity" if topic_key in {"people", "places"} else "insight",
+                content=f"{canonical_key}: {normalized}",
+                confidence=0.9,
+                sourceMessageIds=[message_id],
+            ))
+    items = canonical_items
     vector = await encoder.embed(normalized)
     if vector is None:
         return items
@@ -797,7 +935,7 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
         KnowledgeItem(
             topicKey=topic_key,
             topicTitle=localized_topic_title(topic_key, language),
-            itemKey=re.sub(r"[^a-z0-9äöüß]+", "-", normalized.casefold(), flags=re.IGNORECASE).strip("-")[:180] or message_id,
+            itemKey=stable_knowledge_item_key(topic_key, normalized, [], [], message_id),
             itemType="insight" if existing else "fact",
             content=normalized,
             confidence=round(min(0.95, max(0.78, score)), 4),
@@ -828,6 +966,117 @@ async def verify_knowledge_items(reviewer: HermesReviewer, text: str, language: 
         item.confidence = round(max(item.confidence, decision.confidence), 4)
         verified.append(item)
     return verified
+
+
+async def load_ai_feedback(db, group_id: str | None, message_id: str) -> list[dict]:
+    if not group_id:
+        return []
+    try:
+        rows = await db.fetch(
+            """SELECT target_type, target_key, decision, correction, note
+               FROM ai_feedback
+               WHERE group_id=$1 AND message_id=$2::uuid
+               ORDER BY created_at ASC""",
+            group_id, message_id,
+        )
+    except Exception:
+        # Allows a worker to start during a rolling deployment before the
+        # optional feedback migration has been applied.
+        return []
+    result = []
+    for row in rows:
+        correction = row["correction"]
+        if isinstance(correction, str):
+            try:
+                correction = json.loads(correction)
+            except json.JSONDecodeError:
+                correction = {}
+        result.append({
+            "targetType": str(row["target_type"]),
+            "targetKey": str(row["target_key"]),
+            "decision": str(row["decision"]),
+            "correction": correction if isinstance(correction, dict) else {},
+            "note": str(row["note"] or ""),
+        })
+    return result
+
+
+def feedback_target_matches(target_key: str, *values: str | None) -> bool:
+    normalized = target_key.casefold().strip()
+    return normalized in {str(value).casefold().strip() for value in values if value}
+
+
+def apply_feedback_overrides(analysis: Analysis, feedback: list[dict], language: str) -> tuple[Analysis, set[str]]:
+    rejected_knowledge: set[str] = set()
+    for item in feedback:
+        target_type = item["targetType"]
+        target_key = item["targetKey"]
+        decision = item["decision"]
+        correction = item["correction"]
+        if target_type == "relevance" and feedback_target_matches(target_key, analysis.messageId, "message", "*"):
+            if decision == "reject" or correction.get("relevant") is False:
+                analysis.relevant = False
+                analysis.relevanceScore = min(analysis.relevanceScore, 0.2)
+            elif decision in {"accept", "correct"}:
+                analysis.relevant = True
+                analysis.relevanceScore = max(analysis.relevanceScore, float(correction.get("relevanceScore") or 0.85))
+        elif target_type == "event":
+            next_events: list[Event] = []
+            for event in analysis.events:
+                matches = feedback_target_matches(target_key, event.eventKey, event.title, analysis.messageId) or target_key in event.sourceMessageIds
+                if not matches:
+                    next_events.append(event)
+                    continue
+                if decision == "reject":
+                    continue
+                if decision == "correct" and isinstance(correction.get("event"), dict):
+                    corrected = dict(correction["event"])
+                    corrected.setdefault("eventKey", event.eventKey)
+                    corrected.setdefault("sourceMessageIds", event.sourceMessageIds)
+                    try:
+                        next_events.append(Event.model_validate(corrected))
+                    except Exception:
+                        next_events.append(event)
+                else:
+                    event.confidence = max(event.confidence, float(correction.get("confidence") or 0.9))
+                    next_events.append(event)
+            analysis.events = next_events
+        elif target_type == "knowledge":
+            next_items: list[KnowledgeItem] = []
+            for knowledge in analysis.knowledge:
+                matches = feedback_target_matches(target_key, knowledge.itemKey, knowledge.topicKey, knowledge.content) or target_key in knowledge.sourceMessageIds
+                if not matches:
+                    next_items.append(knowledge)
+                    continue
+                if decision == "reject":
+                    rejected_knowledge.add(knowledge.itemKey)
+                    continue
+                if decision == "correct":
+                    if isinstance(correction.get("content"), str) and correction["content"].strip():
+                        knowledge.content = correction["content"].strip()
+                    if str(correction.get("topicKey") or "") in SEMANTIC_TOPIC_DESCRIPTIONS:
+                        knowledge.topicKey = str(correction["topicKey"])
+                        knowledge.topicTitle = localized_topic_title(knowledge.topicKey, language)
+                    if str(correction.get("canonicalKey") or "").strip():
+                        knowledge.itemKey = f"canonical:{str(correction['canonicalKey']).strip()}"
+                knowledge.confidence = max(knowledge.confidence, float(correction.get("confidence") or 0.9))
+                next_items.append(knowledge)
+            analysis.knowledge = next_items
+    if feedback:
+        source_ids = [analysis.messageId]
+        analysis.provenance.append(Provenance(field="feedback", sourceMessageIds=source_ids, confidence=0.95))
+    return analysis, rejected_knowledge
+
+
+async def remove_rejected_knowledge(db, group_id: str | None, rejected_keys: set[str]):
+    if not group_id or not rejected_keys:
+        return
+    for item_key in rejected_keys:
+        await db.execute(
+            """DELETE FROM knowledge_items ki USING knowledge_topics kt
+               WHERE ki.topic_id=kt.id AND kt.group_id=$1 AND ki.item_key=$2""",
+            group_id, item_key,
+        )
 
 
 class AIAdapter:
@@ -903,19 +1152,6 @@ async def upsert_knowledge(db, group_id: str | None, items: list[KnowledgeItem],
                    ORDER BY embedding <=> $2::vector LIMIT 1""",
                 topic["id"], embedding_pg, SEMANTIC_MERGE_THRESHOLD,
             )
-        # A topic is itself a meaningful semantic boundary. If a new post is
-        # clearly about the same classified topic but is not close enough to
-        # the current summary vector, keep it as a child of the newest topic
-        # summary instead of creating another flat entry.
-        if not semantic_match:
-            semantic_match = await db.fetchrow(
-                """SELECT id, item_key, content, item_type, source_message_ids, confidence
-                   FROM knowledge_items
-                   WHERE topic_id=$1 AND parent_item_id IS NULL
-                   ORDER BY updated_at DESC LIMIT 1""",
-                topic["id"],
-            )
-
         if exact_match:
             existing_sources = source_id_list(exact_match["source_message_ids"])
             merged_sources = list(dict.fromkeys([*existing_sources, *item.sourceMessageIds]))[:50]
@@ -1100,6 +1336,41 @@ async def publish_ai_job(js, row):
     )
 
 
+def knowledge_graph_key(prefix: str, value: str) -> str:
+    return f"{prefix}:{event_key_slug(value, 96) or 'unknown'}"
+
+
+async def upsert_knowledge_graph(db, group_id: str | None, analysis: Analysis):
+    """Persist only source-backed associations for later navigation/search."""
+    if not group_id:
+        return
+    entities = [knowledge_graph_key("entity", entity.name) for entity in analysis.entities if entity.name.strip()]
+    places = [knowledge_graph_key("place", str(place.get("name") or "")) for place in analysis.places if str(place.get("name") or "").strip()]
+    events = [knowledge_graph_key("event", event.eventKey or event.title) for event in analysis.events]
+    source_ids = json.dumps([analysis.messageId])
+    edges: list[tuple[str, str, str, float]] = []
+    for index, source in enumerate(entities):
+        for target in entities[index + 1:]:
+            edges.append((source, target, "co-mentioned", 0.72))
+        for target in places:
+            edges.append((source, target, "associated-with", 0.78))
+        for target in events:
+            edges.append((source, target, "mentioned-in-event", 0.76))
+    for source in places:
+        for target in events:
+            edges.append((source, target, "associated-with", 0.8))
+    for source, target, relation, confidence in edges:
+        await db.execute(
+            """INSERT INTO ai_knowledge_edges (group_id, source_key, target_key, relation, source_message_ids, confidence)
+               VALUES ($1,$2,$3,$4,$5::jsonb,$6)
+               ON CONFLICT (group_id, source_key, target_key, relation) DO UPDATE SET
+                 source_message_ids=(SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
+                   FROM jsonb_array_elements(ai_knowledge_edges.source_message_ids || EXCLUDED.source_message_ids) AS merged(value)),
+                 confidence=GREATEST(ai_knowledge_edges.confidence, EXCLUDED.confidence), updated_at=NOW()""",
+            group_id, source, target, relation, source_ids, confidence,
+        )
+
+
 async def main():
     db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=4)
     nc = await nats.connect(NATS_URL)
@@ -1130,11 +1401,16 @@ async def main():
         group_id = data.get("groupId") or (current["groupId"] if current else None)
         context: list[dict] = []
         if group_id:
+            anchor_received_at = current["receivedAt"] if current else datetime.now(timezone.utc)
             rows = await db.fetch(
                 """SELECT id::text AS id, wa_message_id AS "waMessageId", group_id AS "groupId", kind, text, received_at AS "receivedAt",
                           CASE WHEN raw ? 'reply_to_message' THEN group_id || ':' || (raw #>> '{reply_to_message,message_id}') END AS "replyToWaMessageId", raw
-                   FROM messages WHERE group_id = $1 ORDER BY received_at DESC LIMIT 25""",
-                group_id,
+                   FROM messages
+                   WHERE group_id = $1
+                     AND received_at BETWEEN $2::timestamptz - ($3 * INTERVAL '1 hour')
+                                         AND $2::timestamptz + ($3 * INTERVAL '1 hour')
+                   ORDER BY received_at ASC LIMIT $4""",
+                group_id, anchor_received_at, AI_EVENT_WINDOW_HOURS, AI_CONTEXT_MAX_MESSAGES,
             )
             context = [dict(row) for row in rows]
         if current:
@@ -1159,6 +1435,9 @@ async def main():
             ))
         analysis.knowledge = await semantic_enrich_knowledge(db, encoder, group_id, message_id, text, group_language, analysis.knowledge)
         analysis.knowledge = await verify_knowledge_items(hermes_reviewer, text, group_language, analysis.knowledge)
+        feedback = await load_ai_feedback(db, group_id, message_id)
+        analysis, rejected_knowledge = apply_feedback_overrides(analysis, feedback, group_language)
+        await remove_rejected_knowledge(db, group_id, rejected_knowledge)
         if analysis.knowledge and hermes_reviewer.enabled:
             analysis.provenance.append(Provenance(field="knowledge", sourceMessageIds=[message_id], confidence=max(item.confidence for item in analysis.knowledge)))
         serialized_analysis = analysis.model_dump(mode="json")
@@ -1175,6 +1454,7 @@ async def main():
             analysis.schemaVersion, analysis.promptVersion, json.dumps(serialized_analysis["provenance"]), json.dumps(serialized_analysis["conflicts"]),
         )
         await upsert_knowledge(db, group_id, analysis.knowledge, encoder)
+        await upsert_knowledge_graph(db, group_id, analysis)
         await publish(js, "ai.messages.analyzed", "ai.messages.analyzed", serialized_analysis)
 
     async def on_message(message):
@@ -1191,6 +1471,24 @@ async def main():
         except Exception as error:
             log.exception("failed to analyze message")
             await retry_or_dead_letter(db, js, message, payload, "ai.messages", error)
+
+    async def on_feedback(message):
+        payload = {}
+        try:
+            payload = json.loads(message.data)
+            data = payload.get("data", payload)
+            event_id = payload_id(payload, message.data)
+            if not await claim_event(db, "ai.feedback", event_id, message.subject, payload):
+                await message.ack()
+                return
+            message_id = data.get("messageId")
+            if message_id:
+                await process_analysis(db, analyze_message, {"data": {"messageId": message_id, "force": True}}, "feedback", force=True)
+            await mark_processed(db, "ai.feedback", event_id)
+            await message.ack()
+        except Exception as error:
+            log.exception("failed to consume AI feedback")
+            await retry_or_dead_letter(db, js, message, payload, "ai.feedback", error)
 
     async def on_transcript(message):
         payload = {}
@@ -1353,17 +1651,27 @@ async def main():
             await asyncio.sleep(5)
 
     knowledge_rebuild_required = await prepare_knowledge_rebuild(db)
-    await refresh_knowledge_topic_titles(db)
-    await backfill_existing_knowledge(force=knowledge_rebuild_required)
-    if knowledge_rebuild_required:
-        await mark_knowledge_rebuild_complete(db)
     await js.subscribe("wa.messages.received", durable="WAGI_AI_MESSAGES", stream="WAGI_EVENTS", cb=on_message)
+    await js.subscribe("ai.feedback.created", durable="WAGI_AI_FEEDBACK", stream="WAGI_EVENTS", cb=on_feedback)
     await js.subscribe("media.audio.transcribed", durable="WAGI_AI_TRANSCRIPTS", stream="WAGI_EVENTS", cb=on_transcript)
     await js.subscribe("media.image.analyzed", durable="WAGI_AI_IMAGES", stream="WAGI_EVENTS", cb=on_image)
     await js.subscribe("media.document.analyzed", durable="WAGI_AI_DOCUMENTS", stream="WAGI_EVENTS", cb=on_document)
     await js.subscribe("replay.requested", durable="WAGI_AI_REPLAY", stream="WAGI_EVENTS", cb=on_replay)
+
+    async def run_knowledge_startup():
+        """Refresh/rebuild the knowledge base without blocking live ingestion."""
+        try:
+            await refresh_knowledge_topic_titles(db)
+            await backfill_existing_knowledge(force=knowledge_rebuild_required)
+            if knowledge_rebuild_required:
+                await mark_knowledge_rebuild_complete(db)
+            log.info("knowledge startup refresh completed (rebuild=%s)", knowledge_rebuild_required)
+        except Exception:
+            log.exception("knowledge startup refresh failed; live consumers remain active")
+
+    asyncio.create_task(run_knowledge_startup())
     asyncio.create_task(recover_ai_jobs())
-    log.info("AI worker listening with durable consumers for messages, audio, images, documents and replay (provider=%s, prompt=%s)", AI_PROVIDER, PROMPT_VERSION)
+    log.info("AI worker listening with durable consumers for messages, audio, images, documents, replay and feedback (provider=%s, prompt=%s)", AI_PROVIDER, PROMPT_VERSION)
     await asyncio.Event().wait()
 
 

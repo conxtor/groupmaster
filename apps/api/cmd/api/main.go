@@ -34,6 +34,10 @@ type app struct {
 	waOnboardingSlots int
 	tgOnboardingSlots int
 	mediaCleanupToken string
+	minioEndpoint     string
+	minioAccessKey    string
+	minioSecretKey    string
+	minioBucket       string
 }
 
 type group struct {
@@ -104,6 +108,16 @@ type audioJobView struct {
 	Error         *string    `json:"error,omitempty"`
 	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
+}
+
+type aiFeedbackRequest struct {
+	MessageID  string         `json:"messageId"`
+	GroupID    string         `json:"groupId,omitempty"`
+	TargetType string         `json:"targetType"`
+	TargetKey  string         `json:"targetKey"`
+	Decision   string         `json:"decision"`
+	Correction map[string]any `json:"correction,omitempty"`
+	Note       string         `json:"note,omitempty"`
 }
 
 type connectorStatusView struct {
@@ -350,9 +364,11 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 			item.AudioAttempts = *audioAttempts
 		}
 		item.ImageURL = mockImageURL(item.GroupID, item.Text)
-		if (item.Kind == "image" || item.Kind == "video") && item.HasMedia && (item.Platform == "telegram" || !strings.HasPrefix(item.GroupID, "120363mock")) {
+		if (item.Kind == "image" || item.Kind == "video" || item.Kind == "audio") && item.HasMedia && (item.Platform == "telegram" || !strings.HasPrefix(item.GroupID, "120363mock")) {
 			item.MediaURL = a.signedMediaURL(item.ID, false)
-			item.ThumbnailURL = a.signedMediaURL(item.ID, true)
+			if item.Kind == "image" || item.Kind == "video" {
+				item.ThumbnailURL = a.signedMediaURL(item.ID, true)
+			}
 		} else if objectPath != nil && *objectPath != "" {
 			item.MediaURL = a.signedMediaURL(item.ID, false)
 			if thumbnailPath != nil && *thumbnailPath != "" {
@@ -422,7 +438,7 @@ func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
 			SELECT object_path, thumbnail_path, mime FROM media_objects
 			WHERE message_id = m.id ORDER BY updated_at DESC LIMIT 1
 		) mo ON TRUE
-		WHERE m.id = $1::uuid AND m.has_media = TRUE AND m.kind IN ('image', 'video') AND %s AND %s`, visibility, selection), mediaArgs...).
+		WHERE m.id = $1::uuid AND m.has_media = TRUE AND m.kind IN ('image', 'video', 'audio') AND %s AND %s`, visibility, selection), mediaArgs...).
 		Scan(&mediaKey, &mediaMime, &platform, &waMessageID, &kind, &objectPath, &thumbnailPath, &storedMime)
 	if err == pgx.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "media not found"})
@@ -591,6 +607,99 @@ func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, result)
 }
 
+func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	user, ok := a.requireUser(w, r)
+	if !ok {
+		return
+	}
+	var request aiFeedbackRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024)).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	request.MessageID = strings.TrimSpace(request.MessageID)
+	request.TargetType = strings.TrimSpace(request.TargetType)
+	request.TargetKey = strings.TrimSpace(request.TargetKey)
+	request.Decision = strings.TrimSpace(request.Decision)
+	if _, err := uuid.Parse(request.MessageID); err != nil || request.TargetKey == "" || len(request.TargetKey) > 240 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "messageId and targetKey are required"})
+		return
+	}
+	if request.TargetType != "relevance" && request.TargetType != "event" && request.TargetType != "knowledge" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "targetType must be relevance, event or knowledge"})
+		return
+	}
+	if request.Decision != "accept" && request.Decision != "reject" && request.Decision != "correct" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decision must be accept, reject or correct"})
+		return
+	}
+	var groupID string
+	if err := a.db.QueryRow(r.Context(), `SELECT group_id FROM messages WHERE id=$1::uuid`, request.MessageID).Scan(&groupID); err != nil {
+		if err == pgx.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "message not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "message access could not be checked"})
+		return
+	}
+	if request.GroupID != "" && request.GroupID != groupID {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "groupId does not match message"})
+		return
+	}
+	if !user.isAdmin() {
+		var canRead bool
+		if err := a.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM user_group_access WHERE user_id=$1::uuid AND group_id=$2 AND can_read=TRUE)`, user.ID, groupID).Scan(&canRead); err != nil || !canRead {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "message is not visible to this user"})
+			return
+		}
+	}
+	correction := request.Correction
+	if correction == nil {
+		correction = map[string]any{}
+	}
+	correctionJSON, err := json.Marshal(correction)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid correction"})
+		return
+	}
+	var feedbackID string
+	if err := a.db.QueryRow(r.Context(), `
+		INSERT INTO ai_feedback (user_id, group_id, message_id, target_type, target_key, decision, correction, note)
+		VALUES ($1::uuid,$2,$3::uuid,$4,$5,$6,$7::jsonb,NULLIF($8,'')) RETURNING id::text`,
+		user.ID, groupID, request.MessageID, request.TargetType, request.TargetKey, request.Decision, correctionJSON, strings.TrimSpace(request.Note)).Scan(&feedbackID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "feedback could not be saved"})
+		return
+	}
+	if request.TargetType == "knowledge" {
+		alias, _ := correction["alias"].(string)
+		canonicalKey, _ := correction["canonicalKey"].(string)
+		topicKey, _ := correction["topicKey"].(string)
+		alias = strings.TrimSpace(alias)
+		canonicalKey = strings.TrimSpace(canonicalKey)
+		topicKey = strings.TrimSpace(topicKey)
+		if alias != "" && canonicalKey != "" {
+			_, _ = a.db.Exec(r.Context(), `
+				INSERT INTO ai_canonical_aliases (group_id, alias, canonical_key, topic_key, kind, source_feedback_id)
+				VALUES ($1,$2,$3,NULLIF($4,''),'knowledge',$5::uuid)
+				ON CONFLICT (group_id, LOWER(alias), kind) DO UPDATE SET canonical_key=EXCLUDED.canonical_key,
+				 topic_key=EXCLUDED.topic_key, source_feedback_id=EXCLUDED.source_feedback_id, updated_at=NOW()`,
+				groupID, alias, canonicalKey, topicKey, feedbackID)
+		}
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"id": uuid.NewString(), "type": "ai.feedback.created", "occurredAt": time.Now().UTC(), "source": "api",
+		"data": map[string]any{"feedbackId": feedbackID, "messageId": request.MessageID, "groupId": groupID, "targetType": request.TargetType},
+	})
+	if err := a.nc.Publish("ai.feedback.created", payload); err != nil {
+		log.Printf("AI feedback event publish failed: %v", err)
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": feedbackID, "messageId": request.MessageID, "groupId": groupID, "status": "queued"})
+}
+
 func collectKnowledgeSourceIDs(items []knowledgeItem, ids map[string]struct{}) {
 	for _, item := range items {
 		for _, sourceID := range item.SourceMessageIDs {
@@ -611,11 +720,13 @@ func (a *app) hydrateKnowledgeItems(items []knowledgeItem, sources map[string]kn
 			if !ok {
 				continue
 			}
-			if source.Kind == "image" || source.Kind == "video" {
+			if source.Kind == "image" || source.Kind == "video" || source.Kind == "audio" {
 				source.ImageURL = mockImageURL(source.GroupID, source.Text)
 				if source.HasMedia && !strings.HasPrefix(source.GroupID, "120363mock") {
 					source.MediaURL = a.signedMediaURL(source.ID, false)
-					source.ThumbnailURL = a.signedMediaURL(source.ID, true)
+					if source.Kind == "image" || source.Kind == "video" {
+						source.ThumbnailURL = a.signedMediaURL(source.ID, true)
+					}
 				}
 			}
 			item.SourceMessages = append(item.SourceMessages, source)
@@ -1092,6 +1203,10 @@ func main() {
 		waOnboardingSlots: envInt("WA_ONBOARDING_SLOTS", 1),
 		tgOnboardingSlots: envInt("TG_ONBOARDING_SLOTS", 1),
 		mediaCleanupToken: env("MEDIA_CLEANUP_TOKEN", ""),
+		minioEndpoint:     env("MINIO_ENDPOINT", "http://minio:9000"),
+		minioAccessKey:    env("MINIO_ACCESS_KEY", env("MINIO_ROOT_USER", "minio")),
+		minioSecretKey:    env("MINIO_SECRET_KEY", env("MINIO_ROOT_PASSWORD", "miniosecret")),
+		minioBucket:       env("MINIO_BUCKET", "wa-media"),
 	}
 	if err := a.bootstrapAdmin(); err != nil {
 		log.Fatal(err)
@@ -1115,6 +1230,7 @@ func main() {
 	mux.HandleFunc("/api/v1/messages", requireAuthenticated(a, a.messages))
 	mux.HandleFunc("/api/v1/media/", requireAuthenticated(a, a.mediaImage))
 	mux.HandleFunc("/api/v1/knowledge", requireAuthenticated(a, a.knowledge))
+	mux.HandleFunc("/api/v1/ai/feedback", requireAuthenticated(a, a.aiFeedback))
 	mux.HandleFunc("/api/v1/audio/jobs", requireAuthenticated(a, a.audioJobs))
 	mux.HandleFunc("/api/v1/audio/jobs/", requireAuthenticated(a, a.audioJobAction))
 	mux.HandleFunc("/api/v1/replays", requireAuthenticated(a, a.replays))

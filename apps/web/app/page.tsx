@@ -5,6 +5,7 @@ import Link from "next/link";
 import EventMap from "./event-map";
 import { buildGroupHierarchy, type GroupHierarchyNode } from "./group-hierarchy";
 import { AuthGate, apiFetch } from "./auth";
+import { AudioPlayer } from "./media-player";
 import {
   detectBrowserLocale,
   isSupportedLocale,
@@ -25,6 +26,33 @@ type Analysis = { relevant?: boolean; score?: number; summary?: string; places?:
 type Group = { id: string; subject: string; participantCount: number; isSelected: boolean; discoveredAt: string; platform?: "whatsapp" | "telegram"; chatType?: "group" | "supergroup" | "channel" | "topic"; language?: "de" | "es" | "ca" | "en" | "fr"; parentGroupId?: string; topicId?: number };
 type Message = { id: string; groupId: string; groupSubject: string; waMessageId?: string; senderJid: string; senderName?: string; kind: string; text?: string; replyToWaMessageId?: string; platform?: string; imageUrl?: string; mediaUrl?: string; thumbnailUrl?: string; transcript?: string; audioStatus?: string; audioJobId?: string; audioAttempts?: number; audioError?: string; audioNextAttemptAt?: string; receivedAt: string; hasMedia: boolean; analysis?: Analysis };
 type MessageNode = Message & { children: MessageNode[] };
+
+function keepUsableSignedMediaUrl(previousValue: string | undefined, nextValue: string | undefined) {
+  if (!previousValue || !nextValue) return nextValue;
+  try {
+    const previousUrl = new URL(previousValue, window.location.origin);
+    const nextUrl = new URL(nextValue, window.location.origin);
+    if (previousUrl.pathname !== nextUrl.pathname || previousUrl.searchParams.get("thumbnail") !== nextUrl.searchParams.get("thumbnail")) return nextValue;
+    const expires = Number(previousUrl.searchParams.get("expires"));
+    if (Number.isFinite(expires) && expires <= Math.floor(Date.now() / 1000) + 60) return nextValue;
+    return previousValue;
+  } catch {
+    return nextValue;
+  }
+}
+
+function preserveMessageMedia(previousMessages: Message[], nextMessages: Message[]) {
+  const previousByID = new Map(previousMessages.map((message) => [message.id, message]));
+  return nextMessages.map((message) => {
+    const previous = previousByID.get(message.id);
+    if (!previous) return message;
+    return {
+      ...message,
+      mediaUrl: keepUsableSignedMediaUrl(previous.mediaUrl, message.mediaUrl),
+      thumbnailUrl: keepUsableSignedMediaUrl(previous.thumbnailUrl, message.thumbnailUrl),
+    };
+  });
+}
 type EventVersion = { event: Event; place?: Place; updatedAt: string; sourceMessageIds: string[]; updateMessage?: Message };
 type EventRecord = { key: string; groupId: string; groupSubject: string; groupPlatform?: string; versions: EventVersion[] };
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
@@ -244,32 +272,35 @@ function EventBoard({ events, messages, locale }: { events: EventRecord[]; messa
   );
 }
 
-function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscriptSaved }: { message: MessageNode; locale: Locale; t: Translator; depth?: number; onRetryAudio?: (message: Message) => Promise<void>; onTranscriptSaved?: (messageId: string, transcript: string) => Promise<void> }) {
+function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscriptSaved, onFeedback }: { message: MessageNode; locale: Locale; t: Translator; depth?: number; onRetryAudio?: (message: Message) => Promise<void>; onTranscriptSaved?: (messageId: string, transcript: string) => Promise<void>; onFeedback?: (messageId: string, decision: "accept" | "reject") => Promise<void> }) {
   const source = imageSource(message);
   const original = resolveMediaUrl(message.mediaUrl) ?? source;
   const video = videoSource(message);
   const displayText = message.kind === "audio" && message.transcript ? message.transcript : message.text ?? message.transcript ?? t("noText");
   const [imageOpen, setImageOpen] = useState(false);
+  const [videoOpen, setVideoOpen] = useState(false);
   const [transcriptDraft, setTranscriptDraft] = useState(message.transcript ?? "");
   const [savingTranscript, setSavingTranscript] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [feedbackSaved, setFeedbackSaved] = useState(false);
 
   useEffect(() => setTranscriptDraft(message.transcript ?? ""), [message.transcript]);
 
   useEffect(() => {
-    if (!imageOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") setImageOpen(false); };
+    if (!imageOpen && !videoOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") { setImageOpen(false); setVideoOpen(false); } };
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     document.addEventListener("keydown", onKeyDown);
     return () => { document.body.style.overflow = previousOverflow; document.removeEventListener("keydown", onKeyDown); };
-  }, [imageOpen]);
+  }, [imageOpen, videoOpen]);
 
   return <>
     <article className={`message ${depth > 0 ? "messageReply" : ""}`}>
       <div className="messageMeta"><span className="avatar small">{(message.senderName ?? "?").slice(0, 1)}</span><span><strong>{message.senderName ?? message.senderJid}</strong><small>{message.platform === "telegram" ? "Telegram" : "WhatsApp"} · {messageGroupSubject(message, t)} · {time(message.receivedAt, locale)}</small></span><span className={`kind ${message.kind}`}>{kindLabel(message.kind, locale)}</span></div>
       {message.replyToWaMessageId && <p className="replyRef">{t("replyTo", { id: message.replyToWaMessageId })}</p>}
       <p className="messageText">{displayText}</p>
+      {message.kind === "audio" && original && <AudioPlayer messageId={message.id} src={original} label={t("originalAudio")} unsupported={t("audioUnsupported")} />}
       {(message.kind === "audio" || message.audioStatus || message.transcript) && <div className={`audioJobPanel ${message.audioStatus === "failed" ? "failed" : ""}`}>
         <div className="audioJobHead"><strong>{t("audioStatus")}</strong><span>{audioStatusLabel(message.audioStatus, t)}</span></div>
         {typeof message.audioAttempts === "number" && <small>{t("audioAttempts", { count: message.audioAttempts })}</small>}
@@ -279,14 +310,20 @@ function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscript
         {(message.transcript || message.audioJobId) && <details className="transcriptReview" open={Boolean(message.transcript)}><summary>{t("reviewTranscript")}</summary><textarea value={transcriptDraft} onChange={(event) => setTranscriptDraft(event.target.value)} placeholder={t("transcriptPlaceholder")} /><button className="primaryButton" type="button" disabled={!onTranscriptSaved || !transcriptDraft.trim() || savingTranscript} onClick={async () => { if (!onTranscriptSaved) return; setActionError(null); setSavingTranscript(true); try { await onTranscriptSaved(message.id, transcriptDraft.trim()); } catch (error) { setActionError(error instanceof Error ? error.message : t("connectorError")); } finally { setSavingTranscript(false); } }}>{savingTranscript ? t("retryingAudio") : t("saveTranscript")}</button></details>}
       </div>}
       {message.kind === "image" && source && <figure className="imagePreview"><button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}><img crossOrigin="use-credentials" src={source} alt={message.text ?? (message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageAlt"))} loading="lazy" /></button><figcaption>{message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageCaption")}</figcaption></figure>}
-      {message.kind === "video" && video && <figure className="videoPreview"><video crossOrigin="use-credentials" controls preload="metadata" poster={source || undefined} src={video}>{t("videoUnsupported")}</video><figcaption>{t("embeddedVideo")}</figcaption></figure>}
-      {message.analysis?.summary && <div className="analysis"><span className="signal">● {message.analysis.relevant === false ? t("lowRelevance") : t("relevant")}</span><span>{message.analysis.summary}</span></div>}
-      {message.children.length > 0 && <div className="messageReplies">{message.children.map((child) => <MessageCard key={child.id} message={child} locale={locale} t={t} depth={depth + 1} onRetryAudio={onRetryAudio} onTranscriptSaved={onTranscriptSaved} />)}</div>}
+      {message.kind === "video" && video && <figure className="videoPreview"><button className="videoPreviewButton" type="button" onClick={() => setVideoOpen(true)} aria-label={t("openVideo")}><video crossOrigin="use-credentials" muted playsInline preload="metadata" poster={source || undefined} style={{ aspectRatio: "16 / 9", minHeight: "180px" }} src={video}>{t("videoUnsupported")}</video></button><figcaption>{t("embeddedVideo")}</figcaption></figure>}
+      {message.analysis?.summary && <div className="analysis"><span className="signal">● {message.analysis.relevant === false ? t("lowRelevance") : t("relevant")}</span><span>{message.analysis.summary}</span>{onFeedback && <span className="analysisFeedback"><button className="textButton" type="button" onClick={async () => { await onFeedback(message.id, "accept"); setFeedbackSaved(true); }}>{t("markRelevant")}</button><button className="textButton" type="button" onClick={async () => { await onFeedback(message.id, "reject"); setFeedbackSaved(true); }}>{t("markNotRelevant")}</button>{feedbackSaved && <small>{t("feedbackSaved")}</small>}</span>}</div>}
+      {message.children.length > 0 && <div className="messageReplies">{message.children.map((child) => <MessageCard key={child.id} message={child} locale={locale} t={t} depth={depth + 1} onRetryAudio={onRetryAudio} onTranscriptSaved={onTranscriptSaved} onFeedback={onFeedback} />)}</div>}
     </article>
     {imageOpen && original && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={message.text ?? t("mockImageAlt")} onClick={() => setImageOpen(false)}>
       <div className="imageModal" onClick={(event) => event.stopPropagation()}>
         <button className="imageModalClose" type="button" onClick={() => setImageOpen(false)} aria-label={t("closeImage")}>×</button>
         <img crossOrigin="use-credentials" className="imageModalImage" src={original} alt={message.text ?? t("mockImageAlt")} />
+      </div>
+    </div>}
+    {videoOpen && video && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={t("embeddedVideo")} onClick={() => setVideoOpen(false)}>
+      <div className="imageModal" onClick={(event) => event.stopPropagation()}>
+        <button className="imageModalClose" type="button" onClick={() => setVideoOpen(false)} aria-label={t("closeVideo")}>×</button>
+        <video crossOrigin="use-credentials" className="videoModalVideo" controls autoPlay preload="metadata" src={video}>{t("videoUnsupported")}</video>
       </div>
     </div>}
   </>;
@@ -357,7 +394,7 @@ export default function Dashboard() {
         const nextMessages = await messagesResponse.json() as Message[];
         const nextSourceMessages = sourceMessagesResponse.ok ? await sourceMessagesResponse.json() as Message[] : nextMessages;
         const nextStatus = statusResponse.ok ? await statusResponse.json() as ServiceStatus : null;
-        if (active) { setGroups(nextGroups); setMessages(nextMessages); setEventSourceMessages(nextSourceMessages); setMessagesHasMore(messagesResponse.headers.get("x-has-more") === "true"); setServiceStatus(nextStatus); setLive(true); setError(null); }
+        if (active) { setGroups(nextGroups); setMessages((current) => preserveMessageMedia(current, nextMessages)); setEventSourceMessages((current) => preserveMessageMedia(current, nextSourceMessages)); setMessagesHasMore(messagesResponse.headers.get("x-has-more") === "true"); setServiceStatus(nextStatus); setLive(true); setError(null); }
       } catch { if (active) setError(t("liveDataUnavailable")); }
       finally { if (active) setMessagesLoading(false); }
     }
@@ -421,6 +458,21 @@ export default function Dashboard() {
     setMessages((current) => current.map((item) => item.id === messageID ? { ...item, transcript, audioStatus: "completed", audioError: undefined } : item));
   }
 
+  async function submitFeedback(messageID: string, decision: "accept" | "reject") {
+    const message = messages.find((item) => item.id === messageID);
+    if (!message) return;
+    const response = await apiFetch("/api/v1/ai/feedback", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageId: messageID, groupId: message.groupId, targetType: "relevance", targetKey: messageID, decision }),
+    });
+    if (!response.ok) throw new Error(t("connectorError"));
+    setMessages((current) => current.map((item) => item.id === messageID ? {
+      ...item,
+      analysis: { ...item.analysis, relevant: decision === "accept", score: decision === "accept" ? Math.max(item.analysis?.score ?? 0, 0.85) : Math.min(item.analysis?.score ?? 1, 0.2) },
+    } : item));
+  }
+
   const scope = selectedGroup === "all" ? t("allSelectedGroups") : t("selectedGroup");
 
   return <AuthGate>{(
@@ -435,7 +487,7 @@ export default function Dashboard() {
       <section className="panel filterPanel"><div className="panelHead"><div><p className="eyebrow">{t("searchMessages")}</p><h2>{t("messageStream")}</h2></div><button className="textButton" type="button" onClick={clearFilters}>{t("clearFilters")}</button></div><div className="filterGrid"><label><span>{t("searchMessages")}</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={t("searchMessages")} /></label><label><span>{t("filterGroup")}</span><select value={groupFilter} onChange={(event) => selectGroup(event.target.value)}><option value="all">{t("allSelected")}</option>{selectedGroups.map((group) => <option key={group.id} value={group.id}>{group.subject}</option>)}</select></label><label><span>{t("filterKind")}</span><select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">{t("allKinds")}</option>{["text", "audio", "image", "video", "location", "document"].map((kind) => <option key={kind} value={kind}>{kindLabel(kind, locale)}</option>)}</select></label><label><span>{t("filterFrom")}</span><input type="datetime-local" value={fromFilter} onChange={(event) => setFromFilter(event.target.value)} /></label><label><span>{t("filterTo")}</span><input type="datetime-local" value={toFilter} onChange={(event) => setToFilter(event.target.value)} /></label><label className="filterCheck"><input type="checkbox" checked={eventOnly} onChange={(event) => setEventOnly(event.target.checked)} /><span>{t("filterEvents")}</span></label><label className="filterCheck"><input type="checkbox" checked={placeOnly} onChange={(event) => setPlaceOnly(event.target.checked)} /><span>{t("filterPlaces")}</span></label></div></section>
       <div className="grid">
         <aside className="panel groupsPanel"><div className="panelHead"><div><h2>{t("selectedGroupsOnly")}</h2><p className="muted groupSelectionHint">{t("groupSelectionHint")}</p></div><span className="count">{selectedGroups.length}</span></div><Link className="manageGroupsLink" href="/groups">{t("manageGroups")}</Link><button className={`groupRow ${selectedGroup === "all" ? "active" : ""}`} onClick={() => selectGroup("all")}><span className="avatar all">✦</span><span><strong>{t("allSelected")}</strong><small>{t("liveOverview")}</small></span></button>{dashboardHierarchy.map((node) => <DashboardGroupBranch key={node.group.id} node={node} selectedGroup={selectedGroup} onSelect={selectGroup} t={t} />)}</aside>
-        <section className="panel feedPanel"><EventBoard events={eventRecords} messages={eventSourceMessages} locale={locale} /><div className="panelHead"><div><h2>{showAllMessages ? t("allMessages") : t("relevantMessages")}</h2><p className="muted">{showAllMessages ? t("allMessagesSubtitle") : t("relevantMessagesSubtitle")}</p></div><div className="feedControls"><button className={`textButton ${!showAllMessages ? "active" : ""}`} type="button" aria-pressed={!showAllMessages} onClick={() => setShowAllMessages(false)}>{t("relevantOnly")}</button><button className={`textButton ${showAllMessages ? "active" : ""}`} type="button" aria-pressed={showAllMessages} onClick={() => setShowAllMessages(true)}>{t("allMessages")}</button><span className="count">{visibleMessages.length}</span></div></div><div className="feed">{messageThreads.map((message) => <MessageCard key={message.id} message={message} locale={locale} t={t} onRetryAudio={retryAudio} onTranscriptSaved={saveTranscript} />)}</div><div className="paginationControls" aria-label={t("messagePagination")}><button className="textButton" type="button" disabled={messageOffset === 0 || messagesLoading} onClick={() => setMessageOffset((current) => Math.max(0, current - messagePageSize))}>{t("previousPage")}</button><span>{t("messagePage", { page: Math.floor(messageOffset / messagePageSize) + 1 })}{messagesLoading ? ` · ${t("loadingMessages")}` : ""}</span><button className="textButton" type="button" disabled={!messagesHasMore || messagesLoading} onClick={() => setMessageOffset((current) => current + messagePageSize)}>{t("nextPage")}</button></div></section>
+        <section className="panel feedPanel"><EventBoard events={eventRecords} messages={eventSourceMessages} locale={locale} /><div className="panelHead"><div><h2>{showAllMessages ? t("allMessages") : t("relevantMessages")}</h2><p className="muted">{showAllMessages ? t("allMessagesSubtitle") : t("relevantMessagesSubtitle")}</p></div><div className="feedControls"><button className={`textButton ${!showAllMessages ? "active" : ""}`} type="button" aria-pressed={!showAllMessages} onClick={() => setShowAllMessages(false)}>{t("relevantOnly")}</button><button className={`textButton ${showAllMessages ? "active" : ""}`} type="button" aria-pressed={showAllMessages} onClick={() => setShowAllMessages(true)}>{t("allMessages")}</button><span className="count">{visibleMessages.length}</span></div></div><div className="feed">{messageThreads.map((message) => <MessageCard key={message.id} message={message} locale={locale} t={t} onRetryAudio={retryAudio} onTranscriptSaved={saveTranscript} onFeedback={submitFeedback} />)}</div><div className="paginationControls" aria-label={t("messagePagination")}><button className="textButton" type="button" disabled={messageOffset === 0 || messagesLoading} onClick={() => setMessageOffset((current) => Math.max(0, current - messagePageSize))}>{t("previousPage")}</button><span>{t("messagePage", { page: Math.floor(messageOffset / messagePageSize) + 1 })}{messagesLoading ? ` · ${t("loadingMessages")}` : ""}</span><button className="textButton" type="button" disabled={!messagesHasMore || messagesLoading} onClick={() => setMessageOffset((current) => current + messagePageSize)}>{t("nextPage")}</button></div></section>
       </div>
       <footer><span>{t("footer")}</span><span>{t("build")}</span></footer>
     </main>

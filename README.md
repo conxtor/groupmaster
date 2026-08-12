@@ -334,6 +334,31 @@ Beiträge jeweils mit den neuesten Aktualisierungen zuerst; Unterbeiträge
 können im Dashboard ein- und ausgeblendet werden. Die dafür benötigte
 Migration liegt in `infra/migrations/004_knowledge_hierarchy.sql`.
 
+Die aktuelle Qualitätskaskade (`cascade-v4`) arbeitet in drei lokalen Stufen:
+
+1. evidenzbasierte Regeln für Relevanz, Event-Kandidaten und Themen;
+2. ein begrenztes mehrsprachiges Embedding-Fenster für semantische
+   Zusammenführung, stabile Event-/Knowledge-Schlüssel und eine vorsichtige
+   hierarchische Speicherung;
+3. eine erklärbare Wissensschicht mit kanonischen Aliasen, belegten
+   Beziehungen und Nutzerfeedback.
+
+Events benötigen eine konkrete Handlung und einen Zeit- oder Ortsbezug. Ein
+reiner Gruß, eine allgemeine Terminzeile oder ein einzelner Karten-Pin wird
+nicht mehr als Event ausgegeben. Quellen werden nur in einem zeitlich
+begrenzten Nachrichtenfenster und bei Antwortbeziehungen zusammengeführt.
+Feedback kann über `POST /api/v1/ai/feedback` mit `targetType` `relevance`,
+`event` oder `knowledge` gespeichert werden. Eine Rückmeldung löst die
+erneute Analyse der betroffenen Nachricht aus. Bei Knowledge-Korrekturen mit
+`alias`, `canonicalKey` und optional `topicKey` wird zusätzlich ein
+gruppengebundener kanonischer Begriff gelernt.
+
+Die Persistenz dafür liegt in `infra/migrations/011_ai_quality_feedback.sql`.
+Sie enthält Feedback, kanonische Alias-Zuordnungen und ausschließlich aus
+Quellnachrichten abgeleitete Knowledge-Graph-Beziehungen. Der Worker schreibt
+keine unbelegten Beziehungen und löscht bei einer expliziten Knowledge-
+Ablehnung den betroffenen Eintrag.
+
 Jeder Knowledge-Knoten liefert zusätzlich die vollständigen Quellnachrichten
 mit Originaltext und – sofern vorhanden – Bild beziehungsweise Thumbnail. Die
 Nachrichten werden nicht mehr auf eine feste Zeichenanzahl gekürzt; eine
@@ -346,6 +371,16 @@ lokal und speichert die Vektoren in pgvector. Das Modell wird
 beim ersten Start geladen und im Compose-Volume `ai_models` zwischengespeichert.
 Die Schwellenwerte lassen sich über `AI_SEMANTIC_DISCOVERY_THRESHOLD` und
 `AI_SEMANTIC_MERGE_THRESHOLD` anpassen.
+
+Für die Kaskade können Kontextfenster und Event-Schwelle angepasst werden:
+
+```dotenv
+AI_PROMPT_VERSION=cascade-v4
+AI_KNOWLEDGE_VERSION=cascade-v4
+AI_CONTEXT_MAX_MESSAGES=80
+AI_EVENT_WINDOW_HOURS=36
+AI_EVENT_MIN_CONFIDENCE=0.70
+```
 
 Für den Download des Embedding-Modells kann ein Hugging-Face-Token in `.env`
 hinterlegt werden. Der Compose-Stack reicht ihn ausschließlich an den
@@ -383,6 +418,11 @@ Bei nicht gesetzter Hermes-URL oder einem temporären Hermes-Fehler bleibt die
 lokale, nachvollziehbare Verarbeitung aktiv. Die Nachrichten werden für den
 Verifier an den konfigurierten Remote-Dienst übertragen; die URL und der API-
 Key müssen daher bewusst gesetzt werden.
+
+Hermes ist optional und bleibt ein Fallback: Der Dienst wird nur aktiviert,
+wenn `AI_HERMES_ENABLED=true` und eine URL gesetzt sind. Die lokale Kaskade
+bleibt die Primärquelle; Hermes prüft nur unsichere Knowledge-Kandidaten.
+Bei Fehlern oder Timeout wird das lokale Ergebnis beibehalten.
 
 Audiotranskriptionen laufen lokal mit `whisper.cpp` und dem multilingualen
 `medium`-Modell. Die relevanten Einstellungen sind:

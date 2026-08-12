@@ -39,12 +39,14 @@ Ziel: Ein einzelner vertrauenswürdiger Nutzer kann reale Gruppen sicher verbind
 
 ### KI und Datenqualität
 
-- [x] Lokalen, austauschbaren AI-Adaptervertrag mit Heuristik-Fallback ergänzen; externe LLM-Übertragung bleibt aus Datenschutzgründen offen
+- [x] Lokalen, austauschbaren AI-Adaptervertrag mit präziser Kaskade aus Regeln, Embeddings und optionalem Hermes-Fallback ergänzen
 - [x] Strukturierte JSON-/Pydantic-Schema-Verträge, Prompt-Versionierung und Modellkonfiguration
 - [x] Evaluationsdatensatz für Deutsch, Spanisch, Katalanisch, Englisch und Französisch unter `apps/ai-worker/eval/dataset.jsonl`
 - [x] Konfidenzen, Quellenbelege und nachvollziehbare Herleitung je Ergebnis
 - [x] Zusammenführung von Events aus mehreren Nachrichten ohne Duplikate
 - [x] Widersprüchliche Zeit-, Orts- und Terminangaben erkennen, mit Quellen belegen und als Konflikt markieren
+- [x] Kaskadenqualität `cascade-v4`: stabiles Event-/Knowledge-Deduping, begrenzte Zeit-/Antwortfenster, kanonische Alias-Zuordnung und belegte Knowledge-Graph-Beziehungen
+- [x] Nutzerfeedback für Relevanz, Events und Knowledge-Base über `POST /api/v1/ai/feedback` speichern und betroffene Nachrichten idempotent neu analysieren
 
 ### Nutzeroberfläche
 
@@ -115,7 +117,8 @@ Ziel: Aus der Analyseoberfläche wird ein persönlicher Gruppenassistent.
 - [ ] Kalenderintegration für erkannte Termine
 - [ ] Export nach JSON, CSV, PDF und Kalenderformaten
 - [ ] Semantische Suche über Nachrichten, Events und Orte
-- [ ] Feedbackschleife für Nutzerkorrekturen und Modellverbesserung
+- [x] Feedbackschleife für Nutzerkorrekturen und kanonische Alias-/Beziehungsaktualisierung
+- [ ] Modellverbesserung aus dem Feedback-Datensatz und automatisierte Schwellenwert-Evaluation
 - [ ] Benutzerspezifische Relevanzregeln und thematische Profile
 - [ ] Erweiterte Kartenansicht mit Event-Zeitachse und Routen
 - [ ] Weitere Connectoren über das gemeinsame Connector-SDK
