@@ -4,6 +4,7 @@ dist/
 __pycache__/
 .venv/
 .env
+.env-dockge
 data/
 media/
 *.log

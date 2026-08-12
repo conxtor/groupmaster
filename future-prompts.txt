@@ -115,7 +115,7 @@ services:
     restart: unless-stopped
 networks: {}
 
-Der Hostname für das web-interface soll www.conxtor.com sein. Soweit möglich sollen alle anderen Dienste intern sein und nicht öffentlich zugänglich. Falls notwendig, benutze einen zusätzlichen Reverse-proxy in diesem deployment. 
+Der Hostname für das web-interface soll conxtor.com sein. Soweit möglich sollen alle anderen Dienste intern sein und nicht öffentlich zugänglich. Falls notwendig, benutze einen zusätzlichen Reverse-proxy in diesem deployment. 
 
 Erzeuge hierfür spezielle docker-compose.yaml, .env und .env.example dateien mit dem suffix -dockge
 Die Lokale testumgebung soll wie bisher funktionieren, ändere hier nichts. 

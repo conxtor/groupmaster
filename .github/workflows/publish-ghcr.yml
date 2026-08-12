@@ -1,0 +1,82 @@
+name: Publish WAGI images to GHCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_owner:
+        description: "GitHub/GHCR owner, for example ea7klk"
+        required: false
+        type: string
+      tag:
+        description: "Image tag used by the Dockge deployment"
+        required: true
+        default: latest
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    name: Build ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: wagi-api
+            context: .
+            dockerfile: apps/api/Dockerfile
+          - image: wagi-web
+            context: .
+            dockerfile: apps/web/Dockerfile
+          - image: wagi-ai-worker
+            context: .
+            dockerfile: apps/ai-worker/Dockerfile
+          - image: wagi-media-worker
+            context: .
+            dockerfile: apps/media-worker/Dockerfile
+          - image: wagi-wa-connector
+            context: .
+            dockerfile: apps/wa-connector/Dockerfile
+          - image: wagi-tg-connector
+            context: .
+            dockerfile: apps/tg-connector/Dockerfile
+          - image: wagi-nats-provisioner
+            context: ./infra/nats-provisioner
+            dockerfile: Dockerfile
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set image owner
+        id: image
+        env:
+          INPUT_IMAGE_OWNER: ${{ inputs.image_owner }}
+        run: |
+          owner="${INPUT_IMAGE_OWNER:-${GITHUB_REPOSITORY_OWNER}}"
+          owner="$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')"
+          echo "owner=$owner" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.context }}/${{ matrix.dockerfile }}
+          push: true
+          tags: ghcr.io/${{ steps.image.outputs.owner }}/${{ matrix.image }}:${{ inputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          provenance: false
