@@ -380,7 +380,16 @@ AI_KNOWLEDGE_VERSION=cascade-v4
 AI_CONTEXT_MAX_MESSAGES=80
 AI_EVENT_WINDOW_HOURS=36
 AI_EVENT_MIN_CONFIDENCE=0.70
+AI_DOCUMENT_ANALYSIS_MAX_CHARS=12000
+AI_NATS_PAYLOAD_LIMIT_BYTES=900000
 ```
+
+Dokumente werden vollständig lokal extrahiert und in `media_objects.ocr_text`
+gespeichert. Für die KI-Analyse wird nur ein begrenzter Auszug verwendet; so
+bleiben Dokumentzusammenfassungen kurz und überschreiten keine NATS-Payload-
+Limits. `AI_DOCUMENT_ANALYSIS_MAX_CHARS` steuert diese Grenze. Der Worker
+veröffentlicht übergroße Analyseergebnisse zusätzlich in kompakter Form, die
+vollständige Analyse bleibt in PostgreSQL erhalten.
 
 Für den Download des Embedding-Modells kann ein Hugging-Face-Token in `.env`
 hinterlegt werden. Der Compose-Stack reicht ihn ausschließlich an den
@@ -453,6 +462,7 @@ WHISPER_LANGUAGES=es,ca,de,en,fr
 WHISPER_THREADS=4
 MEDIA_MAX_RETRIES=3
 MEDIA_STALE_PROCESSING_SECONDS=900
+MEDIA_ANALYSIS_EVENT_MAX_CHARS=12000
 ```
 
 `WHISPER_LANGUAGE=auto` aktiviert die automatische Spracherkennung. Für eine

@@ -57,6 +57,8 @@ HERMES_MIN_CONFIDENCE = float(os.getenv("AI_HERMES_MIN_CONFIDENCE", "0.78"))
 AI_CONTEXT_MAX_MESSAGES = max(20, int(os.getenv("AI_CONTEXT_MAX_MESSAGES", "80")))
 AI_EVENT_WINDOW_HOURS = max(2.0, float(os.getenv("AI_EVENT_WINDOW_HOURS", "36")))
 AI_EVENT_MIN_CONFIDENCE = min(0.99, max(0.4, float(os.getenv("AI_EVENT_MIN_CONFIDENCE", "0.7"))))
+AI_DOCUMENT_ANALYSIS_MAX_CHARS = max(2000, int(os.getenv("AI_DOCUMENT_ANALYSIS_MAX_CHARS", "12000")))
+AI_NATS_PAYLOAD_LIMIT_BYTES = max(64 * 1024, min(900000, int(os.getenv("AI_NATS_PAYLOAD_LIMIT_BYTES", "900000"))))
 
 LANGUAGE_MARKERS = {
     "de": {"der", "die", "das", "und", "für", "nicht", "mit", "ist", "sind", "auf", "von", "eine", "einer", "morgen", "heute", "treffen", "danke", "bitte", "auch", "wird", "straße"},
@@ -1177,7 +1179,75 @@ async def publish(js, subject: str, event_type: str, data: dict):
         "source": "ai-worker",
         "data": data,
     }
-    await js.publish(subject, json.dumps(event, default=str).encode())
+    payload = json.dumps(event, default=str).encode()
+    if len(payload) > AI_NATS_PAYLOAD_LIMIT_BYTES and event_type == "ai.messages.analyzed":
+        original_size = len(payload)
+        analysis = event["data"] if isinstance(event.get("data"), dict) else {}
+        compact_analysis = {
+            key: analysis.get(key)
+            for key in (
+                "messageId", "relevant", "relevanceScore", "summary", "model",
+                "schemaVersion", "promptVersion",
+            )
+            if key in analysis
+        }
+        compact_analysis["summary"] = str(compact_analysis.get("summary") or "")[:240]
+        compact_analysis["facts"] = [
+            {"text": str(item.get("text") or "")[:600], "confidence": item.get("confidence")}
+            for item in analysis.get("facts", [])[:10]
+            if isinstance(item, dict)
+        ]
+        compact_analysis["entities"] = analysis.get("entities", [])[:10]
+        compact_analysis["events"] = analysis.get("events", [])[:10]
+        compact_analysis["places"] = analysis.get("places", [])[:10]
+        compact_analysis["knowledge"] = [
+            {
+                "topicKey": item.get("topicKey"),
+                "topicTitle": item.get("topicTitle"),
+                "itemKey": item.get("itemKey"),
+                "itemType": item.get("itemType"),
+                "content": str(item.get("content") or "")[:800],
+                "confidence": item.get("confidence"),
+                "sourceMessageIds": item.get("sourceMessageIds", [])[:20],
+            }
+            for item in analysis.get("knowledge", [])[:10]
+            if isinstance(item, dict)
+        ]
+        compact_analysis["provenance"] = analysis.get("provenance", [])[:20]
+        compact_analysis["conflicts"] = analysis.get("conflicts", [])[:20]
+        event["data"] = compact_analysis
+        payload = json.dumps(event, default=str).encode()
+        if len(payload) > AI_NATS_PAYLOAD_LIMIT_BYTES:
+            event["data"] = {
+                key: compact_analysis.get(key)
+                for key in (
+                    "messageId", "relevant", "relevanceScore", "summary", "model",
+                    "schemaVersion", "promptVersion",
+                )
+                if key in compact_analysis
+            }
+            payload = json.dumps(event, default=str).encode()
+        log.warning(
+            "compacted oversized %s event from %d to %d bytes; full analysis remains persisted in PostgreSQL",
+            event_type, original_size, len(payload),
+        )
+    await js.publish(subject, payload)
+
+
+def bounded_document_text(value: str | None) -> str:
+    """Keep large document contents out of AI contexts and NATS events.
+
+    The complete extracted text is persisted in media_objects.ocr_text. The
+    AI heuristic only needs a bounded excerpt to create a short summary and
+    structured signals.
+    """
+    normalized = str(value or "").strip()
+    if len(normalized) <= AI_DOCUMENT_ANALYSIS_MAX_CHARS:
+        return normalized
+    return (
+        normalized[:AI_DOCUMENT_ANALYSIS_MAX_CHARS].rstrip()
+        + "\n[Dokumentinhalt für die Analyse gekürzt; Original bleibt vollständig gespeichert.]"
+    )
 
 
 def source_id_list(value) -> list[str]:
@@ -1607,8 +1677,21 @@ async def main():
                 await message.ack()
                 return
             current = await db.fetchval("SELECT COALESCE(text, '') FROM messages WHERE id=$1", data.get("messageId"))
-            extracted = data.get("text") or data.get("ocrText") or ""
-            await process_analysis(db, analyze_message, {"data": {"messageId": data.get("messageId"), "text": f"{current or ''}\n[Dokument] {extracted}".strip(), "force": True}}, "document", force=True)
+            extracted = await db.fetchval(
+                """SELECT ocr_text FROM media_objects
+                   WHERE message_id=$1 AND ocr_text IS NOT NULL
+                   ORDER BY updated_at DESC LIMIT 1""",
+                data.get("messageId"),
+            )
+            extracted = extracted or data.get("text") or data.get("ocrText") or ""
+            document_text = bounded_document_text(extracted)
+            await process_analysis(
+                db,
+                analyze_message,
+                {"data": {"messageId": data.get("messageId"), "text": f"{current or ''}\n[Dokument] {document_text}".strip(), "force": True}},
+                "document",
+                force=True,
+            )
             await mark_processed(db, "ai.documents", event_id)
             await message.ack()
         except Exception as error:

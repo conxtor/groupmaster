@@ -38,6 +38,7 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "miniosecret")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "wa-media")
 MEDIA_MAX_RETRIES = max(1, int(os.getenv("MEDIA_MAX_RETRIES", "3")))
 MEDIA_STALE_PROCESSING_SECONDS = max(60, int(os.getenv("MEDIA_STALE_PROCESSING_SECONDS", "900")))
+MEDIA_ANALYSIS_EVENT_MAX_CHARS = max(2000, int(os.getenv("MEDIA_ANALYSIS_EVENT_MAX_CHARS", "12000")))
 MEDIA_CLEANUP_TOKEN = os.getenv("MEDIA_CLEANUP_TOKEN", "").strip()
 _s3 = None
 
@@ -239,6 +240,22 @@ def extract_document_text(source: Path, mime: str) -> str:
     return ""
 
 
+def bounded_analysis_text(value: str | None) -> str:
+    """Avoid placing complete OCR/document contents in a NATS event.
+
+    The complete result is written to media_objects.ocr_text before this
+    helper is used. AI can fetch that persisted value and apply its own
+    analysis limit.
+    """
+    normalized = str(value or "").strip()
+    if len(normalized) <= MEDIA_ANALYSIS_EVENT_MAX_CHARS:
+        return normalized
+    return (
+        normalized[:MEDIA_ANALYSIS_EVENT_MAX_CHARS].rstrip()
+        + "\n[Dokumentinhalt für die Analyse gekürzt; Original bleibt vollständig gespeichert.]"
+    )
+
+
 def stage_media(data: dict) -> tuple[str, str | None, str, int, str]:
     source = Path(str(data["objectPath"]))
     if not source.is_file():
@@ -292,9 +309,9 @@ async def on_media(db, js, message):
         message_kind = await db.fetchval("SELECT kind FROM messages WHERE id=$1", message_id)
         if ocr_text:
             if message_kind == "image":
-                await publish(js, {"_subject": "media.image.analyzed", "_type": "media.image.analyzed", "messageId": message_id, "ocrText": ocr_text, "provider": "tesseract"})
+                await publish(js, {"_subject": "media.image.analyzed", "_type": "media.image.analyzed", "messageId": message_id, "ocrText": bounded_analysis_text(ocr_text), "provider": "tesseract"})
             elif message_kind == "document":
-                await publish(js, {"_subject": "media.document.analyzed", "_type": "media.document.analyzed", "messageId": message_id, "text": ocr_text, "mime": data.get("mediaMime"), "provider": "local-document-extractor"})
+                await publish(js, {"_subject": "media.document.analyzed", "_type": "media.document.analyzed", "messageId": message_id, "text": bounded_analysis_text(ocr_text), "mime": data.get("mediaMime"), "provider": "local-document-extractor"})
         if str(data.get("mediaMime", "")).startswith("audio/"):
             await db.execute("UPDATE audio_jobs SET object_path=$1 WHERE message_id=$2 AND media_key=$3", data.get("objectPath"), message_id, media_key)
             job_id = await db.fetchval("SELECT id FROM audio_jobs WHERE message_id=$1 AND media_key=$2 ORDER BY created_at DESC LIMIT 1", message_id, media_key)
@@ -374,9 +391,9 @@ async def repair_local_media(db, js):
             analysis_text = await stage_and_record_media(db, data)
             await db.execute("UPDATE messages SET media_status='completed' WHERE id=$1", data["messageId"])
             if analysis_text and row["kind"] == "image":
-                await publish(js, {"_subject": "media.image.analyzed", "_type": "media.image.analyzed", "messageId": data["messageId"], "ocrText": analysis_text, "provider": "tesseract"})
+                await publish(js, {"_subject": "media.image.analyzed", "_type": "media.image.analyzed", "messageId": data["messageId"], "ocrText": bounded_analysis_text(analysis_text), "provider": "tesseract"})
             elif analysis_text and row["kind"] == "document":
-                await publish(js, {"_subject": "media.document.analyzed", "_type": "media.document.analyzed", "messageId": data["messageId"], "text": analysis_text, "mime": row["media_mime"], "provider": "local-document-extractor"})
+                await publish(js, {"_subject": "media.document.analyzed", "_type": "media.document.analyzed", "messageId": data["messageId"], "text": bounded_analysis_text(analysis_text), "mime": row["media_mime"], "provider": "local-document-extractor"})
             repaired += 1
         except Exception:
             log.exception("local media repair failed for %s", data["messageId"])
