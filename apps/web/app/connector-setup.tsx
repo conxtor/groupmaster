@@ -127,13 +127,33 @@ export function ConnectorSetup({ locale }: { locale: Locale }) {
     }
   }
 
+  async function logoutConnector(snapshot: ConnectorSnapshot | null) {
+    if (!snapshot?.accountId || !window.confirm(t("logoutConnectorConfirm"))) return;
+    setQrBusy(snapshot.accountId);
+    try {
+      const response = await apiFetch(`/api/v1/connectors/accounts/${snapshot.accountId}/qr`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? t("logoutConnectorError"));
+      }
+      await refreshStatus();
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : t("logoutConnectorError"));
+    } finally {
+      setQrBusy(null);
+    }
+  }
+
+  const whatsappConnected = isConnectedSnapshot(whatsapp);
+  const telegramConnected = isConnectedSnapshot(telegram);
+
   return <section className="connectorSetup panel">
     <div className="panelHead"><div><p className="eyebrow">{t("connectors")}</p><h2>{t("connectorSetup")}</h2><p className="muted">{t("connectorSetupHint")}</p></div><button className="textButton" onClick={() => void refreshStatus()}>{t("refreshStatus")}</button></div>
     <div className="connectorSetupBody">
       {setupError && <div className="notice setupNotice">{setupError}</div>}
       <div className="connectorCards">
-        <article className="connectorCard"><div className="connectorCardHead"><div><p className="eventGroup">{t("whatsappConnector")}</p><strong>{connectorLabel(whatsapp, t)}</strong></div><span className={`connectorDot ${isConnectedSnapshot(whatsapp) ? "ready" : ""}`} /></div>{whatsapp?.qr ? <div className="connectorQr"><QRCodeSVG value={whatsapp.qr} size={168} includeMargin level="M" role="img" aria-label={t("scanWithWhatsapp")} /><p>{t("scanWithWhatsapp")}</p></div> : <><p className="connectorHint">{connectorHint(whatsapp, t)}</p><button className="primaryButton" disabled={!whatsapp?.accountId || qrBusy === whatsapp?.accountId} onClick={() => void startQr(whatsapp)}>{qrBusy === whatsapp?.accountId ? t("waitingForQr") : t("startWhatsappQr")}</button></>}</article>
-        <article className="connectorCard"><div className="connectorCardHead"><div><p className="eventGroup">{t("telegramConnector")}</p><strong>{connectorLabel(telegram, t)}</strong></div><span className={`connectorDot ${isConnectedSnapshot(telegram) ? "ready" : ""}`} /></div>{telegram?.qr ? <div className="connectorQr"><QRCodeSVG value={telegram.qr} size={168} includeMargin level="M" role="img" aria-label={t("startTelegramQr")} /><p>{telegram.expiresAt ? t("qrExpires", { time: new Date(telegram.expiresAt).toLocaleTimeString(localeCodes[locale], { hour: "2-digit", minute: "2-digit" }) }) : t("waitingForQr")}</p></div> : <><p className="connectorHint">{connectorHint(telegram, t)}</p><button className="primaryButton" disabled={!telegram?.accountId || qrBusy === telegram?.accountId} onClick={() => void startQr(telegram)}>{qrBusy === telegram?.accountId ? t("waitingForQr") : t("startTelegramQr")}</button></>}</article>
+        <article className="connectorCard"><div className="connectorCardHead"><div><p className="eventGroup">{t("whatsappConnector")}</p><strong>{connectorLabel(whatsapp, t)}</strong></div><span className={`connectorDot ${whatsappConnected ? "ready" : ""}`} /></div>{whatsapp?.qr && !whatsappConnected ? <div className="connectorQr"><QRCodeSVG value={whatsapp.qr} size={168} includeMargin level="M" role="img" aria-label={t("scanWithWhatsapp")} /><p>{t("scanWithWhatsapp")}</p></div> : whatsappConnected ? <><p className="connectorHint">{connectorHint(whatsapp, t)}</p><button className="dangerButton" disabled={qrBusy === whatsapp?.accountId} onClick={() => void logoutConnector(whatsapp)}>{qrBusy === whatsapp?.accountId ? t("loggingOutConnector") : t("logoutConnector")}</button></> : <><p className="connectorHint">{connectorHint(whatsapp, t)}</p><button className="primaryButton" disabled={!whatsapp?.accountId || qrBusy === whatsapp?.accountId} onClick={() => void startQr(whatsapp)}>{qrBusy === whatsapp?.accountId ? t("waitingForQr") : t("startWhatsappQr")}</button></>}</article>
+        <article className="connectorCard"><div className="connectorCardHead"><div><p className="eventGroup">{t("telegramConnector")}</p><strong>{connectorLabel(telegram, t)}</strong></div><span className={`connectorDot ${telegramConnected ? "ready" : ""}`} /></div>{telegram?.qr && !telegramConnected ? <div className="connectorQr"><QRCodeSVG value={telegram.qr} size={168} includeMargin level="M" role="img" aria-label={t("startTelegramQr")} /><p>{telegram.expiresAt ? t("qrExpires", { time: new Date(telegram.expiresAt).toLocaleTimeString(localeCodes[locale], { hour: "2-digit", minute: "2-digit" }) }) : t("waitingForQr")}</p></div> : telegramConnected ? <><p className="connectorHint">{connectorHint(telegram, t)}</p><button className="dangerButton" disabled={qrBusy === telegram?.accountId} onClick={() => void logoutConnector(telegram)}>{qrBusy === telegram?.accountId ? t("loggingOutConnector") : t("logoutConnector")}</button></> : <><p className="connectorHint">{connectorHint(telegram, t)}</p><button className="primaryButton" disabled={!telegram?.accountId || qrBusy === telegram?.accountId} onClick={() => void startQr(telegram)}>{qrBusy === telegram?.accountId ? t("waitingForQr") : t("startTelegramQr")}</button></>}</article>
       </div>
     </div>
   </section>;

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -42,6 +44,153 @@ type connectorQRView struct {
 type connectorAccountRequest struct {
 	Platform string `json:"platform"`
 	Label    string `json:"label"`
+}
+
+// requestConnectorLogout asks the pool worker that currently owns the account
+// to close the live client before the durable account/session rows are removed.
+// The request is deliberately best effort: an account may be between pool
+// leases, in which case there is no live process to stop.
+func (a *app) requestConnectorLogout(platform, accountID string) {
+	if a.nc == nil || a.nc.IsClosed() || a.mediaCleanupToken == "" {
+		return
+	}
+	payload, err := json.Marshal(map[string]string{
+		"token":     a.mediaCleanupToken,
+		"platform":  platform,
+		"accountId": accountID,
+	})
+	if err != nil {
+		return
+	}
+	if _, err := a.nc.Request("internal.connector.logout.requested", payload, 3*time.Second); err != nil {
+		// No active worker is a valid state in the rotating pool. The database
+		// cleanup below still removes the durable session and prevents reuse.
+		log.Printf("connector logout handoff for %s/%s did not reach an active worker: %v", platform, accountID, err)
+	}
+}
+
+func (a *app) requestMediaCleanup(platform string, groupIDs []string) error {
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	if a.nc == nil || a.nc.IsClosed() {
+		return fmt.Errorf("NATS ist für die Medienbereinigung nicht verfügbar")
+	}
+	if a.mediaCleanupToken == "" {
+		return fmt.Errorf("MEDIA_CLEANUP_TOKEN ist nicht konfiguriert")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"token":    a.mediaCleanupToken,
+		"platform": platform,
+		"groupIds": groupIDs,
+	})
+	if err != nil {
+		return err
+	}
+	response, err := a.nc.Request("internal.groups.cleanup.requested", payload, 30*time.Second)
+	if err != nil {
+		return fmt.Errorf("Medienbereinigung konnte nicht gestartet werden: %w", err)
+	}
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(response.Data, &result); err != nil {
+		return fmt.Errorf("ungültige Antwort der Medienbereinigung: %w", err)
+	}
+	if !result.OK {
+		if result.Error == "" {
+			result.Error = "unbekannter Fehler"
+		}
+		return fmt.Errorf("Medienbereinigung fehlgeschlagen: %s", result.Error)
+	}
+	return nil
+}
+
+// logoutConnectorAccount removes only data that belongs to this user's
+// connector. Shared groups lose this user's access but remain available for
+// other users; exclusively owned groups are deleted and their message/media
+// rows follow the database foreign-key cascades.
+func (a *app) logoutConnectorAccount(ctx context.Context, accountID, platform, ownerUserID string) (int, error) {
+	if _, err := a.db.Exec(ctx, `UPDATE connector_onboarding_requests SET status='cancelled', worker_id=NULL, updated_at=NOW()
+		WHERE account_id=$1::uuid AND status IN ('pending','claimed','connected')`, accountID); err != nil {
+		return 0, err
+	}
+	if _, err := a.db.Exec(ctx, `UPDATE connector_qr_sessions SET status='cancelled', qr_payload=NULL, expires_at=NULL, updated_at=NOW()
+		WHERE account_id=$1::uuid`, accountID); err != nil {
+		return 0, err
+	}
+	if _, err := a.db.Exec(ctx, `UPDATE connector_accounts SET status='stopped', last_error=NULL, updated_at=NOW()
+		WHERE id=$1::uuid`, accountID); err != nil {
+		return 0, err
+	}
+
+	// Stop an in-memory Baileys/GramJS client before deleting its lease and
+	// session state. Every connector worker receives this internal event; only
+	// the worker owning this account responds.
+	a.requestConnectorLogout(platform, accountID)
+
+	tx, err := a.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		SELECT g.id
+		FROM wa_groups g
+		WHERE g.platform=$2
+		  AND NOT EXISTS (
+			SELECT 1 FROM user_group_access other
+			WHERE other.group_id=g.id AND other.user_id<>$1::uuid
+		  )
+		  AND (
+			g.owner_user_id=$1::uuid
+			OR (g.owner_user_id IS NULL AND EXISTS (
+				SELECT 1 FROM user_group_access own WHERE own.group_id=g.id AND own.user_id=$1::uuid
+			))
+		  )
+		FOR UPDATE`, ownerUserID, platform)
+	if err != nil {
+		return 0, err
+	}
+	groupIDs := make([]string, 0)
+	for rows.Next() {
+		var groupID string
+		if err := rows.Scan(&groupID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		groupIDs = append(groupIDs, groupID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	if err := a.requestMediaCleanup(platform, groupIDs); err != nil {
+		return 0, err
+	}
+	// Remove access to every group of this service. This also hides shared
+	// groups from the user while leaving their other users' access untouched.
+	if _, err := tx.Exec(ctx, `DELETE FROM user_group_access
+		WHERE user_id=$1::uuid AND group_id IN (SELECT id FROM wa_groups WHERE platform=$2)`, ownerUserID, platform); err != nil {
+		return 0, err
+	}
+	if len(groupIDs) > 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM wa_groups WHERE platform=$1 AND id=ANY($2::text[])
+			AND NOT EXISTS (SELECT 1 FROM user_group_access other WHERE other.group_id=wa_groups.id)`, platform, groupIDs); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM connector_accounts WHERE id=$1::uuid", accountID); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(groupIDs), nil
 }
 
 func intPointer(value int) *int { return &value }
@@ -278,7 +427,8 @@ func (a *app) connectorAccountQR(w http.ResponseWriter, r *http.Request, account
 		ownerArgs = []any{accountID}
 	}
 	var platform string
-	if err := a.db.QueryRow(r.Context(), "SELECT platform FROM connector_accounts ca WHERE ca.id=$1::uuid AND "+ownerClause, ownerArgs...).Scan(&platform); err != nil {
+	var accountOwnerID string
+	if err := a.db.QueryRow(r.Context(), "SELECT platform, user_id::text FROM connector_accounts ca WHERE ca.id=$1::uuid AND "+ownerClause, ownerArgs...).Scan(&platform, &accountOwnerID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "connector account not found"})
 		return
 	}
@@ -351,10 +501,13 @@ func (a *app) connectorAccountQR(w http.ResponseWriter, r *http.Request, account
 		_, _ = a.db.Exec(r.Context(), "UPDATE connector_accounts SET status='pairing', last_error=NULL, updated_at=NOW() WHERE id=$1::uuid", accountID)
 		writeJSON(w, http.StatusAccepted, map[string]any{"accountId": accountID, "platform": platform, "status": "starting", "requestId": requestID})
 	case http.MethodDelete:
-		_, _ = a.db.Exec(r.Context(), `UPDATE connector_onboarding_requests SET status='cancelled', updated_at=NOW() WHERE account_id=$1::uuid AND status IN ('pending','claimed','connected')`, accountID)
-		_, _ = a.db.Exec(r.Context(), `UPDATE connector_qr_sessions SET status='cancelled', qr_payload=NULL, expires_at=NULL, updated_at=NOW() WHERE account_id=$1::uuid`, accountID)
-		_, _ = a.db.Exec(r.Context(), "UPDATE connector_accounts SET status='paused', updated_at=NOW() WHERE id=$1::uuid AND status='pairing'", accountID)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+		deletedGroups, err := a.logoutConnectorAccount(r.Context(), accountID, platform, accountOwnerID)
+		if err != nil {
+			log.Printf("connector logout failed for %s/%s: %v", platform, accountID, err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Connector konnte nicht vollständig abgemeldet und bereinigt werden"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "logged_out", "deletedGroups": deletedGroups})
 	default:
 		w.Header().Set("allow", "GET, POST, DELETE")
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})

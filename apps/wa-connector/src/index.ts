@@ -73,6 +73,7 @@ let reconnectTimer: NodeJS.Timeout | null = null;
 let reconnectAttempts = 0;
 let connectInProgress = false;
 let accountLease: ConnectorAccountLease | null = null;
+let logoutAccountId: string | null = null;
 let accountRotationTimer: NodeJS.Timeout | null = null;
 let onboardingRequest: ConnectorOnboardingRequest | null = null;
 let onboardingPollTimer: NodeJS.Timeout | null = null;
@@ -96,7 +97,11 @@ async function stopAfterLeaseLoss(expectedLease: ConnectorAccountLease, error: u
   accountRotationTimer = null;
   try { (waSocket as any)?.end?.(); } catch { /* best effort */ }
   waSocket = null;
-  await flushAuthSnapshot(join(authDir, accountId), accountId).catch((snapshotError) => console.warn("WhatsApp session snapshot after lease loss failed", snapshotError));
+  if (logoutAccountId === accountId) {
+    await rm(join(authDir, accountId), { recursive: true, force: true }).catch((cleanupError) => console.warn("WhatsApp logout auth cleanup failed", cleanupError));
+  } else {
+    await flushAuthSnapshot(join(authDir, accountId), accountId).catch((snapshotError) => console.warn("WhatsApp session snapshot after lease loss failed", snapshotError));
+  }
   accountLease = null;
   await expectedLease.release().catch((releaseError) => console.warn("WhatsApp lease release after loss failed", releaseError));
   console.warn("WhatsApp worker stopped after losing its account lease", error);
@@ -115,6 +120,7 @@ async function initializePoolLease() {
     return false;
   }
   accountLease = lease;
+  logoutAccountId = null;
   lease.startRenewal((error) => void stopAfterLeaseLoss(lease, error));
   if (poolSlotSeconds > 0) {
     if (accountRotationTimer) clearTimeout(accountRotationTimer);
@@ -142,6 +148,7 @@ async function initializeOnboardingLease() {
   }
   onboardingRequest = request;
   accountLease = lease;
+  logoutAccountId = null;
   // A QR start is an explicit re-pair request. Remove only this account's
   // local auth snapshot so an expired session cannot suppress the QR event.
   await rm(join(authDir, request.accountId), { recursive: true, force: true });
@@ -159,6 +166,7 @@ async function finishOnboarding(status = "completed", error?: unknown) {
   const lease = accountLease;
   const request = onboardingRequest;
   if (!lease || !request) return;
+  if (logoutAccountId === lease.account.accountId) return;
   const message = error ? String(error) : null;
   const ownership = await pool.query<{ status: string }>(
     "SELECT status FROM connector_onboarding_requests WHERE id=$1::uuid AND worker_id=$2 AND status IN ('claimed','connected')",
@@ -976,6 +984,51 @@ function subscribeGroupSelections() {
   })();
 }
 
+async function stopCurrentAccountForLogout(accountId: string) {
+  const lease = accountLease;
+  if (!lease || lease.account.accountId !== accountId) {
+    // All pool workers share the auth volume. Removing this exact account
+    // directory on every worker also clears an idle worker's stale local copy.
+    await rm(join(authDir, accountId), { recursive: true, force: true }).catch((error) => console.warn("WhatsApp logout auth cleanup failed", error));
+    return false;
+  }
+  logoutAccountId = accountId;
+  connected = false;
+  lifecycleStatus = "stopped";
+  latestQr = null;
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  if (accountRotationTimer) clearTimeout(accountRotationTimer);
+  accountRotationTimer = null;
+  if (authSnapshotTimer) clearTimeout(authSnapshotTimer);
+  authSnapshotTimer = null;
+  authSnapshotTimerDirectory = null;
+  authSnapshotTimerAccountId = null;
+  try { (waSocket as any)?.end?.(); } catch (error) { console.warn("WhatsApp logout socket close failed", error); }
+  waSocket = null;
+  await rm(join(authDir, accountId), { recursive: true, force: true }).catch((error) => console.warn("WhatsApp logout auth cleanup failed", error));
+  accountLease = null;
+  onboardingRequest = null;
+  await lease.release().catch((error) => console.warn("WhatsApp logout lease release failed", error));
+  return true;
+}
+
+function subscribeConnectorLogout() {
+  const subscription = nc.subscribe("internal.connector.logout.requested");
+  void (async () => {
+    for await (const message of subscription) {
+      try {
+        const payload = JSON.parse(sc.decode(message.data)) as { token?: string; platform?: string; accountId?: string };
+        if (!mediaCleanupToken || payload.token !== mediaCleanupToken || payload.platform !== "whatsapp" || !payload.accountId) continue;
+        const matched = await stopCurrentAccountForLogout(payload.accountId);
+        if (matched) await message.respond(sc.encode(JSON.stringify({ ok: true, platform: "whatsapp", accountId: payload.accountId })));
+      } catch (error) {
+        console.warn("WhatsApp connector logout request failed", error);
+      }
+    }
+  })();
+}
+
 function scheduleWhatsAppReconnect(reason?: unknown) {
   if (mockMode || onboardingOnly || !accountLease || reconnectTimer || lifecycleStatus === "reauth_required" || lifecycleStatus === "stopped") return;
   connected = false;
@@ -992,6 +1045,7 @@ function scheduleWhatsAppReconnect(reason?: unknown) {
 
 async function connectWhatsApp() {
   if (connectInProgress || mockMode) return;
+  if (logoutAccountId && accountLease?.account.accountId === logoutAccountId) return;
   connectInProgress = true;
   try {
     await setStatus("connecting", `Baileys wird verbunden; ${initialActivation ? "Erst-" : "Neustart-"}Backfill: ${backfillDays} Tage`);
@@ -1309,6 +1363,7 @@ async function main() {
   nc = await connect({ servers: natsUrl });
   await ensureEventStream();
   subscribeGroupSelections();
+  subscribeConnectorLogout();
   await pool.query("SELECT 1");
   if (!onboardingOnly) await prepareInitialActivation();
   let poolReady = onboardingOnly ? false : true;

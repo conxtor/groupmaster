@@ -86,10 +86,16 @@ export class ConnectorAccountLease {
            SELECT 1 FROM connector_onboarding_requests pending
            WHERE pending.account_id=$1::uuid AND pending.status IN ('pending','claimed','connected')
          )))
-       RETURNING account_id`,
+       RETURNING account_id, lease_until`,
       [this.account.accountId, this.workerId, this.leaseSeconds],
     );
     if (!result.rowCount) throw new Error(`Connector lease expired for ${this.account.accountId}`);
+    await this.store.query(
+      `UPDATE connector_lease_history
+       SET lease_until=$3, last_seen_at=NOW()
+       WHERE account_id=$1::uuid AND worker_id=$2 AND ended_at IS NULL`,
+      [this.account.accountId, this.workerId, result.rows[0]?.lease_until],
+    );
   }
 
   async completeSync(nextSyncAt: Date) {
@@ -117,8 +123,14 @@ export class ConnectorAccountLease {
     );
   }
 
-  async release() {
+  async release(reason = "released") {
     this.stopRenewal();
+    await this.store.query(
+      `UPDATE connector_lease_history
+       SET ended_at=NOW(), last_seen_at=NOW(), end_reason=$3
+       WHERE account_id=$1::uuid AND worker_id=$2 AND ended_at IS NULL`,
+      [this.account.accountId, this.workerId, reason],
+    );
     await this.store.query("DELETE FROM connector_leases WHERE account_id=$1::uuid AND worker_id=$2", [this.account.accountId, this.workerId]);
   }
 
@@ -226,6 +238,19 @@ export async function acquireConnectorAccount(
   );
   const row = result.rows[0];
   if (!row) return null;
+  await store.query(
+    `UPDATE connector_lease_history
+     SET ended_at=COALESCE(ended_at,NOW()), last_seen_at=NOW(), end_reason=COALESCE(end_reason,'replaced')
+     WHERE account_id=$1::uuid AND ended_at IS NULL`,
+    [row.account_id],
+  );
+  await store.query(
+    `INSERT INTO connector_lease_history (account_id,user_id,platform,lease_kind,worker_id,lease_until)
+     SELECT l.account_id, ca.user_id, ca.platform, l.lease_kind, l.worker_id, l.lease_until
+     FROM connector_leases l JOIN connector_accounts ca ON ca.id=l.account_id
+     WHERE l.account_id=$1::uuid AND l.worker_id=$2 AND l.lease_kind=$3`,
+    [row.account_id, workerId, leaseKind],
+  );
   const accountResult = await store.query("SELECT id::text AS account_id, user_id::text AS user_id, platform, label FROM connector_accounts WHERE id=$1::uuid", [row.account_id]);
   const account = accountResult.rows[0];
   if (!account) return null;

@@ -68,6 +68,7 @@ const directTopicGroups = new Map<string, Map<number, { groupId: string; title: 
 let groupRefreshTimer: NodeJS.Timeout | null = null;
 let groupRefreshInProgress = false;
 let accountLease: ConnectorAccountLease | null = null;
+let logoutAccountId: string | null = null;
 let accountRotationTimer: NodeJS.Timeout | null = null;
 let onboardingRequest: ConnectorOnboardingRequest | null = null;
 let onboardingPollTimer: NodeJS.Timeout | null = null;
@@ -130,6 +131,7 @@ async function initializePoolLease() {
     return false;
   }
   accountLease = lease;
+  logoutAccountId = null;
   await loadAccountRole(lease);
   lease.startRenewal((error) => void stopAfterLeaseLoss(lease, error));
   if (poolSlotSeconds > 0) {
@@ -158,6 +160,7 @@ async function initializeOnboardingLease() {
   }
   onboardingRequest = request;
   accountLease = lease;
+  logoutAccountId = null;
   await loadAccountRole(lease);
   // A user explicitly requested a new QR, so do not let an expired MTProto
   // session bypass the QR callback.
@@ -777,6 +780,41 @@ function subscribeGroupSelections() {
   })();
 }
 
+async function stopCurrentAccountForLogout(accountId: string) {
+  const lease = accountLease;
+  if (!lease || lease.account.accountId !== accountId) return false;
+  logoutAccountId = accountId;
+  lifecycleStatus = "stopped";
+  lastError = null;
+  directQr = null;
+  directQrExpiresAt = null;
+  directQrAuthPromise = null;
+  if (accountRotationTimer) clearTimeout(accountRotationTimer);
+  accountRotationTimer = null;
+  onboardingRequest = null;
+  await destroyDirectClient();
+  accountLease = null;
+  accountUserIsAdmin = false;
+  await lease.release().catch((error) => console.warn("Telegram logout lease release failed", error));
+  return true;
+}
+
+function subscribeConnectorLogout() {
+  const subscription = nc.subscribe("internal.connector.logout.requested");
+  void (async () => {
+    for await (const message of subscription) {
+      try {
+        const payload = JSON.parse(sc.decode(message.data)) as { token?: string; platform?: string; accountId?: string };
+        if (!mediaCleanupToken || payload.token !== mediaCleanupToken || payload.platform !== "telegram" || !payload.accountId) continue;
+        const matched = await stopCurrentAccountForLogout(payload.accountId);
+        if (matched) await message.respond(sc.encode(JSON.stringify({ ok: true, platform: "telegram", accountId: payload.accountId })));
+      } catch (error) {
+        console.warn("Telegram connector logout request failed", summarizeTelegramError(error));
+      }
+    }
+  })();
+}
+
 async function backfillSelectedDirectGroups() {
   const selected = await pool.query<{ id: string }>(
     accountUserIsAdmin
@@ -829,6 +867,7 @@ async function ensureDirectConnection() {
 }
 
 async function startDirectConnector() {
+  if (logoutAccountId && accountLease?.account.accountId === logoutAccountId) return;
   // A previous failed pool attempt may have left a client object behind.
   // Never replace it without destroying its background update loop first.
   if (directClient) await destroyDirectClient();
@@ -1158,6 +1197,7 @@ async function main() {
   nc = await connect({ servers: natsUrl });
   await ensureEventStream();
   subscribeGroupSelections();
+  subscribeConnectorLogout();
   await pool.query("SELECT 1");
   if (!onboardingOnly) await prepareInitialActivation();
   let poolReady = onboardingOnly ? false : true;

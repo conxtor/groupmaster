@@ -33,6 +33,7 @@ type app struct {
 	tgPoolSize        int
 	waOnboardingSlots int
 	tgOnboardingSlots int
+	mediaCleanupToken string
 }
 
 type group struct {
@@ -1090,6 +1091,7 @@ func main() {
 		tgPoolSize:        envInt("TG_CONNECTOR_POOL_SIZE", 5),
 		waOnboardingSlots: envInt("WA_ONBOARDING_SLOTS", 1),
 		tgOnboardingSlots: envInt("TG_ONBOARDING_SLOTS", 1),
+		mediaCleanupToken: env("MEDIA_CLEANUP_TOKEN", ""),
 	}
 	if err := a.bootstrapAdmin(); err != nil {
 		log.Fatal(err)

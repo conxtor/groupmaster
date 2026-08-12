@@ -78,6 +78,38 @@ type connectorLeaseView struct {
 	AccountStatus  string    `json:"accountStatus"`
 }
 
+type connectorLeaseHistoryView struct {
+	ID               string     `json:"id"`
+	AccountID        string     `json:"accountId"`
+	Platform         string     `json:"platform"`
+	LeaseKind        string     `json:"leaseKind"`
+	WorkerID         string     `json:"workerId"`
+	UserID           string     `json:"userId"`
+	UserName         string     `json:"userName"`
+	UserEmail        string     `json:"userEmail"`
+	AccountStatus    string     `json:"accountStatus"`
+	StartedAt        time.Time  `json:"startedAt"`
+	LeaseUntil       time.Time  `json:"leaseUntil"`
+	EndedAt          *time.Time `json:"endedAt,omitempty"`
+	DurationSeconds  int64      `json:"durationSeconds"`
+	State            string     `json:"state"`
+	EndReason        *string    `json:"endReason,omitempty"`
+}
+
+type aiProcessingHistoryView struct {
+	ID              string    `json:"id"`
+	MessageID       string    `json:"messageId"`
+	MediaType       string    `json:"mediaType"`
+	Status          string    `json:"status"`
+	Attempts        int       `json:"attempts"`
+	Model           string    `json:"model,omitempty"`
+	GroupSubject    string    `json:"groupSubject,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+	DurationSeconds int64     `json:"durationSeconds"`
+	Error           string    `json:"error,omitempty"`
+}
+
 type jetStreamConsumerView struct {
 	Name           string `json:"name"`
 	FilterSubject  string `json:"filterSubject"`
@@ -118,6 +150,8 @@ type adminObservabilityView struct {
 	Queues         []observabilityQueueView  `json:"queues"`
 	ConnectorPools []connectorPoolView       `json:"connectorPools"`
 	ActiveLeases   []connectorLeaseView      `json:"activeLeases"`
+	RecentLeases   []connectorLeaseHistoryView `json:"recentLeases"`
+	AIProcessingHistory []aiProcessingHistoryView `json:"aiProcessingHistory"`
 	NATS           natsObservabilityView      `json:"nats"`
 	Streams        []jetStreamView           `json:"streams"`
 }
@@ -152,6 +186,8 @@ func (a *app) collectObservability(r *http.Request) (adminObservabilityView, err
 		Queues:          make([]observabilityQueueView, 0),
 		ConnectorPools:  make([]connectorPoolView, 0, 2),
 		ActiveLeases:    make([]connectorLeaseView, 0),
+		RecentLeases:    make([]connectorLeaseHistoryView, 0, 10),
+		AIProcessingHistory: make([]aiProcessingHistoryView, 0, 20),
 		Streams:         make([]jetStreamView, 0, len(observabilityConsumers)),
 	}
 	view.Summary.GroupsByPlatform = make([]observabilityLabelCount, 0)
@@ -274,6 +310,48 @@ func (a *app) collectObservability(r *http.Request) (adminObservabilityView, err
 		var item connectorLeaseView
 		if err := rows.Scan(&item.AccountID, &item.Platform, &item.LeaseKind, &item.WorkerID, &item.LeaseUntil, &item.RemainingSeconds, &item.UserID, &item.UserName, &item.UserEmail, &item.AccountStatus); err != nil { rows.Close(); return view, err }
 		view.ActiveLeases = append(view.ActiveLeases, item)
+	}
+	rows.Close()
+
+	rows, err = a.db.Query(ctx, `
+		SELECT h.id::text, h.account_id::text, h.platform, h.lease_kind, h.worker_id,
+		       u.id::text, u.name, u.email, ca.status, h.started_at, h.lease_until, h.ended_at,
+		       CASE
+		         WHEN h.ended_at IS NOT NULL THEN GREATEST(0, EXTRACT(EPOCH FROM (h.ended_at-h.started_at))::bigint)
+		         WHEN h.lease_until>NOW() THEN GREATEST(0, EXTRACT(EPOCH FROM (NOW()-h.started_at))::bigint)
+		         ELSE GREATEST(0, EXTRACT(EPOCH FROM (h.lease_until-h.started_at))::bigint)
+		       END,
+		       CASE WHEN h.ended_at IS NOT NULL THEN 'completed' WHEN h.lease_until>NOW() THEN 'active' ELSE 'expired' END,
+		       h.end_reason
+		FROM connector_lease_history h
+		JOIN connector_accounts ca ON ca.id=h.account_id
+		JOIN app_users u ON u.id=h.user_id
+		ORDER BY h.started_at DESC
+		LIMIT 10`)
+	if err != nil { return view, err }
+	for rows.Next() {
+		var item connectorLeaseHistoryView
+		if err := rows.Scan(&item.ID, &item.AccountID, &item.Platform, &item.LeaseKind, &item.WorkerID, &item.UserID, &item.UserName, &item.UserEmail, &item.AccountStatus, &item.StartedAt, &item.LeaseUntil, &item.EndedAt, &item.DurationSeconds, &item.State, &item.EndReason); err != nil { rows.Close(); return view, err }
+		view.RecentLeases = append(view.RecentLeases, item)
+	}
+	rows.Close()
+
+	rows, err = a.db.Query(ctx, `
+		SELECT aj.id::text, aj.message_id::text, COALESCE(m.kind,'unknown'), aj.status, aj.attempts,
+		       COALESCE(a.model,''), COALESCE(g.subject,''), aj.created_at, aj.updated_at,
+		       GREATEST(0, EXTRACT(EPOCH FROM ((CASE WHEN aj.status IN ('completed','failed') THEN aj.updated_at ELSE NOW() END)-aj.created_at))::bigint),
+		       COALESCE(aj.error,'')
+		FROM ai_jobs aj
+		JOIN messages m ON m.id=aj.message_id
+		LEFT JOIN message_analyses a ON a.message_id=aj.message_id
+		LEFT JOIN wa_groups g ON g.id=m.group_id
+		ORDER BY aj.updated_at DESC, aj.created_at DESC
+		LIMIT 20`)
+	if err != nil { return view, err }
+	for rows.Next() {
+		var item aiProcessingHistoryView
+		if err := rows.Scan(&item.ID, &item.MessageID, &item.MediaType, &item.Status, &item.Attempts, &item.Model, &item.GroupSubject, &item.CreatedAt, &item.UpdatedAt, &item.DurationSeconds, &item.Error); err != nil { rows.Close(); return view, err }
+		view.AIProcessingHistory = append(view.AIProcessingHistory, item)
 	}
 	rows.Close()
 

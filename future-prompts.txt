@@ -125,7 +125,8 @@ HF_TOKEN: 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
 =========================================================================================================================================
 
 
-
+In der "Konnektoren einrichten" seite soll bei bestehender Anmeldung nicht der Button "-QR starten" sondern ein "Abmelden"-Button erscheinen, der die entsprechende Sitzung (WA oder TG) dann auch tatsächlich abmeldet. 
+Die Gruppen des abgemeldeten Dienstes, dazugehörigen Nachrichten und medien des users sollen nach der Abmeldung in Kaskade gelöscht werden. 
 
 =========================================================================================================================================
 
