@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 .env
 .env-dockge
+future-prompts.txt
 data/
 media/
 *.log
