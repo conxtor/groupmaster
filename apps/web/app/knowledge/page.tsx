@@ -14,7 +14,8 @@ import {
   type TranslationValues,
 } from "../i18n";
 import { AuthGate, apiFetch } from "../auth";
-import { AudioPlayer } from "../media-player";
+import { AudioPlayer, VideoPlayer } from "../media-player";
+import { LinkifiedText } from "../linkified-text";
 
 type Group = { id: string; subject: string; isSelected: boolean; platform?: string; chatType?: string; language?: "de" | "es" | "ca" | "en" | "fr" };
 type KnowledgeSourceMessage = {
@@ -152,7 +153,7 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
       <span className="knowledgeSourceMessageLabel">{t(knowledgeSourceKind(source.kind))}{source.senderName ? ` · ${source.senderName}` : ""}</span>
       <time dateTime={source.receivedAt}>{formatKnowledgeDate(source.receivedAt, locale)}</time>
     </div>
-    <p className="knowledgeSourceMessageText">{displayText}</p>
+    <p className="knowledgeSourceMessageText"><LinkifiedText text={displayText} /></p>
     {source.kind === "audio" && original && <AudioPlayer messageId={source.id} src={original} label={t("originalAudio")} unsupported={t("audioUnsupported")} />}
     {source.kind === "image" && preview && <figure className="knowledgeSourceMessageFigure">
       <button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}>
@@ -161,7 +162,7 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
       <figcaption>{imageCaption}</figcaption>
     </figure>}
     {source.kind === "video" && video && <figure className="knowledgeSourceMessageFigure">
-      <button className="videoPreviewButton" type="button" onClick={() => setVideoOpen(true)} aria-label={t("openVideo")}><video crossOrigin="use-credentials" className="embeddedVideo" muted playsInline preload="metadata" poster={preview || undefined} style={{ aspectRatio: "16 / 9", minHeight: "180px" }} src={video}>{t("videoUnsupported")}</video></button>
+      <button className="videoPreviewButton" type="button" onClick={() => setVideoOpen(true)} aria-label={t("openVideo")}><VideoPlayer videoId={source.id} src={video} poster={source.thumbnailUrl ? preview || undefined : undefined} className="embeddedVideo" controls={false} muted unsupported={t("videoUnsupported")} /></button>
       <figcaption>{t("embeddedVideo")}</figcaption>
     </figure>}
     {imageOpen && original && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={imageAlt} onClick={() => setImageOpen(false)}>
@@ -173,7 +174,7 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
     {videoOpen && video && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={t("embeddedVideo")} onClick={() => setVideoOpen(false)}>
       <div className="imageModal" onClick={(event) => event.stopPropagation()}>
         <button className="imageModalClose" type="button" onClick={() => setVideoOpen(false)} aria-label={t("closeVideo")}>×</button>
-        <video crossOrigin="use-credentials" className="videoModalVideo" controls autoPlay preload="metadata" src={video}>{t("videoUnsupported")}</video>
+        <VideoPlayer videoId={source.id} src={video} className="videoModalVideo" controls autoPlay unsupported={t("videoUnsupported")} />
       </div>
     </div>}
   </article>;
@@ -191,7 +192,7 @@ function KnowledgeBranch({ item, locale, t, depth = 0 }: { item: KnowledgeItem; 
       </div>
       <span className="knowledgeNodeConfidence">{Math.round(item.confidence * 100)}%</span>
     </div>
-    <p className="knowledgeNodeContent">{item.content}</p>
+    <p className="knowledgeNodeContent"><LinkifiedText text={item.content} /></p>
     <div className="knowledgeNodeMeta">
       <span>{t("knowledgeSources", { count: item.sourceMessageIds.length })}</span>
       {children.length > 0 && <span>{t("knowledgeChildren", { count: children.length })}</span>}
@@ -272,8 +273,8 @@ export default function KnowledgePage() {
     {!visibleTopics.length ? <section className="panel emptyState knowledgeEmpty">{t("knowledgeBaseEmpty")}</section> : <section className="knowledgeGrid">{visibleTopics.map((topic) => {
       const items = sortKnowledgeItems(topic.items ?? []);
       return <article className="panel knowledgeCard" key={topic.id}>
-        <div className="knowledgeCardHead"><div><p className="eventGroup">{topic.groupSubject}</p><h2>{topic.title}</h2></div><span className="confidenceBadge">{Math.round(topic.confidence * 100)}%</span></div>
-        <p className="knowledgeSummary">{topic.summary}</p>
+        <div className="knowledgeCardHead"><div><p className="eventGroup">{topic.groupSubject}</p><h2><LinkifiedText text={topic.title} /></h2></div><span className="confidenceBadge">{Math.round(topic.confidence * 100)}%</span></div>
+        <p className="knowledgeSummary"><LinkifiedText text={topic.summary} /></p>
         <div className="knowledgeMeta"><span>{t("knowledgeSources", { count: topic.sourceMessageIds.length })}</span><span>{t("knowledgeItems", { count: countKnowledgeItems(items) })}</span></div>
         <div className="knowledgeHierarchy">{items.map((item) => <KnowledgeBranch key={item.id} item={item} locale={locale} t={t} />)}</div>
       </article>;

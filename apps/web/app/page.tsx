@@ -5,7 +5,8 @@ import Link from "next/link";
 import EventMap from "./event-map";
 import { buildGroupHierarchy, type GroupHierarchyNode } from "./group-hierarchy";
 import { AuthGate, apiFetch } from "./auth";
-import { AudioPlayer } from "./media-player";
+import { AudioPlayer, VideoPlayer } from "./media-player";
+import { LinkifiedText } from "./linkified-text";
 import {
   detectBrowserLocale,
   isSupportedLocale,
@@ -299,7 +300,7 @@ function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscript
     <article className={`message ${depth > 0 ? "messageReply" : ""}`}>
       <div className="messageMeta"><span className="avatar small">{(message.senderName ?? "?").slice(0, 1)}</span><span><strong>{message.senderName ?? message.senderJid}</strong><small>{message.platform === "telegram" ? "Telegram" : "WhatsApp"} · {messageGroupSubject(message, t)} · {time(message.receivedAt, locale)}</small></span><span className={`kind ${message.kind}`}>{kindLabel(message.kind, locale)}</span></div>
       {message.replyToWaMessageId && <p className="replyRef">{t("replyTo", { id: message.replyToWaMessageId })}</p>}
-      <p className="messageText">{displayText}</p>
+      <p className="messageText"><LinkifiedText text={displayText} /></p>
       {message.kind === "audio" && original && <AudioPlayer messageId={message.id} src={original} label={t("originalAudio")} unsupported={t("audioUnsupported")} />}
       {(message.kind === "audio" || message.audioStatus || message.transcript) && <div className={`audioJobPanel ${message.audioStatus === "failed" ? "failed" : ""}`}>
         <div className="audioJobHead"><strong>{t("audioStatus")}</strong><span>{audioStatusLabel(message.audioStatus, t)}</span></div>
@@ -310,8 +311,8 @@ function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscript
         {(message.transcript || message.audioJobId) && <details className="transcriptReview" open={Boolean(message.transcript)}><summary>{t("reviewTranscript")}</summary><textarea value={transcriptDraft} onChange={(event) => setTranscriptDraft(event.target.value)} placeholder={t("transcriptPlaceholder")} /><button className="primaryButton" type="button" disabled={!onTranscriptSaved || !transcriptDraft.trim() || savingTranscript} onClick={async () => { if (!onTranscriptSaved) return; setActionError(null); setSavingTranscript(true); try { await onTranscriptSaved(message.id, transcriptDraft.trim()); } catch (error) { setActionError(error instanceof Error ? error.message : t("connectorError")); } finally { setSavingTranscript(false); } }}>{savingTranscript ? t("retryingAudio") : t("saveTranscript")}</button></details>}
       </div>}
       {message.kind === "image" && source && <figure className="imagePreview"><button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}><img crossOrigin="use-credentials" src={source} alt={message.text ?? (message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageAlt"))} loading="lazy" /></button><figcaption>{message.mediaUrl ? t("knowledgeSourceImage") : t("mockImageCaption")}</figcaption></figure>}
-      {message.kind === "video" && video && <figure className="videoPreview"><button className="videoPreviewButton" type="button" onClick={() => setVideoOpen(true)} aria-label={t("openVideo")}><video crossOrigin="use-credentials" muted playsInline preload="metadata" poster={source || undefined} style={{ aspectRatio: "16 / 9", minHeight: "180px" }} src={video}>{t("videoUnsupported")}</video></button><figcaption>{t("embeddedVideo")}</figcaption></figure>}
-      {message.analysis?.summary && <div className="analysis"><span className="signal">● {message.analysis.relevant === false ? t("lowRelevance") : t("relevant")}</span><span>{message.analysis.summary}</span>{onFeedback && <span className="analysisFeedback"><button className="textButton" type="button" onClick={async () => { await onFeedback(message.id, "accept"); setFeedbackSaved(true); }}>{t("markRelevant")}</button><button className="textButton" type="button" onClick={async () => { await onFeedback(message.id, "reject"); setFeedbackSaved(true); }}>{t("markNotRelevant")}</button>{feedbackSaved && <small>{t("feedbackSaved")}</small>}</span>}</div>}
+      {message.kind === "video" && video && <figure className="videoPreview"><button className="videoPreviewButton" type="button" onClick={() => setVideoOpen(true)} aria-label={t("openVideo")}><VideoPlayer videoId={message.id} src={video} poster={message.thumbnailUrl ? source || undefined : undefined} className="previewVideo" controls={false} muted unsupported={t("videoUnsupported")} /></button><figcaption>{t("embeddedVideo")}</figcaption></figure>}
+      {message.analysis?.summary && <div className="analysis"><span className="signal">● {message.analysis.relevant === false ? t("lowRelevance") : t("relevant")}</span><span><LinkifiedText text={message.analysis.summary} /></span>{onFeedback && <span className="analysisFeedback"><button className="textButton" type="button" onClick={async () => { await onFeedback(message.id, "accept"); setFeedbackSaved(true); }}>{t("markRelevant")}</button><button className="textButton" type="button" onClick={async () => { await onFeedback(message.id, "reject"); setFeedbackSaved(true); }}>{t("markNotRelevant")}</button>{feedbackSaved && <small>{t("feedbackSaved")}</small>}</span>}</div>}
       {message.children.length > 0 && <div className="messageReplies">{message.children.map((child) => <MessageCard key={child.id} message={child} locale={locale} t={t} depth={depth + 1} onRetryAudio={onRetryAudio} onTranscriptSaved={onTranscriptSaved} onFeedback={onFeedback} />)}</div>}
     </article>
     {imageOpen && original && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={message.text ?? t("mockImageAlt")} onClick={() => setImageOpen(false)}>
@@ -323,7 +324,7 @@ function MessageCard({ message, locale, t, depth = 0, onRetryAudio, onTranscript
     {videoOpen && video && <div className="imageModalBackdrop" role="dialog" aria-modal="true" aria-label={t("embeddedVideo")} onClick={() => setVideoOpen(false)}>
       <div className="imageModal" onClick={(event) => event.stopPropagation()}>
         <button className="imageModalClose" type="button" onClick={() => setVideoOpen(false)} aria-label={t("closeVideo")}>×</button>
-        <video crossOrigin="use-credentials" className="videoModalVideo" controls autoPlay preload="metadata" src={video}>{t("videoUnsupported")}</video>
+        <VideoPlayer videoId={message.id} src={video} className="videoModalVideo" controls autoPlay unsupported={t("videoUnsupported")} />
       </div>
     </div>}
   </>;

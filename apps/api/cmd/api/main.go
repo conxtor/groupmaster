@@ -183,6 +183,7 @@ type knowledgeSourceMessage struct {
 	MediaStatus  string    `json:"mediaStatus,omitempty"`
 	ReceivedAt   time.Time `json:"receivedAt"`
 	HasMedia     bool      `json:"hasMedia"`
+	HasThumbnail bool      `json:"-"`
 	ImageURL     string    `json:"imageUrl,omitempty"`
 	MediaURL     string    `json:"mediaUrl,omitempty"`
 	ThumbnailURL string    `json:"thumbnailUrl,omitempty"`
@@ -366,7 +367,7 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 		item.ImageURL = mockImageURL(item.GroupID, item.Text)
 		if (item.Kind == "image" || item.Kind == "video" || item.Kind == "audio") && item.HasMedia && (item.Platform == "telegram" || !strings.HasPrefix(item.GroupID, "120363mock")) {
 			item.MediaURL = a.signedMediaURL(item.ID, false)
-			if item.Kind == "image" || item.Kind == "video" {
+			if item.Kind == "image" || (item.Kind == "video" && thumbnailPath != nil && *thumbnailPath != "") {
 				item.ThumbnailURL = a.signedMediaURL(item.ID, true)
 			}
 		} else if objectPath != nil && *objectPath != "" {
@@ -531,6 +532,8 @@ func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("content-type", contentType)
 	w.Header().Set("cache-control", "private, max-age=300")
+	w.Header().Set("accept-ranges", "bytes")
+	w.Header().Set("content-disposition", "inline")
 	http.ServeContent(w, r, filepath.Base(filePath), info.ModTime(), file)
 }
 
@@ -724,7 +727,7 @@ func (a *app) hydrateKnowledgeItems(items []knowledgeItem, sources map[string]kn
 				source.ImageURL = mockImageURL(source.GroupID, source.Text)
 				if source.HasMedia && !strings.HasPrefix(source.GroupID, "120363mock") {
 					source.MediaURL = a.signedMediaURL(source.ID, false)
-					if source.Kind == "image" || source.Kind == "video" {
+					if source.Kind == "image" || (source.Kind == "video" && source.HasThumbnail) {
 						source.ThumbnailURL = a.signedMediaURL(source.ID, true)
 					}
 				}
@@ -751,7 +754,8 @@ func (a *app) hydrateKnowledgeTopics(ctx context.Context, topics []knowledgeTopi
 	rows, err := a.db.Query(ctx, `
 		SELECT m.id::text, m.group_id, m.sender_jid, m.sender_name, m.kind,
 		       COALESCE(NULLIF(aj.transcript, ''), m.text),
-		       m.media_mime, m.media_status, m.received_at, m.has_media
+		       m.media_mime, m.media_status, m.received_at, m.has_media,
+		       COALESCE(mo.has_thumbnail, false)
 		FROM messages m
 		LEFT JOIN LATERAL (
 			SELECT transcript
@@ -760,6 +764,13 @@ func (a *app) hydrateKnowledgeTopics(ctx context.Context, topics []knowledgeTopi
 			ORDER BY updated_at DESC
 			LIMIT 1
 		) aj ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT NULLIF(thumbnail_path, '') IS NOT NULL AS has_thumbnail
+			FROM media_objects
+			WHERE message_id = m.id
+			ORDER BY updated_at DESC
+			LIMIT 1
+		) mo ON TRUE
 		WHERE m.id::text = ANY($1::text[])`, sourceIDs)
 	if err != nil {
 		return err
@@ -768,7 +779,7 @@ func (a *app) hydrateKnowledgeTopics(ctx context.Context, topics []knowledgeTopi
 	sources := make(map[string]knowledgeSourceMessage, len(sourceIDs))
 	for rows.Next() {
 		var source knowledgeSourceMessage
-		if err := rows.Scan(&source.ID, &source.GroupID, &source.SenderJID, &source.SenderName, &source.Kind, &source.Text, &source.MediaMime, &source.MediaStatus, &source.ReceivedAt, &source.HasMedia); err != nil {
+		if err := rows.Scan(&source.ID, &source.GroupID, &source.SenderJID, &source.SenderName, &source.Kind, &source.Text, &source.MediaMime, &source.MediaStatus, &source.ReceivedAt, &source.HasMedia, &source.HasThumbnail); err != nil {
 			return err
 		}
 		sources[source.ID] = source

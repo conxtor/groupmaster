@@ -6,7 +6,7 @@
 
 Ich möchte die Anwendung nun mit docker-compose auf einem server mit Dockge deployen. 
 
-Erzeuge zuerst einen GitHub Actions workflow der bei Manueller Ausführung des workflow die notwendigen images in ghcr erzeugt.
+Erzeuge zuerst einen GitHub Actions workflow der bei Manueller Ausführung des workflow (worklow_dispatch) die notwendigen images in ghcr erzeugt.
 
 Hier ist ein beispiel für das deployment. Reverse-proxy ist traefik: 
 
@@ -125,14 +125,8 @@ HF_TOKEN: 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
 =========================================================================================================================================
 
 
-In der "Konnektoren einrichten" seite soll bei bestehender Anmeldung nicht der Button "-QR starten" sondern ein "Abmelden"-Button erscheinen, der die entsprechende Sitzung (WA oder TG) dann auch tatsächlich abmeldet. 
-Die Gruppen des abgemeldeten Dienstes, dazugehörigen Nachrichten und medien des users sollen nach der Abmeldung in Kaskade gelöscht werden. 
 
 =========================================================================================================================================
 
-Videos sollen in einem Modal, ähnlich zu Bilddateien öffnen
-Bei Audionachrichten soll neben der Transkription auch das original-Audio abhörbar sein. 
-Evtl. ist hierfür der Eintrag
-client_max_body_size 32m;
-in der NGINX-Konfiguration zu knapp bemessen. 
+
 
