@@ -50,3 +50,5 @@ footer { display:flex; justify-content:space-between; color:#9aa39c; font-size:.
 /* Knowledge topics stay readable on wide screens and collapse on mobile. */
 .knowledgeGrid { grid-template-columns:repeat(2,minmax(0,1fr)); }
 @media (max-width:800px) { .knowledgeGrid { grid-template-columns:1fr; } }
+
+.adminSubpageLink { display:flex; align-items:center; justify-content:space-between; gap:16px; }

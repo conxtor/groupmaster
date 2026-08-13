@@ -587,6 +587,7 @@ Bootstrap-Administrator wird beim ersten erfolgreichen API-Start angelegt.
 - `POST /api/v1/auth/register` für normale Nutzerkonten
 - `GET/POST /api/v1/connectors/accounts` für eigene persistente Connector-Konten
 - `GET /api/v1/admin/users` und `PATCH /api/v1/admin/users/{id}` für Administratoren
+- Admin-Betriebsübersicht unter `/admin`; die Benutzerverwaltung liegt separat unter `/admin/users`.
 - `GET /healthz` und `GET /readyz`
 - `GET /api/v1/groups`
 - `PUT /api/v1/groups/{groupId}/select` mit `{ "selected": true|false }`
