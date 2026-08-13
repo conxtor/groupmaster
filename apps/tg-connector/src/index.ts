@@ -237,11 +237,10 @@ async function finishProcessingCycle() {
   const lease = accountLease;
   if (accountRotationTimer) clearTimeout(accountRotationTimer);
   accountRotationTimer = null;
-  await lease.completeSync(new Date(Date.now() + connectorSyncIntervalSeconds * 1000)).catch((error) => console.warn("Telegram sync completion persistence failed", error));
   await destroyDirectClient();
   accountLease = null;
   accountUserIsAdmin = false;
-  await lease.release().catch((error) => console.warn("Telegram processing lease release failed", error));
+  await lease.completeAndRelease(new Date(Date.now() + connectorSyncIntervalSeconds * 1000), "sync_completed").catch((error) => console.warn("Telegram processing lease completion failed", error));
   console.log(`Telegram worker ${poolWorkerId} released account ${lease.account.accountId} after sync`);
 }
 

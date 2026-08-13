@@ -105,6 +105,20 @@ export class ConnectorAccountLease {
     );
   }
 
+  /**
+   * Mark a processing cycle complete and release the account slot in one
+   * idempotent operation. The release is guaranteed even when persisting the
+   * next scheduled sync fails, so a failed control-plane update cannot keep a
+   * connector worker pinned to one user until lease expiry.
+   */
+  async completeAndRelease(nextSyncAt: Date, reason = "sync_completed") {
+    try {
+      await this.completeSync(nextSyncAt);
+    } finally {
+      await this.release(reason);
+    }
+  }
+
   async updateQR(values: { status: string; qrPayload?: string | null; expiresAt?: Date | null; workerId?: string | null; error?: string | null }) {
     await this.store.query(
       `INSERT INTO connector_qr_sessions (account_id,user_id,platform,status,qr_payload,expires_at,worker_id,last_error)

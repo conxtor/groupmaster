@@ -254,9 +254,8 @@ async function finishProcessingCycle() {
   try { (waSocket as any)?.end?.(); } catch { /* best effort */ }
   waSocket = null;
   await flushAuthSnapshot(join(authDir, lease.account.accountId), lease.account.accountId).catch((snapshotError) => console.warn("WhatsApp processing session snapshot failed", snapshotError));
-  await lease.completeSync(new Date(Date.now() + connectorSyncIntervalSeconds * 1000)).catch((error) => console.warn("WhatsApp sync completion persistence failed", error));
   accountLease = null;
-  await lease.release().catch((error) => console.warn("WhatsApp processing lease release failed", error));
+  await lease.completeAndRelease(new Date(Date.now() + connectorSyncIntervalSeconds * 1000), "sync_completed").catch((error) => console.warn("WhatsApp processing lease completion failed", error));
   console.log(`WhatsApp worker ${poolWorkerId} released account ${lease.account.accountId} after sync`);
 }
 
@@ -1120,9 +1119,9 @@ async function connectWhatsApp() {
           return;
         }
         await backfillSelectedWhatsAppGroups(socket);
-        void retryMissingWhatsAppMedia(socket)
+        await retryMissingWhatsAppMedia(socket)
           .catch((error) => console.warn("WhatsApp missing-media repair failed", error));
-        await setStatus("ready", `WhatsApp verbunden; ${backfillDays}-Tage-Backfill eingeplant, Medienreparatur läuft im Hintergrund`);
+        await setStatus("ready", `WhatsApp verbunden; ${backfillDays}-Tage-Backfill und Medienaktualisierung abgeschlossen`);
         await finishProcessingCycle();
       })().catch((error) => void setStatus("degraded", "WhatsApp-Backfill konnte nicht vollständig gestartet werden", error));
     }
