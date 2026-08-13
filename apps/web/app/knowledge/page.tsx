@@ -46,7 +46,7 @@ type KnowledgeItem = {
   sourceMessages?: KnowledgeSourceMessage[];
   children?: KnowledgeItem[];
 };
-type KnowledgeTopic = { id: string; groupId: string; groupSubject: string; topicKey: string; title: string; summary: string; confidence: number; sourceMessageIds: string[]; items: KnowledgeItem[]; updatedAt: string };
+type KnowledgeTopic = { id: string; groupId: string; groupSubject: string; topicKey: string; subtopicKey?: string; parentTopicId?: string; title: string; summary: string; confidence: number; sourceMessageIds: string[]; items: KnowledgeItem[]; subtopics?: KnowledgeTopic[]; updatedAt: string };
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -90,8 +90,18 @@ function stabilizeKnowledgeItem(item: KnowledgeItem, previousSources: Map<string
 
 function preserveKnowledgeMedia(previousTopics: KnowledgeTopic[], nextTopics: KnowledgeTopic[]) {
   const previousSources = new Map<string, KnowledgeSourceMessage>();
-  for (const topic of previousTopics) collectKnowledgeSources(topic.items ?? [], previousSources);
-  return nextTopics.map((topic) => ({ ...topic, items: (topic.items ?? []).map((item) => stabilizeKnowledgeItem(item, previousSources)) }));
+  for (const topic of previousTopics) {
+    collectKnowledgeSources(topic.items ?? [], previousSources);
+    for (const subtopic of topic.subtopics ?? []) collectKnowledgeSources(subtopic.items ?? [], previousSources);
+  }
+  return nextTopics.map((topic) => ({
+    ...topic,
+    items: (topic.items ?? []).map((item) => stabilizeKnowledgeItem(item, previousSources)),
+    subtopics: topic.subtopics?.map((subtopic) => ({
+      ...subtopic,
+      items: (subtopic.items ?? []).map((item) => stabilizeKnowledgeItem(item, previousSources)),
+    })),
+  }));
 }
 
 function itemTypeLabel(itemType: KnowledgeItem["itemType"], t: Translator) {
@@ -215,6 +225,16 @@ function KnowledgeBranch({ item, locale, t, depth = 0 }: { item: KnowledgeItem; 
   </div>;
 }
 
+function KnowledgeTopicBranch({ topic, locale, t, nested = false }: { topic: KnowledgeTopic; locale: Locale; t: Translator; nested?: boolean }) {
+  const items = sortKnowledgeItems(topic.items ?? []);
+  return <section className={nested ? "knowledgeSubtopic" : "knowledgeRootTopic"}>
+    <div className="knowledgeCardHead"><div><p className="eventGroup">{nested ? topic.title : topic.groupSubject}</p>{nested ? <h3><LinkifiedText text={topic.title} /></h3> : <h2><LinkifiedText text={topic.title} /></h2>}</div><span className="confidenceBadge">{Math.round(topic.confidence * 100)}%</span></div>
+    <p className="knowledgeSummary"><LinkifiedText text={topic.summary} /></p>
+    <div className="knowledgeMeta"><span>{t("knowledgeSources", { count: topic.sourceMessageIds.length })}</span><span>{t("knowledgeItems", { count: countKnowledgeItems(items) })}</span></div>
+    <div className="knowledgeHierarchy">{items.map((item) => <KnowledgeBranch key={item.id} item={item} locale={locale} t={t} />)}</div>
+  </section>;
+}
+
 export default function KnowledgePage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [topics, setTopics] = useState<KnowledgeTopic[]>([]);
@@ -282,12 +302,9 @@ export default function KnowledgePage() {
     <section className="selectionIntro"><div><p className="eyebrow">{t("knowledge")}</p><p className="selectionLead">{t("knowledgeBaseHint")}</p></div><label className="knowledgeSourcePicker"><span>{t("selectedGroupsOnly")}</span><select value={selectedGroup} onChange={(event) => setSelectedGroup(event.target.value)}><option value="all">{t("allSelected")}</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.subject}</option>)}</select></label></section>
     {error && <div className="notice">{error}</div>}
     {!visibleTopics.length ? <section className="panel emptyState knowledgeEmpty">{t("knowledgeBaseEmpty")}</section> : <section className="knowledgeGrid">{visibleTopics.map((topic) => {
-      const items = sortKnowledgeItems(topic.items ?? []);
       return <article className="panel knowledgeCard" key={topic.id}>
-        <div className="knowledgeCardHead"><div><p className="eventGroup">{topic.groupSubject}</p><h2><LinkifiedText text={topic.title} /></h2></div><span className="confidenceBadge">{Math.round(topic.confidence * 100)}%</span></div>
-        <p className="knowledgeSummary"><LinkifiedText text={topic.summary} /></p>
-        <div className="knowledgeMeta"><span>{t("knowledgeSources", { count: topic.sourceMessageIds.length })}</span><span>{t("knowledgeItems", { count: countKnowledgeItems(items) })}</span></div>
-        <div className="knowledgeHierarchy">{items.map((item) => <KnowledgeBranch key={item.id} item={item} locale={locale} t={t} />)}</div>
+        <KnowledgeTopicBranch topic={topic} locale={locale} t={t} />
+        {!!topic.subtopics?.length && <div className="knowledgeSubtopics">{topic.subtopics.map((subtopic) => <KnowledgeTopicBranch key={subtopic.id} topic={subtopic} locale={locale} t={t} nested />)}</div>}
       </article>;
     })}</section>}
     <footer><span>{t("footer")}</span><Link href="/">{t("openDashboard")}</Link></footer>

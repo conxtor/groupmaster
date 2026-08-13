@@ -382,12 +382,16 @@ Beiträge desselben erkannten Themas werden hierarchisch gespeichert: Ein
 übergeordneter Zusammenfassungs-Knoten bündelt die Quellen, darunter liegen
 die einzelnen Detailbeiträge. API und Web-Oberfläche sortieren Themen und
 Beiträge jeweils mit den neuesten Aktualisierungen zuerst; Unterbeiträge
-können im Dashboard ein- und ausgeblendet werden. Die dafür benötigte
-Migration liegt in `infra/migrations/004_knowledge_hierarchy.sql`.
+können im Dashboard ein- und ausgeblendet werden. Die Grundstruktur liegt in
+`infra/migrations/004_knowledge_hierarchy.sql`;
+sprachabhängige Themen und die aktuelle Generation in
+`infra/migrations/019_knowledge_topics.sql` und
+`infra/migrations/020_knowledge_generations.sql`.
 
 Die aktuelle Qualitätskaskade (`cascade-v4`) arbeitet in drei lokalen Stufen:
 
-1. evidenzbasierte Regeln für Relevanz, Event-Kandidaten und Themen;
+1. evidenzbasierte Regeln für Relevanz und Event-Kandidaten sowie
+   datenbankbasierte, sprachabhängige Topic-/Detailbegriffe;
 2. ein begrenztes mehrsprachiges Embedding-Fenster für semantische
    Zusammenführung, stabile Event-/Knowledge-Schlüssel und eine vorsichtige
    hierarchische Speicherung;
@@ -436,9 +440,14 @@ Floskeln in Deutsch, Spanisch, Katalanisch, Englisch und Französisch.
 Füll- und Ausschlusswörter werden im laufenden Betrieb ausschließlich aus
 `ai_learning_terms` geladen. AI-Worker und API enthalten dafür keine statischen
 mehrsprachigen Stopword-Listen mehr; Änderungen können dadurch pro Sprache und
-optional pro Gruppe über die Administrationsseite gepflegt werden. Fachliche
-Event-, Orts- und Knowledge-Regeln bleiben als erklärbare Heuristik-Fallbacks
-erhalten.
+optional pro Gruppe über die Administrationsseite gepflegt werden. Auch die
+Knowledge-Themen und ihre Erkennungsbegriffe werden nicht mehr parallel im
+Worker gepflegt: `knowledge_topic_definitions` enthält die aktivierten,
+sprachabhängigen Oberthemen, Beschreibungen und Signalrollen, `ai_learning_terms`
+die editierbaren Topic-/Detailbegriffe. Die Standardthemen werden durch die
+Migrationen `019_knowledge_topics.sql`, `021_knowledge_heuristics.sql` und
+`022_knowledge_topic_roles.sql` angelegt und können danach administrativ
+angepasst, ergänzt oder deaktiviert werden.
 
 Die Persistenz dafür liegt in `infra/migrations/011_ai_quality_feedback.sql`.
 Sie enthält Feedback, kanonische Alias-Zuordnungen und ausschließlich aus
@@ -458,6 +467,18 @@ lokal und speichert die Vektoren in pgvector. Das Modell wird
 beim ersten Start geladen und im Compose-Volume `ai_models` zwischengespeichert.
 Die Schwellenwerte lassen sich über `AI_SEMANTIC_DISCOVERY_THRESHOLD` und
 `AI_SEMANTIC_MERGE_THRESHOLD` anpassen.
+
+Unterthemen werden heuristisch aus dem Inhalt des jeweiligen Threads erzeugt.
+Ein bestehendes Unterthema wird nur bei ausreichender lexikalischer oder
+semantischer Überschneidung wiederverwendet; dadurch bleiben verschiedene
+Fragen innerhalb eines Oberthemas getrennt. Die daraus ermittelten Begriffe
+werden in `knowledge_subtopic_terms` gruppen-, sprach- und themengebunden mit
+kleinen Gewichten gespeichert. Neue Nachrichten können dadurch konservativ
+ähnliche Threads wiederfinden, ohne die Begriffe anderer Gruppen zu
+übertragen. Der Unterthementitel wird aus dem ersten aussagekräftigen Satz
+des Threads abgeleitet und nicht mehr mit einem generischen Label wie
+„Erkenntnis“ erzeugt. Ein KB-Neuaufbau lernt diese Profile in der neuen
+Generation erneut.
 
 Für die Kaskade können Kontextfenster und Event-Schwelle angepasst werden:
 
@@ -766,6 +787,28 @@ Events werden weiterhin aus `message_analyses.events` im Dashboard separat
 dargestellt. Thematische Fakten und Erkenntnisse werden zusätzlich durch den
 AI-Worker erkannt, in `knowledge_topics`/`knowledge_items` gruppiert und unter
 `/knowledge` getrennt von Events und relevanten Nachrichten angezeigt.
+
+### KB-Themen, Unterthemen und Neuaufbau
+
+Administratoren pflegen die Oberthemen und ihre Übersetzungen unter
+`/admin/knowledge-topics`. Das Feld **Thema** im Lernmodell für
+Knowledge-Schlüsselwörter ist ein Dropdown und verwendet die aktiv gepflegten
+Themen der gewählten Sprache. Ein gemeinsamer `topicKey` verbindet die fünf
+Sprachvarianten.
+
+Die Knowledge Base trennt Oberthemen von automatisch erzeugten Unterthemen.
+Unterthemen werden aus stabilen Entitäts-, Orts- und Inhaltsmerkmalen gebildet;
+Nachrichten werden nur bei ausreichender inhaltlicher Überschneidung in einem
+Unterthema zusammengeführt. Dadurch wird ein allgemeines Thema nicht mehr mit
+allen Nachrichten der Gruppe gefüllt.
+
+Über **KB neu erstellen** kann ein Administrator die Knowledge Base aus den
+gespeicherten Nachrichtentexten, Transkripten, OCR-Ergebnissen und Metadaten
+neu erzeugen. Medien werden dabei nicht erneut heruntergeladen oder
+transkribiert. Der Aufbau läuft im separaten JetStream-Stream
+`WAGI_KB_REBUILD`; eine neue Generation wird erst nach vollständigem Erfolg
+aktiv geschaltet. Bei Fehlern bleibt die bisher sichtbare Generation erhalten.
+Der Fortschritt wird auf der Admin-Seite angezeigt.
 
 ## Bekannte Risiken und Sicherheitsgrenzen
 

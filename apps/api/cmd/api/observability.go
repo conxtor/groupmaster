@@ -182,6 +182,7 @@ var observabilityConsumers = map[string][]string{
 	},
 	"WAGI_DLQ":          {},
 	"WAGI_REASSESSMENT": {"WAGI_AI_REASSESSMENT"},
+	"WAGI_KB_REBUILD":   {"WAGI_KB_REBUILD"},
 }
 
 func (a *app) adminObservability(w http.ResponseWriter, r *http.Request) {

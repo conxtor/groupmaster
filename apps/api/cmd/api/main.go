@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -163,16 +164,19 @@ type knowledgeItem struct {
 }
 
 type knowledgeTopic struct {
-	ID               string          `json:"id"`
-	GroupID          string          `json:"groupId"`
-	GroupSubject     string          `json:"groupSubject"`
-	TopicKey         string          `json:"topicKey"`
-	Title            string          `json:"title"`
-	Summary          string          `json:"summary"`
-	Confidence       float64         `json:"confidence"`
-	SourceMessageIDs []string        `json:"sourceMessageIds"`
-	Items            []knowledgeItem `json:"items"`
-	UpdatedAt        time.Time       `json:"updatedAt"`
+	ID               string           `json:"id"`
+	GroupID          string           `json:"groupId"`
+	GroupSubject     string           `json:"groupSubject"`
+	TopicKey         string           `json:"topicKey"`
+	SubtopicKey      string           `json:"subtopicKey,omitempty"`
+	ParentTopicID    *string          `json:"parentTopicId,omitempty"`
+	Title            string           `json:"title"`
+	Summary          string           `json:"summary"`
+	Confidence       float64          `json:"confidence"`
+	SourceMessageIDs []string         `json:"sourceMessageIds"`
+	Items            []knowledgeItem  `json:"items"`
+	Subtopics        []knowledgeTopic `json:"subtopics,omitempty"`
+	UpdatedAt        time.Time        `json:"updatedAt"`
 }
 
 type knowledgeSourceMessage struct {
@@ -578,7 +582,7 @@ func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 		conditions = append(conditions, "kt.group_id = "+arg(value))
 	}
 	rows, err := a.db.Query(r.Context(), fmt.Sprintf(`
-		SELECT kt.id::text, kt.group_id, g.subject, kt.topic_key, kt.title, kt.summary, kt.confidence,
+		SELECT kt.id::text, kt.group_id, g.subject, kt.topic_key, kt.subtopic_key, kt.parent_topic_id::text, kt.title, kt.summary, kt.confidence,
 		       kt.source_message_ids,
 		       COALESCE(jsonb_agg(jsonb_build_object(
 		         'id', parent.id::text,
@@ -603,9 +607,10 @@ func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 		       ) ORDER BY parent.updated_at DESC) FILTER (WHERE parent.id IS NOT NULL), '[]'::jsonb), kt.updated_at
 		FROM knowledge_topics kt
 		JOIN wa_groups g ON g.id = kt.group_id
+		JOIN knowledge_generation_state kgs ON kgs.id=TRUE AND kgs.active_generation_id=kt.generation_id
 		LEFT JOIN knowledge_items parent ON parent.topic_id = kt.id AND parent.parent_item_id IS NULL
 		WHERE %s
-		GROUP BY kt.id, kt.group_id, g.subject, kt.topic_key, kt.title, kt.summary, kt.confidence, kt.source_message_ids, kt.updated_at
+		GROUP BY kt.id, kt.group_id, g.subject, kt.topic_key, kt.subtopic_key, kt.parent_topic_id, kt.title, kt.summary, kt.confidence, kt.source_message_ids, kt.updated_at
 		ORDER BY kt.updated_at DESC, g.subject`, strings.Join(conditions, " AND ")), args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
@@ -617,7 +622,7 @@ func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 		var item knowledgeTopic
 		var topicSourceIDs json.RawMessage
 		var itemsJSON json.RawMessage
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.TopicKey, &item.Title, &item.Summary, &item.Confidence, &topicSourceIDs, &itemsJSON, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.TopicKey, &item.SubtopicKey, &item.ParentTopicID, &item.Title, &item.Summary, &item.Confidence, &topicSourceIDs, &itemsJSON, &item.UpdatedAt); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -635,7 +640,30 @@ func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, result)
+	// Keep the public response hierarchical: each generated subtopic belongs
+	// to its stable root topic, while older root-only rows remain unchanged.
+	roots := make([]knowledgeTopic, 0, len(result))
+	rootIndexes := make(map[string]int, len(result))
+	for _, topic := range result {
+		if topic.ParentTopicID == nil || *topic.ParentTopicID == "" {
+			rootIndexes[topic.ID] = len(roots)
+			roots = append(roots, topic)
+		}
+	}
+	for _, topic := range result {
+		if topic.ParentTopicID == nil || *topic.ParentTopicID == "" {
+			continue
+		}
+		if index, ok := rootIndexes[*topic.ParentTopicID]; ok {
+			roots[index].Subtopics = append(roots[index].Subtopics, topic)
+		}
+	}
+	for index := range roots {
+		sort.SliceStable(roots[index].Subtopics, func(left, right int) bool {
+			return roots[index].Subtopics[left].UpdatedAt.After(roots[index].Subtopics[right].UpdatedAt)
+		})
+	}
+	writeJSON(w, 200, roots)
 }
 
 func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
@@ -762,6 +790,13 @@ func collectKnowledgeSourceIDs(items []knowledgeItem, ids map[string]struct{}) {
 	}
 }
 
+func collectKnowledgeTopicSourceIDs(topics []knowledgeTopic, ids map[string]struct{}) {
+	for _, topic := range topics {
+		collectKnowledgeSourceIDs(topic.Items, ids)
+		collectKnowledgeTopicSourceIDs(topic.Subtopics, ids)
+	}
+}
+
 func (a *app) hydrateKnowledgeItems(items []knowledgeItem, sources map[string]knowledgeSourceMessage) {
 	for index := range items {
 		item := &items[index]
@@ -788,9 +823,7 @@ func (a *app) hydrateKnowledgeItems(items []knowledgeItem, sources map[string]kn
 
 func (a *app) hydrateKnowledgeTopics(ctx context.Context, topics []knowledgeTopic) error {
 	ids := make(map[string]struct{})
-	for _, topic := range topics {
-		collectKnowledgeSourceIDs(topic.Items, ids)
-	}
+	collectKnowledgeTopicSourceIDs(topics, ids)
 	if len(ids) == 0 {
 		return nil
 	}
@@ -839,6 +872,7 @@ func (a *app) hydrateKnowledgeTopics(ctx context.Context, topics []knowledgeTopi
 	}
 	for index := range topics {
 		a.hydrateKnowledgeItems(topics[index].Items, sources)
+		a.hydrateKnowledgeTopics(ctx, topics[index].Subtopics)
 	}
 	return nil
 }
@@ -1296,6 +1330,8 @@ func main() {
 	mux.HandleFunc("/api/v1/admin/observability", requireAdmin(a, a.adminObservability))
 	mux.HandleFunc("/api/v1/admin/ai-learning", requireAdmin(a, a.adminAILearning))
 	mux.HandleFunc("/api/v1/admin/ai-learning/", requireAdmin(a, a.adminAILearning))
+	mux.HandleFunc("/api/v1/admin/knowledge/topics", requireAdmin(a, a.adminKnowledgeTopics))
+	mux.HandleFunc("/api/v1/admin/knowledge/topics/", requireAdmin(a, a.adminKnowledgeTopics))
 	mux.HandleFunc("/api/v1/connectors/accounts", requireAuthenticated(a, a.connectorAccounts))
 	mux.HandleFunc("/api/v1/connectors/accounts/", requireAuthenticated(a, a.connectorAccountAction))
 	mux.HandleFunc("/api/v1/status", requireAuthenticated(a, a.status))

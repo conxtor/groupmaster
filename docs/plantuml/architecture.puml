@@ -34,6 +34,7 @@ package "Connector-Pools" {
 package "Event- und Verarbeitungsplattform" {
   queue "NATS JetStream\nWAGI_EVENTS" as NATS
   queue "NATS JetStream\nWAGI_REASSESSMENT" as ReassessmentNATS
+  queue "NATS JetStream\nWAGI_KB_REBUILD" as KnowledgeRebuildNATS
   component "media-worker\nMinIO + OCR + whisper.cpp medium" as Media
   component "ai-worker\nHeuristik + Embeddings\noptional Hermes-Agent" as AI
   component "NATS Provisioner\nStreams + Durable Consumer" as Provisioner
@@ -57,6 +58,7 @@ User --> Web : /profile\nName, E-Mail, Passwort, Sprache
 Admin --> Web : /admin\nNutzer anlegen, Rolle, Status
 Admin --> Web : /admin/ai-learning\nKategorien, Zeitmetriken, Suche
 Admin --> Web : /admin/ai-learning/{category}\nBegriffe, Bulk-Aktionen
+Admin --> Web : /admin/knowledge-topics\nThemen je Sprache + KB neu erstellen
 API --> Mail : SMTP STARTTLS/TLS\nsprachabhängige Auth-Mails
 Mail --> User : Verifizierungslink\nPasswort-Reset-Link
 
@@ -74,6 +76,7 @@ TelegramBot ..> TGConnector : optional Bot API fallback
 API --> DB : Auth, groups, accounts,\nselection, cursors, queries
 API --> NATS : control events, audio jobs,\nfeedback, replay
 API --> ReassessmentNATS : ai.reassessment.requested\nAdministrator-Job
+API --> KnowledgeRebuildNATS : knowledge.rebuild.requested\nGeneration-based KB rebuild
 API --> MediaVolume : signed media streaming
 
 WAConnector --> DB : groups, messages,\nrevisions, contacts, cursors
@@ -89,12 +92,14 @@ Media --> NATS : media.audio.transcribed\nmedia.image.analyzed\nmedia.document.a
 
 NATS --> AI : wa.messages.received\nmedia.*.analyzed\nreplay.requested
 ReassessmentNATS --> AI : ai.reassessment.requested\nseparater Durable Consumer
-AI --> DB : ai_jobs, message_analyses,\nknowledge hierarchy + graph,\nai_learning_terms
+KnowledgeRebuildNATS --> AI : knowledge.rebuild.requested\nseparater Durable Consumer
+AI --> DB : ai_jobs, message_analyses,\nknowledge hierarchy + graph,\nai_learning_terms + topic definitions\nknowledge_subtopic_terms
 AI --> DB : ai_learning_term_history\ncreated, feedback, inferred, admin
 AI --> NATS : ai.messages.analyzed\nDLQ bei Fehlern
 AI ..> MinIO : optional document/media context
 Provisioner --> NATS : WAGI_EVENTS,\nWAGI_* durable consumers
 Provisioner --> ReassessmentNATS : WAGI_REASSESSMENT\nWAGI_AI_REASSESSMENT
+Provisioner --> KnowledgeRebuildNATS : WAGI_KB_REBUILD\nWAGI_KB_REBUILD
 
 note right of ReassessmentNATS
   Neubewertung liest nur persistierte
@@ -102,6 +107,13 @@ note right of ReassessmentNATS
   Keine Medien- oder Connector-Jobs.
   Gedrosselt, damit Live-Verarbeitung
   unabhängig weiterlaufen kann.
+end note
+
+note right of KnowledgeRebuildNATS
+  Nachrichtentexte, gespeicherte Transkripte,
+  OCR und Metadaten werden in einer neuen
+  Generation verarbeitet. Die alte Generation
+  bleibt aktiv, bis der Lauf erfolgreich endet.
 end note
 
 note right of WAConnector

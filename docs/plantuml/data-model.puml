@@ -204,11 +204,55 @@ entity message_analyses {
 entity knowledge_topics {
   * id : uuid <<PK>>
   --
+  generation_id : uuid
   group_id : text <<FK>>
   topic_key : text
+  subtopic_key : text
+  parent_topic_id : uuid <<FK/self>>
   title : text
   summary : text
   source_message_ids : jsonb
+}
+
+entity knowledge_topic_definitions {
+  * id : uuid <<PK>>
+  --
+  language : de | es | ca | en | fr
+  topic_key : text
+  title : text
+  description : text
+  signal_type : content | location | entity
+  enabled : bool
+  sort_order : integer
+}
+
+entity knowledge_subtopic_terms {
+  * id : uuid <<PK>>
+  --
+  group_id : text <<FK>>
+  language : de | es | ca | en | fr
+  topic_key : text
+  subtopic_key : text
+  term : text
+  weight : numeric
+  source : system | admin | inferred
+  positive_count : int
+  updated_at : timestamptz
+}
+
+entity knowledge_rebuild_jobs {
+  * id : uuid <<PK>>
+  --
+  generation_id : uuid
+  status : queued | running | completed | failed
+  total/processed/failed/skipped : integer
+  error : text
+}
+
+entity knowledge_generation_state {
+  * id : bool <<PK>>
+  --
+  active_generation_id : uuid
 }
 
 entity knowledge_items {
@@ -350,6 +394,12 @@ messages ||--o{ audio_jobs
 messages ||--o| ai_jobs
 messages ||--o| message_analyses
 knowledge_topics ||--o{ knowledge_items
+knowledge_topics ||--o{ knowledge_topics : root/subtopic
+knowledge_topic_definitions ..> knowledge_topics : localized title
+wa_groups ||--o{ knowledge_subtopic_terms
+knowledge_subtopic_terms ..> knowledge_topics : learned subtopic profile
+knowledge_generation_state ||--o{ knowledge_topics : active generation
+knowledge_rebuild_jobs ..> knowledge_generation_state : switches on success
 knowledge_items ||--o{ knowledge_items : parent/detail
 messages ||--o{ ai_feedback
 app_users ||--o{ ai_feedback

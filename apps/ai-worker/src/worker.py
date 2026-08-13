@@ -77,60 +77,6 @@ LANGUAGE_MARKERS = {
     "fr": {"demain", "aujourd", "voyage", "plage", "rendez", "fait"},
 }
 
-KNOWLEDGE_TOPIC_TITLES = {
-    "de": {
-        "travel": "Reisen und Ausflüge",
-        "technology": "Technik und Software",
-        "radio": "Funk und Elektronik",
-        "shopping": "Käufe und Empfehlungen",
-        "people": "Personen und Organisationen",
-        "places": "Orte und Treffpunkte",
-        "entities": "Erwähnte Personen und Begriffe",
-        "general": "Allgemeine Erkenntnisse",
-    },
-    "es": {
-        "travel": "Viajes y excursiones",
-        "technology": "Tecnología y software",
-        "radio": "Radio y electrónica",
-        "shopping": "Compras y recomendaciones",
-        "people": "Personas y organizaciones",
-        "places": "Lugares y puntos de encuentro",
-        "entities": "Personas y términos mencionados",
-        "general": "Conocimientos generales",
-    },
-    "ca": {
-        "travel": "Viatges i excursions",
-        "technology": "Tecnologia i programari",
-        "radio": "Ràdio i electrònica",
-        "shopping": "Compres i recomanacions",
-        "people": "Persones i organitzacions",
-        "places": "Llocs i punts de trobada",
-        "entities": "Persones i termes esmentats",
-        "general": "Coneixements generals",
-    },
-    "en": {
-        "travel": "Travel and outings",
-        "technology": "Technology and software",
-        "radio": "Radio and electronics",
-        "shopping": "Purchases and recommendations",
-        "people": "People and organizations",
-        "places": "Places and meeting points",
-        "entities": "Mentioned people and terms",
-        "general": "General insights",
-    },
-    "fr": {
-        "travel": "Voyages et excursions",
-        "technology": "Technologie et logiciels",
-        "radio": "Radio et électronique",
-        "shopping": "Achats et recommandations",
-        "people": "Personnes et organisations",
-        "places": "Lieux et points de rendez-vous",
-        "entities": "Personnes et termes mentionnés",
-        "general": "Connaissances générales",
-    },
-}
-
-
 def detect_group_language(texts: list[str]) -> str | None:
     normalized = " ".join(text.strip().casefold() for text in texts if text and text.strip())
     if not normalized:
@@ -150,11 +96,6 @@ def detect_group_language(texts: list[str]) -> str | None:
         scores[language] += sum(normalized.count(hint) for hint in hints) * 0.25
     best_language, best_score = max(scores.items(), key=lambda item: item[1])
     return best_language if best_score >= 1 else None
-
-
-def localized_topic_title(topic_key: str, language: str | None) -> str:
-    language = language if language in SUPPORTED_GROUP_LANGUAGES else "de"
-    return KNOWLEDGE_TOPIC_TITLES[language].get(topic_key, KNOWLEDGE_TOPIC_TITLES["de"].get(topic_key, topic_key))
 
 
 class Fact(BaseModel):
@@ -390,7 +331,7 @@ class HermesReviewer:
             await asyncio.sleep(delay)
         raise RuntimeError("Hermes retry loop ended unexpectedly")
 
-    async def review(self, item: KnowledgeItem, message_text: str, language: str) -> HermesDecision | None:
+    async def review(self, item: KnowledgeItem, message_text: str, language: str, allowed_topic_keys: list[str] | None = None) -> HermesDecision | None:
         if not self.enabled:
             return None
         if time.monotonic() < self._failure_cooldown_until:
@@ -401,6 +342,7 @@ class HermesReviewer:
             "Reject casual conversation, greetings, short plans, transient status updates, duplicate wording, "
             "unsupported guesses and generic named entities. Return JSON only."
         )
+        allowed = sorted({str(key).strip() for key in (allowed_topic_keys or [item.topicKey]) if str(key).strip()})
         user = {
             "language": language,
             "candidate": {
@@ -409,7 +351,7 @@ class HermesReviewer:
                 "sourceMessageIds": item.sourceMessageIds,
             },
             "message": message_text[:2000],
-            "allowedTopicKeys": ["travel", "technology", "radio", "shopping", "people", "places"],
+            "allowedTopicKeys": allowed,
             "responseSchema": {
                 "decision": "accept|reject|review",
                 "topicKey": "one allowed key or null",
@@ -442,7 +384,7 @@ class HermesReviewer:
                 payload = response.json()
             content = payload["choices"][0]["message"]["content"]
             decision = HermesDecision.model_validate(self._extract_json(content))
-            if decision.topicKey not in {"travel", "technology", "radio", "shopping", "people", "places", None}:
+            if decision.topicKey not in {*allowed, None}:
                 decision.topicKey = None
             self._failure_cooldown_until = 0.0
             return decision
@@ -805,37 +747,6 @@ def find_conflicts(context: list[dict]) -> list[Conflict]:
 	return conflicts
 
 
-KNOWLEDGE_TOPIC_RULES = {
-    # A topic keyword alone is deliberately insufficient. Each topic also
-    # needs a concrete detail, recommendation, transaction or explanation.
-    "travel": {
-        "keywords": ("reise", "reisen", "urlaub", "ausflug", "wanderung", "hotel", "flug", "playa", "viaje", "vacaciones", "excursión", "excursion", "voyage", "vacances", "randonnée", "viatge", "platja"),
-        "detail": ("route", "ruta", "itiner", "strecke", "entfernung", "distanz", "kilometer", "km", "kosten", "preis", "öffnungs", "horario", "horaris", "unterkunft", "alojamiento", "hébergement", "fahrplan", "buchen", "buchung", "reserv", "empfehl", "recomend", "recoman", "recommend", "lohn", "besuchen"),
-    },
-    "technology": {
-        "keywords": ("server", "api", "docker", "software", "cloud", "python", "javascript", "netzwerk", "network", "konfig", "version", "fehler", "error", "install", "technolog", "tecnolog", "telegram", "whatsapp"),
-        "detail": ("problem", "lösung", "loesung", "deploy", "container", "port", "einstell", "update", "läuft", "funktioniert", "fehl", "log", "script", "code", "config", "repar", "verbund", "conect", "connect", "réseau"),
-    },
-    "radio": {
-        "keywords": ("amateurfunk", "funk", "radio", "aprs", "dmr", "antenne", "antenna", "repeater", "meshcore", "lora", "hamnet", "c4fm", "frequenz", "frecuencia", "fréquence"),
-        "detail": ("qrg", "kanal", "channel", "leistung", "reichweite", "signal", "db", "mhz", "khz", "watt", "konfig", "konfiguration", "standort", "modulation", "gateway", "digipeater", "netz", "antenne"),
-    },
-    "shopping": {
-        "keywords": ("kauf", "kaufen", "verkauf", "verkaufen", "preis", "angebot", "bestell", "compra", "comprar", "venta", "precio", "acheter", "prix", "achat"),
-        "detail": ("produkt", "modell", "link", "empfehl", "kosten", "liefer", "versand", "verfügbar", "disponible", "talla", "größe", "rabatt", "vergleich", "compar", "avis", "recomend"),
-    },
-    "people": {
-        "keywords": ("kontakt", "verein", "firma", "organisation", "empresa", "contacto", "contact", "équipe", "team", "leiter", "vorstand", "responsable"),
-        "detail": ("name", "nombre", "nom", "adresse", "email", "mail", "telefon", "tel", "rolle", "zuständig", "responsab"),
-    },
-}
-
-PLACE_INFORMATION_CUES = (
-    "adresse", "address", "dirección", "adreça", "treff", "meeting point", "restaurant", "hotel", "öffnungs", "horario",
-    "empfehl", "recomend", "route", "ruta", "parkplatz", "parking", "lugar", "lloc", "ort", "location",
-)
-
-
 def has_term(text: str, term: str) -> bool:
     """Match a word or stem without matching it inside another word."""
     return re.search(rf"(?<!\w){re.escape(term.casefold())}\w*", text.casefold()) is not None
@@ -939,16 +850,16 @@ def knowledge_topic_is_supported(topic_key: str, text: str, learning: dict | Non
     stopwords = set(learning_terms_for(learning, "exclusion"))
     if not is_informative_text(text, stopwords):
         return False, 0, 0
-    rule = KNOWLEDGE_TOPIC_RULES[topic_key]
     learned_rules = (learning or {}).get("keyword", {})
-    keyword_terms = learned_rules.get(topic_key, {}).get("keywords") or list(rule["keywords"])
-    detail_terms = learned_rules.get(topic_key, {}).get("detail") or list(rule["detail"])
+    rule = learned_rules.get(topic_key, {})
+    keyword_terms = rule.get("keywords", [])
+    detail_terms = rule.get("detail", [])
     keyword_count = term_hits(text, tuple(keyword_terms))
     detail_count = term_hits(text, tuple(detail_terms))
-    if topic_key in {"travel", "shopping", "people"}:
-        supported = keyword_count >= 1 and detail_count >= 1
-    else:
-        supported = (keyword_count >= 2) or (keyword_count >= 1 and detail_count >= 1)
+    # The threshold is intentionally topic-agnostic. Topic-specific evidence
+    # belongs in the database and may be refined by administrators or the
+    # conservative learning loop; no topic area is privileged in code.
+    supported = (keyword_count >= 2) or (keyword_count >= 1 and detail_count >= 1)
     return supported, keyword_count, detail_count
 
 
@@ -961,40 +872,110 @@ def stable_knowledge_item_key(topic_key: str, text: str, entities: list[Entity],
     return f"{topic_key}:{slug[:120]}" if slug else f"{topic_key}:{message_id}"
 
 
+def knowledge_subtopic_key(item: KnowledgeItem) -> str:
+    """Return a stable, narrow cluster key below the broad topic taxonomy."""
+    raw = str(item.itemKey or "").split(":", 1)[1] if ":" in str(item.itemKey or "") else str(item.itemKey or "")
+    slug = re.sub(r"[^a-z0-9äöüß]+", "-", raw.casefold(), flags=re.IGNORECASE).strip("-")
+    if not slug:
+        source = next(iter(item.sourceMessageIds), "message")
+        slug = re.sub(r"[^a-z0-9]+", "-", source.casefold()).strip("-") or "message"
+    return slug[:120]
+
+
+def knowledge_profile_tokens(text: str, stopwords: set[str] | None = None) -> list[str]:
+    ignored = stopwords or set()
+    return list(dict.fromkeys(
+        token for token in re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", str(text or "").casefold())
+        if 4 <= len(token) <= 48 and token not in ignored and not token.isnumeric()
+    ))[:24]
+
+
+def knowledge_thread_title(text: str, subtopic_key: str = "") -> str:
+    """Create a compact title from the actual thread content.
+
+    Titles intentionally do not contain a generic label such as “Erkenntnis”:
+    the first useful sentence, or the most informative terms, is what users
+    need to recognize a generated subtopic in the hierarchy.
+    """
+    normalized = re.sub(r"\s+", " ", str(text or "").strip())
+    normalized = re.sub(r"^(?:\[(?:transkript|dokument|ocr|audio)[^\]]*\]\s*)+", "", normalized, flags=re.IGNORECASE)
+    parts = [part.strip(" -–—:;") for part in re.split(r"\n+|(?<=[.!?])\s+", str(text or "")) if part.strip()]
+    candidate = re.sub(r"\s+", " ", parts[0] if parts else normalized).strip()
+    candidate = re.sub(r"^(?:\[(?:transkript|dokument|ocr|audio)[^\]]*\]\s*)+", "", candidate, flags=re.IGNORECASE)
+    if len(candidate) < 12:
+        terms = knowledge_profile_tokens(normalized)
+        candidate = " · ".join(terms[:6])
+    if not candidate:
+        candidate = " · ".join(str(subtopic_key).replace("-", " ").split()[:8])
+    if not candidate:
+        candidate = "Nachrichten-Thread"
+    return candidate[:96].rstrip()
+
+
+def related_knowledge_source_ids(message_id: str, normalized: str, context: list[dict], stopwords: set[str]) -> list[str]:
+    """Only carry clearly related source messages into a subtopic.
+
+    A single shared taxonomy keyword is intentionally not enough. At least two
+    content-bearing words must overlap and the overlap must cover a meaningful
+    part of the shorter message. This prevents an entire group from becoming
+    one large topic because every message mentions e.g. a trip or a product.
+    """
+    current_tokens = {
+        token for token in re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", normalized.casefold())
+        if len(token) >= 3 and token not in stopwords and not token.isnumeric()
+    }
+    related = [message_id]
+    for item in context:
+        item_id = str(item.get("id") or "")
+        if not item_id or item_id == str(message_id):
+            continue
+        other_text = " ".join(str(item.get("text") or "").split()).strip()
+        if not is_informative_text(other_text, stopwords):
+            continue
+        other_tokens = {
+            token for token in re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", other_text.casefold())
+            if len(token) >= 3 and token not in stopwords and not token.isnumeric()
+        }
+        overlap = current_tokens & other_tokens
+        shorter = max(1, min(len(current_tokens), len(other_tokens)))
+        if len(overlap) >= 2 and len(overlap) / shorter >= 0.25:
+            related.append(item_id)
+        if len(related) >= 8:
+            break
+    return list(dict.fromkeys(related))
+
+
 def knowledge_items_for_message(message_id: str, text: str, context: list[dict], entities: list[Entity], places: list[dict], language: str = "de", learning: dict | None = None) -> list[KnowledgeItem]:
     normalized = " ".join(text.split()).strip()
     stopwords = set(learning_terms_for(learning, "exclusion"))
     if not normalized or not is_informative_text(normalized, stopwords):
         return []
     matched: list[tuple[str, int, int]] = []
-    for topic_key in KNOWLEDGE_TOPIC_RULES:
+    topic_keys = [str(topic_key) for topic_key in (learning or {}).get("keyword", {}) if str(topic_key).strip()]
+    for topic_key in topic_keys:
         supported, keyword_count, detail_count = knowledge_topic_is_supported(topic_key, normalized, learning)
         if supported:
             matched.append((topic_key, keyword_count, detail_count))
 
     current = next((item for item in context if str(item.get("id")) == str(message_id)), {})
     current_location = location_details(current)
-    place_terms = learning_terms_for(learning, "place", PLACE_INFORMATION_CUES)
-    if current_location and (location_is_repeated(current_location, context) or term_hits(normalized, tuple(place_terms)) >= 1):
-        matched.append(("places", 1, 1))
+    place_terms = learning_terms_for(learning, "place")
+    location_topic = next(
+        (str(topic_key) for topic_key, role in (learning or {}).get("topicRoles", {}).items() if role == "location"),
+        None,
+    )
+    if location_topic and current_location and location_topic not in {topic_key for topic_key, _, _ in matched} and (location_is_repeated(current_location, context) or term_hits(normalized, tuple(place_terms)) >= 1):
+        matched.append((location_topic, 1, 1))
 
     result: list[KnowledgeItem] = []
     for topic_key, keyword_count, detail_count in matched:
-        topic_title = localized_topic_title(topic_key, language)
-        rule = KNOWLEDGE_TOPIC_RULES.get(topic_key)
-        related_ids = [str(message_id)]
-        if rule:
-            related_ids.extend(
-                str(item.get("id")) for item in context
-                if item.get("id") and str(item.get("id")) != str(message_id)
-                and term_hits(str(item.get("text") or ""), tuple(((learning or {}).get("keyword", {}).get(topic_key, {}).get("keywords") or list(rule["keywords"])))) >= 1
-                and is_informative_text(" ".join(str(item.get("text") or "").split()), stopwords)
-            )
-        source_ids = list(dict.fromkeys([message_id, *related_ids]))[:12]
+        # The localized title is resolved from knowledge_topic_definitions
+        # during persistence. Keeping only the key here prevents a second
+        # hard-coded taxonomy from drifting away from the database.
+        topic_title = topic_key
+        source_ids = related_knowledge_source_ids(message_id, normalized, context, stopwords)
         item_key = stable_knowledge_item_key(topic_key, normalized, entities, places, message_id, stopwords)
         confidence = min(0.96, 0.7 + 0.04 * min(keyword_count, 3) + 0.04 * min(detail_count, 3) + 0.04 * min(len(source_ids) - 1, 3))
-        if topic_key in {"places", "entities"}:
-            confidence = min(0.96, confidence + 0.04)
         result.append(KnowledgeItem(
             topicKey=topic_key,
             topicTitle=topic_title,
@@ -1007,28 +988,29 @@ def knowledge_items_for_message(message_id: str, text: str, context: list[dict],
     return result
 
 
-SEMANTIC_TOPIC_DESCRIPTIONS = {
-    "travel": "durable travel information: trip planning, route, accommodation, opening hours, travel recommendation or cost",
-    "technology": "durable technical information: software, server, configuration, error, deployment, network or API explanation",
-    "radio": "durable amateur radio information: radio equipment, antenna, frequency, repeater, APRS, signal or network configuration",
-    "shopping": "durable purchase information: product, model, price, availability, delivery or recommendation",
-    "people": "durable contact information: person, organization, role, address, email or responsible contact",
-    "places": "durable place information: named venue, address, location details, opening hours or meeting place",
-}
-
-
 def vector_to_pg(vector: list[float] | None) -> str | None:
     if vector is None:
         return None
     return "[" + ",".join(f"{value:.8f}" for value in vector) + "]"
 
 
-async def semantic_topic_match(encoder: EmbeddingProvider, text: str) -> tuple[str, float] | None:
+async def semantic_topic_match(db, encoder: EmbeddingProvider, text: str, language: str) -> tuple[str, float] | None:
     vector = await encoder.embed(text)
     if vector is None:
         return None
     best: tuple[str, float] | None = None
-    for topic_key, description in SEMANTIC_TOPIC_DESCRIPTIONS.items():
+    definitions = await db.fetch(
+        """SELECT topic_key, description
+           FROM knowledge_topic_definitions
+           WHERE language=$1 AND enabled=TRUE AND btrim(description) <> ''
+           ORDER BY sort_order, topic_key""",
+        language,
+    )
+    for definition in definitions:
+        topic_key = str(definition["topic_key"] or "").strip()
+        description = str(definition["description"] or "").strip()
+        if not topic_key or not description:
+            continue
         prototype = await encoder.embed(description)
         if prototype is None:
             continue
@@ -1043,6 +1025,15 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
     if not group_id or not is_informative_text(normalized):
         return items
     try:
+        configured_rows = await db.fetch(
+            """SELECT topic_key FROM knowledge_topic_definitions
+               WHERE language=$1 AND enabled=TRUE""",
+            language,
+        )
+        configured_topic_keys = {str(row["topic_key"] or "").strip() for row in configured_rows}
+    except Exception:
+        configured_topic_keys = set()
+    try:
         aliases = await db.fetch(
             "SELECT alias, canonical_key, topic_key FROM ai_canonical_aliases WHERE group_id=$1 ORDER BY updated_at DESC",
             group_id,
@@ -1054,14 +1045,14 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
         alias = str(alias_row["alias"] or "").strip()
         topic_key = str(alias_row["topic_key"] or "").strip()
         canonical_key = str(alias_row["canonical_key"] or "").strip()
-        if not alias or not canonical_key or topic_key not in SEMANTIC_TOPIC_DESCRIPTIONS:
+        if not alias or not canonical_key or (configured_topic_keys and topic_key not in configured_topic_keys):
             continue
         if has_term(normalized, alias) and not any(item.topicKey == topic_key and item.itemKey == f"canonical:{canonical_key}" for item in canonical_items):
             canonical_items.append(KnowledgeItem(
                 topicKey=topic_key,
-                topicTitle=localized_topic_title(topic_key, language),
+                topicTitle=topic_key,
                 itemKey=f"canonical:{canonical_key}",
-                itemType="entity" if topic_key in {"people", "places"} else "insight",
+                itemType="entity",
                 content=f"{canonical_key}: {normalized}",
                 confidence=0.9,
                 sourceMessageIds=[message_id],
@@ -1074,9 +1065,10 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
     existing = await db.fetchrow(
         """SELECT kt.topic_key, kt.title, (ki.embedding <=> $2::vector) AS distance
            FROM knowledge_items ki JOIN knowledge_topics kt ON kt.id=ki.topic_id
-           WHERE kt.group_id=$1 AND ki.parent_item_id IS NULL AND ki.embedding IS NOT NULL
+           WHERE kt.group_id=$1 AND kt.subtopic_key <> '' AND ki.parent_item_id IS NULL AND ki.embedding IS NOT NULL
+             AND ($3::text[] IS NULL OR kt.topic_key = ANY($3::text[]))
            ORDER BY ki.embedding <=> $2::vector LIMIT 1""",
-        group_id, vector_to_pg(vector),
+        group_id, vector_to_pg(vector), [item.topicKey for item in items] or None,
     )
     topic_key = None
     score = 0.0
@@ -1084,7 +1076,7 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
         topic_key = str(existing["topic_key"])
         score = 1.0 - float(existing["distance"])
     else:
-        prototype = await semantic_topic_match(encoder, normalized)
+        prototype = await semantic_topic_match(db, encoder, normalized, language)
         if prototype and prototype[1] >= SEMANTIC_DISCOVERY_THRESHOLD:
             topic_key, score = prototype
 
@@ -1094,7 +1086,7 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
         *items,
         KnowledgeItem(
             topicKey=topic_key,
-            topicTitle=localized_topic_title(topic_key, language),
+            topicTitle=topic_key,
             itemKey=stable_knowledge_item_key(topic_key, normalized, [], [], message_id),
             itemType="insight" if existing else "fact",
             content=normalized,
@@ -1104,7 +1096,7 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
     ]
 
 
-async def verify_knowledge_items(reviewer: HermesReviewer, text: str, language: str, items: list[KnowledgeItem]) -> list[KnowledgeItem]:
+async def verify_knowledge_items(reviewer: HermesReviewer, text: str, language: str, items: list[KnowledgeItem], allowed_topic_keys: list[str] | None = None) -> list[KnowledgeItem]:
     if not reviewer.enabled:
         return items
     verified: list[KnowledgeItem] = []
@@ -1112,7 +1104,7 @@ async def verify_knowledge_items(reviewer: HermesReviewer, text: str, language: 
         if not HERMES_REVIEW_ALL and item.confidence >= 0.9:
             verified.append(item)
             continue
-        decision = await reviewer.review(item, text, language)
+        decision = await reviewer.review(item, text, language, allowed_topic_keys)
         # A network or provider failure must not stop ingestion. Only a valid
         # explicit rejection removes a deterministic candidate.
         if decision is None:
@@ -1120,9 +1112,9 @@ async def verify_knowledge_items(reviewer: HermesReviewer, text: str, language: 
             continue
         if decision.decision == "reject" or (decision.decision != "accept" and decision.confidence < HERMES_MIN_CONFIDENCE):
             continue
-        if decision.topicKey in SEMANTIC_TOPIC_DESCRIPTIONS:
+        if decision.topicKey:
             item.topicKey = decision.topicKey
-            item.topicTitle = localized_topic_title(decision.topicKey, language)
+            item.topicTitle = decision.topicKey
         item.confidence = round(max(item.confidence, decision.confidence), 4)
         verified.append(item)
     return verified
@@ -1235,9 +1227,9 @@ def apply_feedback_overrides(analysis: Analysis, feedback: list[dict], language:
                 if decision == "correct":
                     if isinstance(correction.get("content"), str) and correction["content"].strip():
                         knowledge.content = correction["content"].strip()
-                    if str(correction.get("topicKey") or "") in SEMANTIC_TOPIC_DESCRIPTIONS:
+                    if str(correction.get("topicKey") or "").strip():
                         knowledge.topicKey = str(correction["topicKey"])
-                        knowledge.topicTitle = localized_topic_title(knowledge.topicKey, language)
+                        knowledge.topicTitle = knowledge.topicKey
                     if str(correction.get("canonicalKey") or "").strip():
                         knowledge.itemKey = f"canonical:{str(correction['canonicalKey']).strip()}"
                 knowledge.confidence = max(knowledge.confidence, float(correction.get("confidence") or 0.9))
@@ -1366,26 +1358,136 @@ def source_id_list(value) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
-async def upsert_knowledge(db, group_id: str | None, items: list[KnowledgeItem], encoder: EmbeddingProvider | None = None):
+async def active_knowledge_generation(db) -> str:
+    generation = await db.fetchval("SELECT active_generation_id::text FROM knowledge_generation_state WHERE id=TRUE")
+    if not generation:
+        raise RuntimeError("active knowledge generation is not configured")
+    return str(generation)
+
+
+async def resolve_knowledge_subtopic(db, group_id: str, language: str, topic_key: str, item: KnowledgeItem, generation_id: str, stopwords: set[str]) -> str:
+    """Reuse a learned subtopic only when content overlap is meaningful."""
+    fallback = knowledge_subtopic_key(item)
+    tokens = set(knowledge_profile_tokens(item.content, stopwords))
+    if len(tokens) < 2:
+        return fallback
+    try:
+        profile_rows = await db.fetch(
+            """SELECT subtopic_key, term, weight
+               FROM knowledge_subtopic_terms
+               WHERE group_id=$1 AND language=$2 AND topic_key=$3
+               ORDER BY updated_at DESC LIMIT 1200""",
+            group_id, language, topic_key,
+        )
+        summary_rows = await db.fetch(
+            """SELECT subtopic_key, summary, title
+               FROM knowledge_topics
+               WHERE generation_id=$1 AND group_id=$2 AND topic_key=$3 AND subtopic_key <> ''""",
+            generation_id, group_id, topic_key,
+        )
+    except Exception:
+        # Keep ingestion compatible with a rolling deployment before migration
+        # 021 has been applied.
+        return fallback
+
+    scores: dict[str, float] = {}
+    overlap_counts: dict[str, int] = {}
+    for row in profile_rows:
+        subtopic = str(row["subtopic_key"] or "").strip()
+        term = str(row["term"] or "").strip().casefold()
+        if not subtopic or not term or not has_term(item.content, term):
+            continue
+        scores[subtopic] = scores.get(subtopic, 0.0) + max(0.05, min(2.0, float(row["weight"] or 0.1)))
+        overlap_counts[subtopic] = overlap_counts.get(subtopic, 0) + 1
+    for row in summary_rows:
+        subtopic = str(row["subtopic_key"] or "").strip()
+        summary_tokens = set(knowledge_profile_tokens(f"{row['title'] or ''} {row['summary'] or ''}", stopwords))
+        overlap = tokens & summary_tokens
+        if len(overlap) >= 2:
+            scores[subtopic] = scores.get(subtopic, 0.0) + min(1.5, len(overlap) * 0.35)
+            overlap_counts[subtopic] = max(overlap_counts.get(subtopic, 0), len(overlap))
+    if not scores:
+        return fallback
+    best = max(scores, key=scores.get)
+    if overlap_counts.get(best, 0) < 2 or scores[best] < 0.7:
+        return fallback
+    return best
+
+
+async def learn_knowledge_subtopic_terms(db, group_id: str, language: str, topic_key: str, subtopic_key: str, text: str, stopwords: set[str]):
+    """Persist small group/topic/subtopic lexical signals for future clustering."""
+    try:
+        for term in knowledge_profile_tokens(text, stopwords):
+            await db.execute(
+                """INSERT INTO knowledge_subtopic_terms
+                           (group_id, language, topic_key, subtopic_key, term, weight, source, positive_count)
+                   VALUES ($1,$2,$3,$4,$5,0.20,'inferred',1)
+                   ON CONFLICT (group_id, language, topic_key, subtopic_key, lower(term)) DO UPDATE SET
+                       weight=LEAST(3.0, knowledge_subtopic_terms.weight+0.05),
+                       positive_count=knowledge_subtopic_terms.positive_count+1,
+                       updated_at=NOW()""",
+                group_id, language, topic_key, subtopic_key, term,
+            )
+    except Exception:
+        log.debug("knowledge subtopic profile update skipped", exc_info=True)
+
+
+async def upsert_knowledge(db, group_id: str | None, items: list[KnowledgeItem], encoder: EmbeddingProvider | None = None, language: str | None = None, generation_id: str | None = None):
     if not group_id or not items:
         return
+    generation_id = generation_id or await active_knowledge_generation(db)
+    stopwords = set(learning_terms_for(await load_learning_terms(db, group_id, language or "de"), "exclusion"))
     for item in items:
         embedding = await encoder.embed(item.content) if encoder else None
         embedding_pg = vector_to_pg(embedding)
-        topic = await db.fetchrow(
-            """INSERT INTO knowledge_topics (group_id, topic_key, title, summary, confidence, source_message_ids)
-               VALUES ($1,$2,$3,$4,$5,$6::jsonb)
-               ON CONFLICT (group_id, topic_key) DO UPDATE SET title=EXCLUDED.title, summary=EXCLUDED.summary,
+        topic_title = str(item.topicKey)
+        try:
+            configured_title = await db.fetchval(
+                """SELECT title FROM knowledge_topic_definitions
+                   WHERE language=$1 AND topic_key=$2 AND enabled=TRUE""",
+                language or "de", item.topicKey,
+            )
+            if not configured_title:
+                # Topic definitions are the authoritative taxonomy. Unknown
+                # adapter guesses must never create a hard-coded topic area.
+                continue
+            topic_title = str(configured_title)
+        except Exception:
+            # Rolling deployments may briefly run without migration 019.
+            topic_title = str(item.topicKey)
+        root = await db.fetchrow(
+            """INSERT INTO knowledge_topics (generation_id, group_id, topic_key, subtopic_key, parent_topic_id, title, summary, confidence, source_message_ids)
+               VALUES ($1,$2,$3,'',NULL,$4,$5,$6,$7::jsonb)
+               ON CONFLICT (generation_id, group_id, topic_key, subtopic_key) DO UPDATE SET title=EXCLUDED.title,
                confidence=GREATEST(knowledge_topics.confidence, EXCLUDED.confidence),
                source_message_ids=(SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
                                    FROM jsonb_array_elements(knowledge_topics.source_message_ids || EXCLUDED.source_message_ids) AS merged(value)),
                updated_at=NOW()
                RETURNING id""",
-            group_id, item.topicKey, item.topicTitle, item.content, item.confidence, json.dumps(item.sourceMessageIds),
+            generation_id, group_id, item.topicKey, topic_title, item.content, item.confidence, json.dumps(item.sourceMessageIds),
+        )
+        subtopic_key = await resolve_knowledge_subtopic(db, group_id, language or "de", item.topicKey, item, generation_id, stopwords)
+        subtopic_title = knowledge_thread_title(item.content, subtopic_key)
+        await learn_knowledge_subtopic_terms(db, group_id, language or "de", item.topicKey, subtopic_key, item.content, stopwords)
+        topic = await db.fetchrow(
+            """INSERT INTO knowledge_topics (generation_id, group_id, topic_key, subtopic_key, parent_topic_id, title, summary, confidence, source_message_ids)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+               ON CONFLICT (generation_id, group_id, topic_key, subtopic_key) DO UPDATE SET
+               title=CASE WHEN knowledge_topics.title ILIKE '%erkenntnis%'
+                               OR knowledge_topics.title ILIKE '%unterthema%'
+                          THEN EXCLUDED.title ELSE knowledge_topics.title END,
+               summary=CASE WHEN length(COALESCE(knowledge_topics.summary, '')) >= length(COALESCE(EXCLUDED.summary, ''))
+                            THEN knowledge_topics.summary ELSE EXCLUDED.summary END,
+               confidence=GREATEST(knowledge_topics.confidence, EXCLUDED.confidence),
+               source_message_ids=(SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
+                                   FROM jsonb_array_elements(knowledge_topics.source_message_ids || EXCLUDED.source_message_ids) AS merged(value)),
+               updated_at=NOW()
+               RETURNING id""",
+            generation_id, group_id, item.topicKey, subtopic_key, root["id"], subtopic_title, item.content, item.confidence, json.dumps(item.sourceMessageIds),
         )
         # Exact keys update the existing node. This is important when a
         # transcript or OCR result causes the same source message to be
-        # analysed again: it must not create another child below the topic.
+        # analysed again: it must not create another child below the subtopic.
         exact_match = await db.fetchrow(
             """SELECT id, parent_item_id, item_role, content, item_type, confidence, source_message_ids
                FROM knowledge_items WHERE topic_id=$1 AND item_key=$2""",
@@ -1481,9 +1583,22 @@ async def resolve_group_language(db, group_id: str | None, context: list[dict], 
     return "de"
 
 
+async def configured_knowledge_topic_keys(db, language: str) -> list[str]:
+    """Return enabled topic keys from the database for one group language."""
+    try:
+        rows = await db.fetch(
+            """SELECT topic_key FROM knowledge_topic_definitions
+               WHERE language=$1 AND enabled=TRUE ORDER BY sort_order, topic_key""",
+            language,
+        )
+        return [str(row["topic_key"] or "").strip() for row in rows if str(row["topic_key"] or "").strip()]
+    except Exception:
+        return []
+
+
 async def load_learning_terms(db, group_id: str | None, language: str) -> dict:
     """Load editable global defaults plus stronger group-local terms."""
-    result: dict = {"relevance": {}, "event": {}, "place": {}, "exclusion": [], "keyword": {}}
+    result: dict = {"relevance": {}, "event": {}, "place": {}, "exclusion": [], "keyword": {}, "topicRoles": {}}
     try:
         rows = await db.fetch(
             """SELECT category, topic_key, term, weight
@@ -1494,6 +1609,18 @@ async def load_learning_terms(db, group_id: str | None, language: str) -> dict:
         )
     except Exception:
         return result
+    try:
+        topic_rows = await db.fetch(
+            """SELECT topic_key, signal_type FROM knowledge_topic_definitions
+               WHERE language=$1 AND enabled=TRUE""",
+            language,
+        )
+        result["topicRoles"] = {
+            str(row["topic_key"]): str(row["signal_type"] or "content")
+            for row in topic_rows if str(row["topic_key"] or "").strip()
+        }
+    except Exception:
+        pass
     for row in rows:
         category = str(row["category"] or "")
         term = str(row["term"] or "").strip().casefold()
@@ -1517,7 +1644,12 @@ async def load_learning_terms(db, group_id: str | None, language: str) -> dict:
 
 def inferred_learning_tokens(text: str, stopwords: set[str]) -> list[str]:
     tokens = re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", text.casefold())
-    return list(dict.fromkeys(token for token in tokens if len(token) >= 3 and token not in stopwords and not token.isnumeric()))
+    # URLs, hashes and serialized identifiers can otherwise become one very
+    # long token and violate the database's 160-character term constraint.
+    return list(dict.fromkeys(
+        token for token in tokens
+        if 3 <= len(token) <= 80 and token not in stopwords and not token.isnumeric()
+    ))
 
 
 async def record_inferred_learning(db, group_id: str | None, language: str, text: str, analysis: Analysis, learning: dict):
@@ -1594,9 +1726,15 @@ async def record_inferred_learning(db, group_id: str | None, language: str, text
 
 
 async def refresh_knowledge_topic_titles(db):
-    topics = await db.fetch("SELECT kt.id, kt.topic_key, kt.group_id, g.language FROM knowledge_topics kt JOIN wa_groups g ON g.id=kt.group_id")
+    topics = await db.fetch("SELECT kt.id, kt.topic_key, kt.subtopic_key, kt.summary, kt.group_id, g.language FROM knowledge_topics kt JOIN wa_groups g ON g.id=kt.group_id")
     if not topics:
         return
+    definitions = {}
+    try:
+        rows = await db.fetch("SELECT language, topic_key, title FROM knowledge_topic_definitions WHERE enabled=TRUE")
+        definitions = {(str(row["language"]), str(row["topic_key"])): str(row["title"]) for row in rows}
+    except Exception:
+        pass
     languages: dict[str, str] = {}
     for topic in topics:
         group_id = str(topic["group_id"])
@@ -1608,7 +1746,9 @@ async def refresh_knowledge_topic_titles(db):
                 if language:
                     await db.execute("UPDATE wa_groups SET language=$1, updated_at=NOW() WHERE id=$2", language, group_id)
             languages[group_id] = language if language in SUPPORTED_GROUP_LANGUAGES else "de"
-        title = localized_topic_title(str(topic["topic_key"]), languages[group_id])
+        base_title = definitions.get((languages[group_id], str(topic["topic_key"])), str(topic["topic_key"]))
+        subtopic_key = str(topic["subtopic_key"] or "")
+        title = base_title if not subtopic_key else knowledge_thread_title(str(topic["summary"] or ""), subtopic_key)
         await db.execute("UPDATE knowledge_topics SET title=$1 WHERE id=$2 AND title IS DISTINCT FROM $1", title, topic["id"])
 
 
@@ -1616,9 +1756,9 @@ async def prepare_knowledge_rebuild(db) -> bool:
     current_version = await db.fetchval("SELECT detail FROM connector_states WHERE connector=$1", KNOWLEDGE_STATE_CONNECTOR)
     if current_version == KNOWLEDGE_REBUILD_VERSION:
         return False
-    # The old heuristic created broad topics and item rows. Rebuilding from
-    # source messages makes the stricter rules remove those stale entries too.
-    await db.execute("DELETE FROM knowledge_topics")
+    # Do not delete an active KB during startup. Administrators can request a
+    # generation-based rebuild from the dedicated admin page; a failed rebuild
+    # then leaves the currently visible generation untouched.
     return True
 
 
@@ -1716,10 +1856,11 @@ def knowledge_graph_key(prefix: str, value: str) -> str:
     return f"{prefix}:{event_key_slug(value, 96) or 'unknown'}"
 
 
-async def upsert_knowledge_graph(db, group_id: str | None, analysis: Analysis):
+async def upsert_knowledge_graph(db, group_id: str | None, analysis: Analysis, generation_id: str | None = None):
     """Persist only source-backed associations for later navigation/search."""
     if not group_id:
         return
+    generation_id = generation_id or await active_knowledge_generation(db)
     entities = [knowledge_graph_key("entity", entity.name) for entity in analysis.entities if entity.name.strip()]
     places = [knowledge_graph_key("place", str(place.get("name") or "")) for place in analysis.places if str(place.get("name") or "").strip()]
     events = [knowledge_graph_key("event", event.eventKey or event.title) for event in analysis.events]
@@ -1737,13 +1878,13 @@ async def upsert_knowledge_graph(db, group_id: str | None, analysis: Analysis):
             edges.append((source, target, "associated-with", 0.8))
     for source, target, relation, confidence in edges:
         await db.execute(
-            """INSERT INTO ai_knowledge_edges (group_id, source_key, target_key, relation, source_message_ids, confidence)
-               VALUES ($1,$2,$3,$4,$5::jsonb,$6)
-               ON CONFLICT (group_id, source_key, target_key, relation) DO UPDATE SET
+            """INSERT INTO ai_knowledge_edges (generation_id, group_id, source_key, target_key, relation, source_message_ids, confidence)
+               VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
+               ON CONFLICT (generation_id, group_id, source_key, target_key, relation) DO UPDATE SET
                  source_message_ids=(SELECT COALESCE(jsonb_agg(DISTINCT value), '[]'::jsonb)
                    FROM jsonb_array_elements(ai_knowledge_edges.source_message_ids || EXCLUDED.source_message_ids) AS merged(value)),
                  confidence=GREATEST(ai_knowledge_edges.confidence, EXCLUDED.confidence), updated_at=NOW()""",
-            group_id, source, target, relation, source_ids, confidence,
+            generation_id, group_id, source, target, relation, source_ids, confidence,
         )
 
 
@@ -1768,6 +1909,13 @@ async def main():
             await js.add_stream(name="WAGI_REASSESSMENT", subjects=["ai.reassessment.>"])
         except Exception:
             await js.stream_info("WAGI_REASSESSMENT")
+    try:
+        await js.stream_info("WAGI_KB_REBUILD")
+    except Exception:
+        try:
+            await js.add_stream(name="WAGI_KB_REBUILD", subjects=["knowledge.rebuild.>"])
+        except Exception:
+            await js.stream_info("WAGI_KB_REBUILD")
 
     async def analyze_message(payload: dict):
         data = payload.get("data", payload)
@@ -1782,6 +1930,7 @@ async def main():
             message_id,
         )
         group_id = data.get("groupId") or (current["groupId"] if current else None)
+        knowledge_generation = str(data.get("knowledgeGeneration") or "").strip() or None
         context: list[dict] = []
         if group_id:
             anchor_received_at = current["receivedAt"] if current else datetime.now(timezone.utc)
@@ -1808,6 +1957,7 @@ async def main():
                         item["text"] = data.get("text")
         group_language = await resolve_group_language(db, group_id, context, text)
         learning = await load_learning_terms(db, group_id, group_language)
+        configured_topic_keys = await configured_knowledge_topic_keys(db, group_language)
         analysis = await adapter.analyze(message_id, text, context, group_language, learning)
         analysis.events = deduplicate_events(analysis.events)
         analysis.conflicts = find_conflicts(context)
@@ -1818,7 +1968,7 @@ async def main():
                 confidence=min(conflict.confidence for conflict in analysis.conflicts if conflict.confidence is not None),
             ))
         analysis.knowledge = await semantic_enrich_knowledge(db, encoder, group_id, message_id, text, group_language, analysis.knowledge)
-        analysis.knowledge = await verify_knowledge_items(hermes_reviewer, text, group_language, analysis.knowledge)
+        analysis.knowledge = await verify_knowledge_items(hermes_reviewer, text, group_language, analysis.knowledge, configured_topic_keys)
         feedback = await load_ai_feedback(db, group_id, message_id)
         analysis, rejected_knowledge = apply_feedback_overrides(analysis, feedback, group_language)
         if not data.get("skipLearning"):
@@ -1839,8 +1989,8 @@ async def main():
             json.dumps(serialized_analysis["events"]), json.dumps(serialized_analysis["places"]), analysis.model,
             analysis.schemaVersion, analysis.promptVersion, json.dumps(serialized_analysis["provenance"]), json.dumps(serialized_analysis["conflicts"]),
         )
-        await upsert_knowledge(db, group_id, analysis.knowledge, encoder)
-        await upsert_knowledge_graph(db, group_id, analysis)
+        await upsert_knowledge(db, group_id, analysis.knowledge, encoder, group_language, knowledge_generation)
+        await upsert_knowledge_graph(db, group_id, analysis, knowledge_generation)
         await publish(js, "ai.messages.analyzed", "ai.messages.analyzed", serialized_analysis)
 
     async def on_message(message):
@@ -2089,6 +2239,106 @@ async def main():
                 await db.execute("UPDATE ai_reassessment_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", job_id, str(error)[:4000])
             await retry_or_dead_letter(db, js, message, payload, "ai.reassessment", error)
 
+    async def on_knowledge_rebuild(message):
+        """Build a separate KB generation and switch it on only when complete."""
+        payload = {}
+        rebuild_id = None
+        generation_id = None
+        try:
+            payload = json.loads(message.data)
+            data = payload.get("data", payload)
+            rebuild_id = str(data.get("rebuildId") or "")
+            event_id = payload_id(payload, message.data)
+            if not rebuild_id:
+                raise ValueError("rebuildId missing")
+            if not await claim_event(db, "knowledge.rebuild", event_id, message.subject, payload):
+                await message.ack()
+                return
+            generation_id = str(await db.fetchval("SELECT gen_random_uuid()::text"))
+            await db.execute(
+                """UPDATE knowledge_rebuild_jobs
+                   SET status='running', generation_id=$2::uuid, started_at=COALESCE(started_at,NOW()), updated_at=NOW(), error=NULL
+                   WHERE id=$1::uuid AND status IN ('queued','running','failed')""",
+                rebuild_id, generation_id,
+            )
+            rows = await db.fetch(
+                """SELECT m.id::text AS "messageId", m.group_id AS "groupId", COALESCE(m.text,'') AS text,
+                          COALESCE(aj.transcript,'') AS transcript,
+                          COALESCE(mo.ocr_text,'') AS "ocrText"
+                   FROM messages m
+                   JOIN wa_groups g ON g.id=m.group_id
+                   LEFT JOIN LATERAL (
+                     SELECT transcript FROM audio_jobs
+                     WHERE message_id=m.id AND transcript IS NOT NULL AND btrim(transcript) <> ''
+                     ORDER BY updated_at DESC LIMIT 1
+                   ) aj ON TRUE
+                   LEFT JOIN LATERAL (
+                     SELECT string_agg(ocr_text, E'\\n' ORDER BY updated_at DESC) AS ocr_text
+                     FROM media_objects
+                     WHERE message_id=m.id AND ocr_text IS NOT NULL AND btrim(ocr_text) <> ''
+                   ) mo ON TRUE
+                   WHERE g.is_selected=TRUE
+                   ORDER BY m.received_at ASC""",
+            )
+            await db.execute("UPDATE knowledge_rebuild_jobs SET total_count=$2, updated_at=NOW() WHERE id=$1::uuid", rebuild_id, len(rows))
+            processed = 0
+            failed = 0
+            skipped = 0
+            for row in rows:
+                message_id = str(row["messageId"])
+                base_text = str(row["text"] or "").strip()
+                transcript = str(row["transcript"] or "").strip()
+                ocr_text = str(row["ocrText"] or "").strip()
+                parts = [base_text]
+                if transcript and transcript not in base_text:
+                    parts.append("[Transkript]\n" + transcript)
+                if ocr_text and ocr_text not in base_text:
+                    parts.append("[Gespeicherter Medieninhalt]\n" + ocr_text)
+                rebuild_text = "\n".join(part for part in parts if part).strip()
+                try:
+                    did_process = await process_analysis(
+                        db,
+                        analyze_message,
+                        {"data": {"messageId": message_id, "groupId": row["groupId"], "text": rebuild_text, "force": True, "skipLearning": True, "knowledgeGeneration": generation_id}},
+                        "knowledge-rebuild",
+                        force=True,
+                    )
+                    if did_process:
+                        processed += 1
+                    else:
+                        skipped += 1
+                except Exception:
+                    failed += 1
+                    log.exception("knowledge rebuild item failed: %s", message_id)
+                await db.execute(
+                    """UPDATE knowledge_rebuild_jobs SET processed_count=$2, failed_count=$3, skipped_count=$4, updated_at=NOW()
+                       WHERE id=$1::uuid""",
+                    rebuild_id, processed, failed, skipped,
+                )
+            if failed:
+                await db.execute(
+                    """UPDATE knowledge_rebuild_jobs SET status='failed', error=$2, completed_at=NOW(), updated_at=NOW()
+                       WHERE id=$1::uuid""",
+                    rebuild_id, f"{failed} message(s) could not be rebuilt; previous generation remains active",
+                )
+            else:
+                await db.execute(
+                    "UPDATE knowledge_generation_state SET active_generation_id=$1::uuid, updated_at=NOW() WHERE id=TRUE",
+                    generation_id,
+                )
+                await db.execute(
+                    "UPDATE knowledge_rebuild_jobs SET status='completed', completed_at=NOW(), updated_at=NOW() WHERE id=$1::uuid",
+                    rebuild_id,
+                )
+            await mark_processed(db, "knowledge.rebuild", event_id)
+            await message.ack()
+            log.info("knowledge rebuild %s completed: processed=%d failed=%d skipped=%d generation=%s", rebuild_id, processed, failed, skipped, generation_id)
+        except Exception as error:
+            log.exception("knowledge rebuild failed")
+            if rebuild_id:
+                await db.execute("UPDATE knowledge_rebuild_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", rebuild_id, str(error)[:4000])
+            await retry_or_dead_letter(db, js, message, payload, "knowledge.rebuild", error)
+
     async def backfill_existing_knowledge(force: bool = False):
         if force:
             rows = await db.fetch(
@@ -2155,6 +2405,7 @@ async def main():
     await js.subscribe("media.document.analyzed", durable="WAGI_AI_DOCUMENTS", stream="WAGI_EVENTS", cb=on_document)
     await js.subscribe("replay.requested", durable="WAGI_AI_REPLAY", stream="WAGI_EVENTS", cb=on_replay)
     await js.subscribe("ai.reassessment.requested", durable="WAGI_AI_REASSESSMENT", stream="WAGI_REASSESSMENT", cb=on_reassessment)
+    await js.subscribe("knowledge.rebuild.requested", durable="WAGI_KB_REBUILD", stream="WAGI_KB_REBUILD", cb=on_knowledge_rebuild)
 
     async def run_knowledge_startup():
         """Refresh/rebuild the knowledge base without blocking live ingestion."""

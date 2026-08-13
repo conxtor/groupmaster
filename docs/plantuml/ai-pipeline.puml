@@ -43,7 +43,12 @@ endif
 :Facts und Entities extrahieren;
 :Events über mehrere Nachrichten\nmit Quellenbelegen zusammenführen;
 :Orte, Koordinaten und Widersprüche erkennen;
-:Knowledge-Thema und hierarchische\nDetailbeiträge bestimmen;
+:Aktive Themen, Beschreibungen und\nTopic-/Detailbegriffe aus PostgreSQL laden;
+:Oberthema aus datenbankbasierten\nBegriffen oder Embeddings bestimmen;
+:Unterthema über Inhaltsüberschneidung\nmit Gruppenprofilen wiederverwenden oder neu anlegen;
+:Aussagekräftigen Titel aus dem\nThreadinhalt ableiten;
+:Neue Subtopic-Begriffe konservativ in\nknowledge_subtopic_terms lernen;
+:Nur klar überlappende Quellnachrichten\nim Unterthema zusammenführen;
 
 if (Embeddings aktiviert?) then (ja)
   :fastembed multilingual lokal laden\nund pgvector-Abgleich durchführen;
@@ -81,6 +86,14 @@ fork
 fork again
   :Live-Nachrichten werden über
   WAGI_EVENTS unabhängig verarbeitet;
+fork again
+  :Administrator startet KB-Neuaufbau;
+  :knowledge.rebuild.requested in
+  WAGI_KB_REBUILD lesen;
+  :Text, Transkript, OCR und Metadaten
+  in neuer Generation analysieren;
+  :Generation erst nach vollständigem Erfolg
+  aktiv schalten; bei Fehler alte KB behalten;
 end fork;
 
 fork

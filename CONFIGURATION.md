@@ -147,6 +147,8 @@ DMARC in Mailcow bzw. DNS einrichten.
 | `NATS_DLQ_MAX_AGE_DAYS` | 90 | DLQ-Aufbewahrung. |
 | `NATS_REASSESSMENT_MAX_AGE_DAYS` | 30 | Aufbewahrung des separaten Neubewertungs-Streams. |
 | `NATS_REASSESSMENT_ACK_WAIT_SECONDS` | 86400 | Ack-Zeitfenster für lange Neubewertungsjobs. |
+| `NATS_KB_REBUILD_MAX_AGE_DAYS` | 30 | Aufbewahrung des separaten KB-Neuaufbau-Streams. |
+| `NATS_KB_REBUILD_ACK_WAIT_SECONDS` | 86400 | Ack-Zeitfenster für einen laufenden KB-Neuaufbau. |
 | `NATS_MAX_DELIVERIES` | 5 | Zustellversuche vor DLQ. |
 | `NATS_RETRY_BASE_SECONDS` | 5 | Basis-Backoff. |
 | `NATS_RETRY_MAX_SECONDS` | 300 | Backoff-Obergrenze. |
@@ -167,6 +169,22 @@ DMARC in Mailcow bzw. DNS einrichten.
 
 MinIO, NATS, PostgreSQL und Connector-Ports werden produktiv nicht über
 Traefik veröffentlicht. Medien laufen über die API.
+
+### Knowledge-Base-Themen und Neuaufbau
+
+Die Admin-Seite `/admin/knowledge-topics` verwaltet die Tabelle
+`knowledge_topic_definitions`. Themen werden pro Sprache (`de`, `es`, `ca`,
+`en`, `fr`) gespeichert; der `topicKey` muss innerhalb einer Sprache eindeutig
+sein und verbindet Übersetzungen. Nur aktivierte Themen werden im Dropdown des
+Keyword-Lernmodells und bei der Benennung neuer KB-Einträge angeboten.
+
+Der Button **KB neu erstellen** erzeugt eine neue Generation. Der AI-Worker
+liest dabei nur bereits gespeicherte Texte, Audio-Transkripte und OCR-Inhalte.
+Die Verarbeitung nutzt den isolierten JetStream-Stream
+`knowledge.rebuild.requested` im Stream `WAGI_KB_REBUILD`. Die bisherige
+Generation bleibt während des Aufbaus sichtbar und wird bei Fehlern nicht
+ersetzt. Dafür sind keine zusätzlichen Umgebungsvariablen erforderlich; die
+beiden `NATS_KB_REBUILD_*`-Werte steuern nur Aufbewahrung und Ack-Zeitfenster.
 
 Es gibt keinen separaten Bucket-Initialisierungscontainer. Der `media-worker` prüft den
 jeweiligen Zielbucket vor Uploads und Bereinigungen und legt ihn bei Bedarf
@@ -308,6 +326,20 @@ und Füllwortlisten werden zur Laufzeit ausschließlich aus der Datenbank gelade
 im AI-Worker und in der API gibt es dafür keine parallelen statischen Listen.
 Die bestehende Migration 014 wird nicht nachträglich geändert, damit ihre
 Prüfsumme bei bereits installierten Systemen stabil bleibt.
+
+Die Standard-KB-Themen werden durch `019_knowledge_topics.sql` in
+`knowledge_topic_definitions` angelegt; `022_knowledge_topic_roles.sql`
+ergänzt die datenbankbasierte Signalrolle je Thema.
+`021_knowledge_heuristics.sql` legt
+die datenbankbasierten Topic-/Detailbegriffe an und ergänzt
+`knowledge_subtopic_terms` für die gruppen- und sprachgebundene, konservative
+Unterthemen-Heuristik. Der AI-Worker liest Themen, Beschreibungen und Begriffe
+bei der Verarbeitung aus PostgreSQL; neue Oberthemen müssen daher nicht im
+Code ergänzt werden. Unterthemen werden aus Inhaltsüberschneidungen gebildet,
+ihre verwendeten Begriffe mit kleinen Gewichten gespeichert und bei späteren
+Nachrichten wieder berücksichtigt. Die Titel werden aus dem Threadinhalt
+abgeleitet. Ein „KB neu erstellen“-Lauf baut diese Struktur in einer separaten
+Generation neu auf und schaltet sie erst nach erfolgreichem Abschluss aktiv.
 
 ## Betriebsregeln
 

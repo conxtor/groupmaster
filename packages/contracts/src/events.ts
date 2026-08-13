@@ -11,6 +11,7 @@ export const subjects = {
   groupSelectionChanged: "connector.group.selection.changed",
   replayRequested: "replay.requested",
   aiReassessmentRequested: "ai.reassessment.requested",
+  knowledgeRebuildRequested: "knowledge.rebuild.requested",
 } as const;
 
 export type EventSubject = (typeof subjects)[keyof typeof subjects];
@@ -129,6 +130,11 @@ export interface ReplayRequested {
 
 export interface AIReassessmentRequested {
   reassessmentId: string;
+  totalCount?: number;
+}
+
+export interface KnowledgeRebuildRequested {
+  rebuildId: string;
   totalCount?: number;
 }
 
