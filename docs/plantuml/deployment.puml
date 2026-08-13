@@ -1,23 +1,123 @@
 @startuml
-title WAGI – Lokales Deployment
-node "Docker Compose" {
-  node "Public Entry" { component "nginx :80" }
-  node "Frontend" { component "web :3000" }
-  node "Backend" { component "api :8080"; component "wa-connector :3001"; component "tg-connector :3002" }
-  node "Worker" { component "ai-worker"; component "media-worker" }
-  node "Data" { database "db :5432"; queue "nats :4222"; storage "minio :9000" }
+title WAGI – Deployment: lokal und Dockge/Produktion
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+
+cloud "Internet" as Internet
+cloud "Mailcow / SMTP-Provider\nextern oder intern erreichbar" as Mail
+node "Lokaler Docker-Compose-Stack" as Local {
+  node "Public Entry" {
+    component "nginx:80\nWAGI_PUBLIC_PORT" as LocalNginx
+  }
+  component "web:3000\nNext.js standalone" as LocalWeb
+  component "api:8080\nGo" as LocalAPI
+  component "wa-connector:3001\nOnboarding + Pool" as LocalWA
+  component "tg-connector:3002\nOnboarding + Pool" as LocalTG
+  component "wa-connector-worker\ninterner Pool-Worker" as LocalWAW
+  component "tg-connector-worker\ninterner Pool-Worker" as LocalTGW
+  component "ai-worker\nPython" as LocalAI
+  component "media-worker\nPython + whisper.cpp" as LocalMedia
+  component "migrate\nversionierte SQL-Migrationen" as LocalMigrate
+  component "nats-provisioner" as LocalProvisioner
+  database "db\nPostgreSQL 15 + PostGIS/pgvector" as LocalDB
+  queue "nats:4222\nJetStream /data/jetstream" as LocalNATS
+  storage "minio:9000\nwa-media" as LocalMinio
+  component "SMTP-Konfiguration\n.env" as LocalSMTP
+  folder "Named Volumes\nAuth, TG-State, Medien,\nWhisper- und AI-Modelle" as LocalVolumes
 }
-nginx --> web : /
-nginx --> api : /api/
-api --> db
-api --> nats
-wa-connector --> db
-wa-connector --> nats
-tg-connector --> db
-tg-connector --> nats
-ai-worker --> db
-ai-worker --> nats
-media-worker --> db
-media-worker --> nats
-media-worker --> minio
+
+node "Dockge / Produktionsserver" as Production {
+  component "Traefik\nTLS + conxtor.com" as ProdTraefik
+  component "web:3000\nöffentlich geroutet" as ProdWeb
+  component "api:8080\ntraefik.enable=false" as ProdAPI
+  component "wa-connector + worker\nkein Host-Port" as ProdWA
+  component "tg-connector + worker\nkein Host-Port" as ProdTG
+  component "ai-worker" as ProdAI
+  component "media-worker" as ProdMedia
+  component "migrate + nats-provisioner\nEinmalige Jobs" as ProdInit
+  database "postgres\ninterner Dienst" as ProdDB
+  queue "nats\ninterner Dienst + JetStream" as ProdNATS
+  storage "minio\ninterner Dienst" as ProdMinio
+  component "SMTP-Client\nAPI → Mailcow" as ProdSMTP
+  folder "Named Volumes\nPersistente Sitzungen und Daten" as ProdVolumes
+}
+
+Internet --> ProdTraefik : HTTPS Host
+ProdTraefik --> ProdWeb : conxtor.com
+ProdWeb --> ProdAPI : API_INTERNAL_URL\nhttp://api:8080/api/*
+
+LocalNginx --> LocalWeb : /
+LocalNginx --> LocalAPI : /api/, /healthz, /readyz
+
+LocalMigrate --> LocalDB : schema migrations
+LocalProvisioner --> LocalNATS : streams + consumers
+LocalWA --> LocalDB
+LocalWAW --> LocalDB
+LocalTG --> LocalDB
+LocalTGW --> LocalDB
+LocalWA --> LocalNATS
+LocalWAW --> LocalNATS
+LocalTG --> LocalNATS
+LocalTGW --> LocalNATS
+LocalAPI --> LocalDB
+LocalAPI --> LocalNATS
+LocalAI --> LocalDB
+LocalAI --> LocalNATS
+LocalMedia --> LocalDB
+LocalMedia --> LocalNATS
+LocalMedia --> LocalMinio : ensure bucket + media objects
+LocalMedia --> LocalVolumes
+LocalAPI --> LocalVolumes : signed media streaming
+LocalAPI --> LocalSMTP : SMTP 587/465
+LocalVolumes .. LocalWA
+LocalVolumes .. LocalTG
+
+ProdInit --> ProdDB : migrations
+ProdInit --> ProdNATS : provisioning
+ProdWA --> ProdDB
+ProdWA --> ProdNATS
+ProdTG --> ProdDB
+ProdTG --> ProdNATS
+ProdAPI --> ProdDB
+ProdAPI --> ProdNATS
+ProdAI --> ProdDB
+ProdAI --> ProdNATS
+ProdMedia --> ProdDB
+ProdMedia --> ProdNATS
+ProdMedia --> ProdMinio : ensure bucket + media objects
+ProdMedia --> ProdVolumes
+ProdAPI --> ProdVolumes : read-only shared media
+ProdAPI --> ProdSMTP : SMTP 587/465
+ProdSMTP --> Mail : STARTTLS / implicit TLS
+
+note right of ProdTraefik
+  Nur web ist öffentlich.
+  API, PostgreSQL, NATS, MinIO,
+  Connectoren und Worker bleiben
+  ohne Host-Portfreigabe intern.
+end note
+
+note right of ProdMedia
+  Kein separater Bucket-Initialisierungs-Service.
+  Der media-worker prüft und erstellt
+  MINIO_BUCKET vor Uploads und Cleanups
+  idempotent.
+end note
+
+note right of Mail
+  Mailcow wird nicht über WAGI-Traefik
+  veröffentlicht. Nur der SMTP-Zielhost
+  muss aus dem API-Container erreichbar sein.
+  Verifizierungs- und Reset-Mails werden
+  in der Sprache des Formulars versendet.
+end note
+
+note bottom of LocalVolumes
+  Lokale Volumes:
+  postgres_data, nats_data, minio_data,
+  wa_auth, tg_state, whisper_models,
+  media_data, ai_models.
+  Dockge verwendet gleichwertige
+  *_dockge Volumes.
+end note
 @enduml

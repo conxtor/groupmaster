@@ -1,43 +1,138 @@
 @startuml
-title WAGI – Gesamtarchitektur
+title WAGI – Aktuelle Gesamtarchitektur
 left to right direction
 skinparam componentStyle rectangle
+skinparam packageStyle rectangle
 
-actor "Normaler WhatsApp-Nutzer" as User
-component "wa-connector\nNode.js + Baileys" as Connector
-actor "Telegram-Gruppe / Channel" as Telegram
-component "tg-connector\nNode.js + Telegram Bot API" as TgConnector
-component "NATS JetStream" as Bus
-database "PostgreSQL\nPostGIS + pgvector" as DB
-component "Go API" as API
-component "Next.js Dashboard" as Web
-component "media-worker\nWhisper/faster-whisper" as Media
-component "ai-worker\nRelevance/Facts/Events" as AI
-storage "MinIO" as S3
+actor "Authentifizierter Nutzer" as User
+actor "Administrator" as Admin
 
-User --> Connector : Linked Device / QR
-Connector --> DB : Gruppen + Nachrichten
-Connector --> Bus : wa.* events
-Telegram --> TgConnector : Bot-Mitgliedschaft
-TgConnector --> DB : Gruppen + Nachrichten
-TgConnector --> Bus : wa.* events
-Bus --> Media : media.audio.requested
-Media --> S3 : Medien lesen/schreiben
-Media --> Bus : media.audio.transcribed
-Bus --> AI : wa.messages / transcripts
-AI --> DB : strukturierte Analysen
-Web --> API : REST/JSON
-API --> DB
-API --> Bus : Audio-Jobs
-note right of Connector
-Adapter-Schicht hält die
-inoffizielle WhatsApp-Integration
-austauschbar.
+package "Externe Messaging-Dienste" {
+  cloud "WhatsApp Consumer Account" as WhatsApp
+  cloud "Telegram Account\nMTProto" as Telegram
+  cloud "Telegram Bot API\noptionaler Fallback" as TelegramBot
+}
+
+cloud "Mailcow / SMTP-Provider\nVerifizierungs- und Reset-Mails" as Mail
+
+package "Web-Zugriff" {
+  component "Traefik\nDockge / Produktion" as Traefik
+  component "NGINX\nLokales Compose" as Nginx
+  component "Next.js / React\nWeb-Dashboard" as Web
+  component "Go API\nREST + Auth + Media" as API
+}
+
+package "Connector-Pools" {
+  component "WhatsApp Connector\nNode.js + Baileys" as WAConnector
+  component "WhatsApp Processing Worker\nrotierende Leases" as WAWorker
+  component "WhatsApp Onboarding Slot\nQR-Pairing" as WAOnboarding
+  component "Telegram Connector\nNode.js + GramJS/MTProto" as TGConnector
+  component "Telegram Processing Worker\nrotierende Leases" as TGWorker
+  component "Telegram Onboarding Slot\nQR-Login" as TGOnboarding
+}
+
+package "Event- und Verarbeitungsplattform" {
+  queue "NATS JetStream\nWAGI_EVENTS" as NATS
+  component "media-worker\nMinIO + OCR + whisper.cpp medium" as Media
+  component "ai-worker\nHeuristik + Embeddings\noptional Hermes-Agent" as AI
+  component "NATS Provisioner\nStreams + Durable Consumer" as Provisioner
+}
+
+package "Persistenz" {
+  database "PostgreSQL\nPostGIS + pgvector" as DB
+  storage "MinIO\nwa-media" as MinIO
+  folder "Shared media_data\nIncoming-Dateien" as MediaVolume
+}
+
+User --> Traefik : HTTPS\nProduktion
+User --> Nginx : HTTP\nLokale Umgebung
+Traefik --> Web : Host conxtor.com
+Nginx --> Web : /
+Nginx --> API : /api/\nHealth + Media
+Web --> API : same-origin /api/*\nNext.js internal rewrite in Dockge
+
+User --> Web : Login, Gruppen,\nConnector-Setup, Dashboard
+User --> Web : /profile\nName, E-Mail, Passwort, Sprache
+Admin --> Web : /admin\nNutzer anlegen, Rolle, Status
+API --> Mail : SMTP STARTTLS/TLS\nsprachabhängige Auth-Mails
+Mail --> User : Verifizierungslink\nPasswort-Reset-Link
+
+WhatsApp --> WAOnboarding : Linked Device / QR
+WAOnboarding --> WAConnector : Baileys session
+WAConnector --> WAWorker : account lease / rotation
+WAWorker --> WhatsApp : selected groups\nBackfill + live receive
+
+Telegram --> TGOnboarding : QR / MTProto Login
+TGOnboarding --> TGConnector : GramJS session
+TGConnector --> TGWorker : account lease / rotation
+TGWorker --> Telegram : selected groups,\nSupergroups + Topics
+TelegramBot ..> TGConnector : optional Bot API fallback
+
+API --> DB : Auth, groups, accounts,\nselection, cursors, queries
+API --> NATS : control events, audio jobs,\nfeedback, replay
+API --> MediaVolume : signed media streaming
+
+WAConnector --> DB : groups, messages,\nrevisions, contacts, cursors
+TGConnector --> DB : dialogs, topics, messages,\ncursors
+WAConnector --> NATS : wa.* + connector.*
+TGConnector --> NATS : wa.* + connector.*
+
+NATS --> Media : media.objects.requested\nmedia.audio.requested
+Media --> MediaVolume : stage source / thumbnails
+Media --> MinIO : original + thumbnail objects
+Media --> DB : media_objects, audio_jobs
+Media --> NATS : media.audio.transcribed\nmedia.image.analyzed\nmedia.document.analyzed
+
+NATS --> AI : wa.messages.received\nmedia.*.analyzed\nreplay.requested
+AI --> DB : ai_jobs, message_analyses,\nknowledge hierarchy + graph
+AI --> NATS : ai.messages.analyzed\nDLQ bei Fehlern
+AI ..> MinIO : optional document/media context
+Provisioner --> NATS : WAGI_EVENTS,\nWAGI_* durable consumers
+
+note right of WAConnector
+  Gemeinsamer Connector-SDK-Lebenszyklus:
+  start, stop, listGroups, status,
+  einheitlicher Fehlervertrag.
+  Auth-State wird als Snapshot in
+  connector_accounts / connector_auth_state
+  persistent gespeichert.
 end note
-note right of TgConnector
-Bot-Token, Long Polling und
-persistenter Offset-State.
-Gruppen/Channels werden nur
-bei Bot-Mitgliedschaft gesehen.
+
+note right of TGConnector
+  Direkte Telegram-Verbindung ist Standard,
+  Bot API bleibt als Fallback vorhanden.
+  Nur ausgewählte Gruppen/Channels/Topics
+  werden verarbeitet; Backfill nutzt Cursor
+  und konfigurierbare Drosselung.
+  Jeder vollständige Dialog-Snapshot entfernt
+  verlassene Chats aus Auswahl und DB.
+  Gemeinsame Chats bleiben für andere Nutzer
+  erhalten; vollständig verwaiste Chats werden
+  einschließlich Medien und Event-Payloads
+  bereinigt.
+end note
+
+note right of Media
+  MinIO-Bucket wird vor Upload und Cleanup
+  idempotent geprüft/angelegt.
+  Es gibt keinen separaten Init-Container.
+end note
+
+note bottom of DB
+  Multi-User-Isolation über app_users,
+  user_group_access und connector_accounts.
+  connector_leases halten pro Account genau
+  einen aktiven Worker; QR-Onboarding besitzt
+  dedizierte Slots.
+end note
+
+note right of API
+  Öffentliche Auth-Endpunkte:
+  /auth/login, /auth/register,
+  /auth/verify-email,
+  /auth/password-reset/*.
+  Neue Accounts erhalten erst nach
+  erfolgreicher E-Mail-Verifizierung
+  eine Dashboard-Session.
 end note
 @enduml

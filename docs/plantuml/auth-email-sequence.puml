@@ -1,0 +1,75 @@
+@startuml
+title WAGI – Email-Verifizierung und Passwort-Reset
+autonumber
+
+actor "Nutzer" as User
+participant "Next.js Auth-Seite" as Web
+participant "Go API" as API
+database "PostgreSQL" as DB
+cloud "Mailcow / SMTP-Provider" as Mail
+
+== Registrierung ==
+User -> Web: Formular mit Sprache absenden
+Web -> API: POST /api/v1/auth/register\n{name,email,password,locale}
+API -> DB: app_users (preferred_locale, unverifiziert)
+API -> DB: bcrypt password_hash + user role
+API -> DB: auth_email_tokens\nSHA-256-Hash, Zweck, Ablaufzeit
+API -> Mail: SMTP-Textmail mit lokalisiertem Link
+Mail --> User: Verifizierungslink
+API --> Web: 202 verification_required
+
+== Aktivierung ==
+User -> Web: /verify-email?token=…
+Web -> API: POST /api/v1/auth/verify-email
+API -> DB: Token sperren und prüfen
+API -> DB: email_verified_at = NOW()
+API --> Web: verified = true
+Web --> User: Zur Anmeldung
+
+== Profiländerung ==
+User -> Web: /profile öffnen
+Web -> API: GET /api/v1/auth/me
+API -> DB: Profil und letzte Session lesen
+User -> Web: Name, Sprache oder Passwort ändern
+Web -> API: PATCH /api/v1/auth/profile
+API -> DB: Profil aktualisieren
+alt E-Mail-Adresse geändert
+  API -> DB: email_verified_at löschen
+  API -> Mail: Neue Verifizierungs-Mail in Formularsprache
+  Mail --> User: Neuer Bestätigungslink
+  API --> Web: verificationRequired = true
+else Passwort geändert
+  API -> DB: Bestehende Sessions löschen
+  API --> Web: sessionRevoked = true
+else Nur Name/Sprache geändert
+  API --> Web: Profil gespeichert
+end
+
+== Administrator legt Nutzer an ==
+actor "Administrator" as Admin
+Admin -> Web: Admin / Nutzer anlegen
+Web -> API: POST /api/v1/admin/users
+API -> DB: User + Rolle + bcrypt-Hash\nals verifiziert speichern
+API --> Web: 201 Created
+
+== Passwort vergessen ==
+User -> Web: Passwort vergessen, Sprache wählen
+Web -> API: POST /api/v1/auth/password-reset/request
+API -> DB: aktiven/verifizierten User suchen
+API -> DB: Reset-Token als Hash speichern
+API -> Mail: SMTP-Resetmail in Formularsprache
+Mail --> User: Reset-Link
+API --> Web: Immer gleiche 202-Antwort
+
+User -> Web: /password-reset/confirm?token=…
+Web -> API: POST /api/v1/auth/password-reset/confirm
+API -> DB: Token prüfen, Passwort hashen
+API -> DB: Passwort ändern, alte Sessions löschen
+API --> Web: reset = true
+Web --> User: Zur Anmeldung
+
+note over API,DB
+  Das Klartext-Token wird nicht in PostgreSQL gespeichert.
+  SMTP-Zugangsdaten bleiben in der Server-Umgebung.
+end note
+@enduml

@@ -65,22 +65,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-  minio-init:
-    image: minio/mc:latest
-    restart: "no"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
-      MINIO_BUCKET: ${MINIO_BUCKET:-wa-media}
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        mc alias set minio http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
-        until mc ready minio; do sleep 2; done
-        mc mb --ignore-existing "minio/$${MINIO_BUCKET}"
-    depends_on:
-      minio: {condition: service_started}
-
   api:
     build:
       context: ../..
@@ -98,9 +82,22 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-wa-media}
       WAGI_CORS_ORIGIN: ${WAGI_CORS_ORIGIN:-}
       WAGI_COOKIE_SECURE: ${WAGI_COOKIE_SECURE:-false}
+      WAGI_PUBLIC_URL: ${WAGI_PUBLIC_URL:-http://localhost:3000}
       WAGI_BOOTSTRAP_ADMIN_EMAIL: ${WAGI_BOOTSTRAP_ADMIN_EMAIL:-volker@kerkhoff.es}
       WAGI_BOOTSTRAP_ADMIN_NAME: ${WAGI_BOOTSTRAP_ADMIN_NAME:-Volker Kerkhoff}
       WAGI_BOOTSTRAP_ADMIN_PASSWORD: ${WAGI_BOOTSTRAP_ADMIN_PASSWORD:-Ctas2025!}
+      SMTP_ENABLED: ${SMTP_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-WAGI}
+      SMTP_REPLY_TO: ${SMTP_REPLY_TO:-}
+      EMAIL_VERIFICATION_HOURS: ${EMAIL_VERIFICATION_HOURS:-48}
+      PASSWORD_RESET_HOURS: ${PASSWORD_RESET_HOURS:-1}
       WA_CONNECTOR_POOL_SIZE: ${WA_CONNECTOR_POOL_SIZE:-5}
       TG_CONNECTOR_POOL_SIZE: ${TG_CONNECTOR_POOL_SIZE:-5}
       WA_ONBOARDING_SLOTS: ${WA_ONBOARDING_SLOTS:-1}
@@ -110,7 +107,6 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
-      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 
@@ -154,7 +150,6 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
-      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 
@@ -201,7 +196,6 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
-      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 
@@ -389,7 +383,6 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
-      minio-init: {condition: service_completed_successfully}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 

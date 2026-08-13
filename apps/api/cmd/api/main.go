@@ -38,6 +38,7 @@ type app struct {
 	minioAccessKey    string
 	minioSecretKey    string
 	minioBucket       string
+	email             *emailService
 }
 
 type group struct {
@@ -1222,6 +1223,7 @@ func main() {
 		minioAccessKey:    env("MINIO_ACCESS_KEY", env("MINIO_ROOT_USER", "minio")),
 		minioSecretKey:    env("MINIO_SECRET_KEY", env("MINIO_ROOT_PASSWORD", "miniosecret")),
 		minioBucket:       env("MINIO_BUCKET", "wa-media"),
+		email:             newEmailService(),
 	}
 	if err := a.bootstrapAdmin(); err != nil {
 		log.Fatal(err)
@@ -1231,9 +1233,14 @@ func main() {
 	mux.HandleFunc("/readyz", a.ready)
 	mux.HandleFunc("/metrics", a.metrics)
 	mux.HandleFunc("/api/v1/auth/me", a.authMe)
+	mux.HandleFunc("/api/v1/auth/profile", requireAuthenticated(a, a.authProfile))
 	mux.HandleFunc("/api/v1/auth/login", a.authLogin)
 	mux.HandleFunc("/api/v1/auth/logout", a.authLogout)
 	mux.HandleFunc("/api/v1/auth/register", a.authRegister)
+	mux.HandleFunc("/api/v1/auth/verify-email", a.authVerifyEmail)
+	mux.HandleFunc("/api/v1/auth/email-verification/resend", a.authResendVerification)
+	mux.HandleFunc("/api/v1/auth/password-reset/request", a.authRequestPasswordReset)
+	mux.HandleFunc("/api/v1/auth/password-reset/confirm", a.authConfirmPasswordReset)
 	mux.HandleFunc("/api/v1/admin/users", requireAdmin(a, a.adminUsers))
 	mux.HandleFunc("/api/v1/admin/users/", requireAdmin(a, a.adminUsers))
 	mux.HandleFunc("/api/v1/admin/observability", requireAdmin(a, a.adminObservability))

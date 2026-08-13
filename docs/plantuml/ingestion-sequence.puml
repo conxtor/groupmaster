@@ -1,31 +1,139 @@
 @startuml
-title WAGI – Ingestion-Sequenz
-actor User
-participant "wa-connector" as C
-participant "Baileys" as W
-participant "tg-connector" as T
-participant "Telegram Bot API" as TG
-database "Postgres" as DB
-queue "NATS JetStream" as N
-participant "ai-worker" as AI
+title WAGI – Onboarding, Auswahl und Nachrichtenaufnahme
+autonumber
 
-User -> C: QR scannen / Linked Device
-C -> W: Auth-State laden
-W --> C: connection.open
-W -> C: messages.upsert
-C -> DB: upsert wa_group + message
-C -> N: publish wa.messages.received
-N -> AI: deliver message event
-AI -> DB: upsert message_analyses
-AI -> N: publish ai.messages.analyzed
-== Telegram Bot API ==
-T -> TG: getUpdates (Long Polling)
-TG --> T: message / channel_post
-T -> DB: upsert tg:<chat-id> + message
-T -> N: publish wa.messages.received
-N -> AI: deliver message event
-note over C,DB
-Nur ausgewählte Gruppen werden
-nach der Gruppenauswahl verarbeitet.
+actor "Nutzer" as User
+participant "Next.js Web" as Web
+participant "Go API" as API
+participant "Mailcow / SMTP" as Mail
+database "PostgreSQL" as DB
+queue "NATS JetStream" as NATS
+participant "WA Onboarding\nBaileys" as WAO
+participant "WA Processing\nBaileys" as WAP
+participant "TG Onboarding\nGramJS" as TGO
+participant "TG Processing\nGramJS" as TGP
+participant "Telegram Account\nMTProto" as Telegram
+participant "Telegram Bot API\noptional" as Bot
+participant "media-worker" as Media
+
+== Auth und Email ==
+User -> Web: Sprache wählen / registrieren
+Web -> API: POST /auth/register {locale}
+API -> DB: User + preferred_locale + unverifiziert
+API -> DB: auth_email_tokens (Hash, Ablaufzeit)
+API -> Mail: SMTP-Email in Formularsprache
+Mail --> User: Bestätigungslink
+User -> Web: Link öffnen
+Web -> API: POST /auth/verify-email
+API -> DB: email_verified_at setzen\nToken als verwendet markieren
+API --> Web: Verifizierung erfolgreich
+User -> Web: Passwort vergessen
+Web -> API: POST /auth/password-reset/request {locale}
+API -> DB: Reset-Token-Hash speichern
+API -> Mail: SMTP-Resetmail in Formularsprache
+Mail --> User: Reset-Link
+Web -> API: POST /auth/password-reset/confirm
+API -> DB: Passwort ändern, Sessions löschen
+
+== Connector aktivieren ==
+User -> Web: Connector anlegen / QR starten
+Web -> API: POST /api/v1/connectors/accounts/{id}/qr
+API -> DB: connector_onboarding_requests = pending
+API -> DB: connector_qr_sessions = starting
+API --> Web: status + Queueposition
+
+alt WhatsApp QR
+  WAO -> DB: Lease für onboarding-Slot holen
+  WAO -> WAO: Baileys starten / QR erzeugen
+  WAO -> DB: QR-Status + Ablaufzeit speichern
+  Web -> API: GET QR-Status (Polling)
+  API -> DB: QR-Session lesen
+  API --> Web: QR-Payload oder Warteposition
+  User -> Web: QR mit Telefon scannen
+  WAO -> DB: Baileys Auth-State als Session-Snapshot speichern
+else Telegram QR
+  TGO -> DB: Lease für onboarding-Slot holen
+  TGO -> TGO: GramJS QR-Login starten
+  TGO -> DB: QR-Status + Ablaufzeit speichern
+  Web -> API: GET QR-Status (Polling)
+  API -> DB: QR-Session lesen
+  API --> Web: QR-Payload oder Warteposition
+  User -> Web: Telegram QR scannen
+  TGO -> DB: MTProto StringSession persistent speichern
+end
+
+WAO -> DB: Gruppen / Dialoge entdecken
+TGO -> DB: Gruppen, Supergroups, Channels und Topics entdecken
+WAO -> DB: onboarding abgeschlossen, Account pausiert
+TGO -> DB: onboarding abgeschlossen, Account pausiert
+WAO -> DB: Lease freigeben
+TGO -> DB: Lease freigeben
+
+== Gruppen auswählen ==
+User -> Web: Gruppen/Topics auswählen
+Web -> API: PATCH /api/v1/groups/{id}/select
+API -> DB: user_group_access.is_selected aktualisieren
+API -> NATS: connector.group.selection.changed
+NATS -> WAO: Auswahländerung (wenn Account aktiv)
+NATS -> TGO: Auswahländerung (wenn Account aktiv)
+WAO -> DB: Cursor und Auswahl prüfen
+TGO -> DB: Cursor und Auswahl prüfen
+
+== Rotierender Processing-Pool ==
+loop nächster fälliger Account
+  WAP -> DB: connector_leases atomar erwerben
+  TGP -> DB: connector_leases atomar erwerben
+  alt kein freier Slot
+    WAP -> DB: degraded + Queueposition speichern
+    TGP -> DB: degraded + Queueposition speichern
+  else Lease vorhanden
+    WAP -> DB: Session laden / Lease erneuern
+    TGP -> DB: Session laden / Lease erneuern
+    WAP -> WAO: ausgewählte Gruppen, Backfill der konfigurierten Tage
+    TGP -> TGO: ausgewählte Gruppen, Backfill der konfigurierten Tage
+    WAO -> DB: connector_cursors je Gruppe aktualisieren
+    TGO -> DB: connector_cursors je Gruppe aktualisieren
+  end
+end
+
+== WhatsApp und Telegram: gemeinsamer Nachrichtenevent ==
+alt WhatsApp Live/History
+  WAO -> WAP: messages.upsert / History-Sync
+  WAP -> DB: Nachricht idempotent upserten
+else Telegram Direct Live/Backfill
+  TGO -> TGP: NewMessage / iterMessages
+  TGP -> DB: Nachricht idempotent upserten
+else optional Telegram Bot API
+  Bot -> TGO: getUpdates / channel_post
+  TGO -> DB: Nachricht idempotent upserten
+end
+
+DB -> DB: Revisions, content_hash, Reihenfolge,\nReplies, gelöschte/geänderte Nachrichten
+DB -> NATS: wa.messages.received
+NATS -> NATS: Durable Consumer WAGI_AI_MESSAGES
+NATS -> Web: indirekt über persistierte Analyse / API
+
+note over WAO,TGO
+  Nur ausgewählte Gruppen werden verarbeitet.
+  Neue Accounts lesen im Onboarding nur Gruppen ein;
+  Nachrichten- und Backfill-Verarbeitung erfolgt im
+  rotierenden Processing-Pool.
 end note
+
+== Telegram-Gruppen-Snapshot und Bereinigung ==
+TGO -> Telegram: vollständiger Dialog-Snapshot
+TGO -> DB: aktive Gruppen, Supergroups,
+Channels und Topics upserten
+TGO -> DB: verlassene Einträge ermitteln
+alt Gruppe auch von anderen Nutzern verwendet
+  TGO -> DB: user_group_access und Cursor
+des verlassenden Nutzers löschen
+else Gruppe vollständig verwaist
+  TGO -> Media: Medienobjekte und Dateien löschen
+  TGO -> DB: event_inbox und event_failures
+für Gruppe/Nachrichten löschen
+  TGO -> DB: wa_groups löschen
+  DB -> DB: FK-Kaskade auf Nachrichten,
+Analysen, Events, Knowledge Base und AI-Jobs
+end
 @enduml

@@ -362,25 +362,69 @@ async function publish<T>(subject: string, type: EventEnvelope<T>["type"], data:
   await js.publish(subject, sc.encode(JSON.stringify(envelope(type, data))));
 }
 
+async function cleanupDetachedEventRecords(groupIds: string[]) {
+  if (!groupIds.length) return;
+  const messages = await pool.query<{ id: string }>(
+    "SELECT id::text FROM messages WHERE group_id=ANY($1::text[])",
+    [groupIds],
+  );
+  const messageIds = messages.rows.map((row) => row.id);
+  const eventScope = `
+    (payload #>> '{data,groupId}') = ANY($1::text[])
+    OR (payload #>> '{data,group_id}') = ANY($1::text[])
+    OR (payload #>> '{data,event,data,groupId}') = ANY($1::text[])
+    OR (payload #>> '{data,event,data,group_id}') = ANY($1::text[])
+    OR (payload #>> '{data,messageId}') = ANY($2::text[])
+    OR (payload #>> '{data,message_id}') = ANY($2::text[])
+    OR (payload #>> '{data,event,data,messageId}') = ANY($2::text[])
+    OR (payload #>> '{data,event,data,message_id}') = ANY($2::text[])`;
+  await pool.query(`DELETE FROM event_inbox WHERE ${eventScope}`, [groupIds, messageIds]);
+  await pool.query(`DELETE FROM event_failures WHERE ${eventScope}`, [groupIds, messageIds]);
+}
+
 async function cleanupRemovedGroups(platform: "whatsapp" | "telegram", groupIds: string[]) {
   const uniqueIds = [...new Set(groupIds.filter(Boolean))];
   if (!uniqueIds.length) return;
-  if (!mediaCleanupToken) throw new Error("MEDIA_CLEANUP_TOKEN fehlt; Gruppenbereinigung wird abgebrochen");
-  const response = await nc.request(
-    "internal.groups.cleanup.requested",
-    sc.encode(JSON.stringify({ token: mediaCleanupToken, platform, groupIds: uniqueIds })),
-    { timeout: 30_000 },
-  );
-  const result = JSON.parse(sc.decode(response.data)) as { ok?: boolean; error?: string };
-  if (!result.ok) throw new Error(result.error ?? "Medienbereinigung fehlgeschlagen");
   const ownerUserId = accountLease?.account.userId;
   if (ownerUserId) {
+    const deletable = await pool.query<{ id: string }>(
+      `SELECT g.id
+       FROM wa_groups g
+       WHERE g.platform=$1 AND g.id=ANY($2::text[])
+         AND NOT EXISTS (
+           SELECT 1 FROM user_group_access other
+           WHERE other.group_id=g.id AND other.user_id<>$3::uuid
+         )`,
+      [platform, uniqueIds, ownerUserId],
+    );
+    const deletableIds = deletable.rows.map((row) => row.id);
+    if (deletableIds.length) {
+      if (!mediaCleanupToken) throw new Error("MEDIA_CLEANUP_TOKEN fehlt; Gruppenbereinigung wird abgebrochen");
+      const response = await nc.request(
+        "internal.groups.cleanup.requested",
+        sc.encode(JSON.stringify({ token: mediaCleanupToken, platform, groupIds: deletableIds })),
+        { timeout: 30_000 },
+      );
+      const result = JSON.parse(sc.decode(response.data)) as { ok?: boolean; error?: string };
+      if (!result.ok) throw new Error(result.error ?? "Medienbereinigung fehlgeschlagen");
+    }
+    await cleanupDetachedEventRecords(deletableIds);
     await pool.query("DELETE FROM user_group_access WHERE user_id=$1::uuid AND group_id=ANY($2::text[])", [ownerUserId, uniqueIds]);
+    await pool.query("DELETE FROM connector_cursors WHERE account_id=$1::uuid AND group_id=ANY($2::text[])", [accountLease?.account.accountId, uniqueIds]);
     await pool.query("DELETE FROM wa_groups g WHERE g.platform=$1 AND g.id=ANY($2::text[]) AND NOT EXISTS (SELECT 1 FROM user_group_access uga WHERE uga.group_id=g.id)", [platform, uniqueIds]);
   } else {
+    if (!mediaCleanupToken) throw new Error("MEDIA_CLEANUP_TOKEN fehlt; Gruppenbereinigung wird abgebrochen");
+    const response = await nc.request(
+      "internal.groups.cleanup.requested",
+      sc.encode(JSON.stringify({ token: mediaCleanupToken, platform, groupIds: uniqueIds })),
+      { timeout: 30_000 },
+    );
+    const result = JSON.parse(sc.decode(response.data)) as { ok?: boolean; error?: string };
+    if (!result.ok) throw new Error(result.error ?? "Medienbereinigung fehlgeschlagen");
+    await cleanupDetachedEventRecords(uniqueIds);
     await pool.query("DELETE FROM wa_groups WHERE platform=$1 AND id=ANY($2::text[])", [platform, uniqueIds]);
   }
-  console.log(`Removed ${uniqueIds.length} departed ${platform} group(s) and related data`);
+  console.log(`Removed ${uniqueIds.length} departed ${platform} group(s) from the current account snapshot`);
 }
 
 async function ensureEventStream() {
@@ -694,8 +738,26 @@ async function persistDirectMessage(message: any, entity: any) {
   if (accountLease) await accountLease.saveCursor(groupId, { externalMessageId: String(message.id), receivedAt: new Date(timestamp * 1000).toISOString(), sequenceNo: Number(message.id) });
 }
 
+function isDepartedDirectEntity(entity: any) {
+  return entity?.className === "ChatForbidden"
+    || entity?.className === "ChannelForbidden"
+    || entity?.left === true
+    || entity?.kicked === true
+    || entity?.deactivated === true;
+}
+
+function isDepartedDirectDialog(dialog: any, entity: any) {
+  return isDepartedDirectEntity(entity)
+    || dialog?.left === true
+    || dialog?.kicked === true
+    || dialog?.deactivated === true
+    || dialog?.entity?.left === true
+    || dialog?.entity?.kicked === true
+    || dialog?.entity?.deactivated === true;
+}
+
 function isDirectGroupEntity(entity: any) {
-  return entity?.className === "Chat" || entity?.className === "Channel";
+  return (entity?.className === "Chat" || entity?.className === "Channel") && !isDepartedDirectEntity(entity);
 }
 
 async function discoverDirectGroups() {
@@ -709,14 +771,22 @@ async function discoverDirectGroups() {
     if (!iterator || typeof iterator[Symbol.asyncIterator] !== "function") throw new Error("Telegram liefert keine vollständige Dialogliste");
     for await (const dialog of iterator) {
       const entity = dialog?.entity;
-      if (!isDirectGroupEntity(entity)) continue;
+      if (!isDirectGroupEntity(entity) || isDepartedDirectDialog(dialog, entity)) continue;
       const group = await upsertDirectGroup(entity);
       presentIds.add(group.groupId);
       if (!await discoverDirectTopics(entity)) throw new Error(`Telegram-Topics für ${group.groupId} konnten nicht vollständig gelesen werden`);
       for (const topic of directTopicGroups.get(group.groupId)?.values() ?? []) presentIds.add(topic.groupId);
     }
-    const stored = await pool.query<{ id: string }>("SELECT id FROM wa_groups WHERE platform='telegram' AND ($1::uuid IS NULL OR owner_user_id=$1::uuid)", [accountLease?.account.userId ?? null]);
+    const stored = await pool.query<{ id: string }>(
+      `SELECT DISTINCT g.id
+       FROM wa_groups g
+       LEFT JOIN user_group_access uga ON uga.group_id=g.id AND uga.user_id=$1::uuid
+       WHERE g.platform='telegram'
+         AND (g.owner_user_id=$1::uuid OR uga.user_id IS NOT NULL)`,
+      [accountLease?.account.userId ?? null],
+    );
     const stale = stored.rows.map((row) => row.id).filter((id) => !presentIds.has(id));
+    if (stale.length) console.log(`Telegram group snapshot found ${stale.length} departed group/topic(s)`);
     await cleanupRemovedGroups("telegram", stale);
   } finally {
     groupRefreshInProgress = false;

@@ -1,42 +1,324 @@
 @startuml
-title WAGI – Datenmodell
+title WAGI – Aktuelles Datenmodell
 hide methods
 hide stereotypes
+skinparam linetype ortho
+
+entity app_users {
+  * id : uuid <<PK>>
+  --
+  email : text <<unique>>
+  name : text
+  password_hash : text
+  status : text
+  preferred_locale : de|es|ca|en|fr
+  email_verified_at : timestamptz
+}
+
+entity auth_email_tokens {
+  * id : uuid <<PK>>
+  --
+  user_id : uuid <<FK>>
+  purpose : email_verification | password_reset
+  token_hash : text <<unique>>
+  locale : text
+  expires_at : timestamptz
+  used_at : timestamptz
+}
+
+entity user_sessions {
+  * id : uuid <<PK>>
+  --
+  user_id : uuid <<FK>>
+  token_hash : text <<unique>>
+  expires_at : timestamptz
+}
+
+entity user_roles {
+  * user_id : uuid <<FK>>
+  * role_name : text <<FK>>
+}
 
 entity wa_groups {
   * id : text <<PK>>
   --
+  owner_user_id : uuid <<FK>>
+  platform : text
+  chat_type : text
+  parent_group_id : text <<FK/self>>
   subject : text
-  participant_count : int
+  language : text
   is_selected : bool
 }
+
+entity user_group_access {
+  * user_id : uuid <<FK>>
+  * group_id : text <<FK>>
+  --
+  can_read : bool
+  can_manage : bool
+  is_selected : bool
+}
+
+entity connector_accounts {
+  * id : uuid <<PK>>
+  --
+  user_id : uuid <<FK>>
+  platform : whatsapp | telegram
+  status : text
+  session_data : bytea
+  next_sync_at : timestamptz
+}
+
+entity connector_auth_state {
+  * account_id : uuid <<FK>>
+  * key_namespace : text
+  * key_name : text
+  --
+  value : bytea
+  version : bigint
+}
+
+entity connector_leases {
+  * account_id : uuid <<PK/FK>>
+  --
+  worker_id : text
+  lease_kind : processing | onboarding
+  lease_until : timestamptz
+}
+
+entity connector_lease_history {
+  * id : uuid <<PK>>
+  --
+  account_id : uuid <<FK>>
+  user_id : uuid <<FK>>
+  worker_id : text
+  started_at : timestamptz
+  ended_at : timestamptz
+  end_reason : text
+}
+
+entity connector_qr_sessions {
+  * account_id : uuid <<PK/FK>>
+  --
+  user_id : uuid <<FK>>
+  platform : text
+  status : text
+  qr_payload : text
+  expires_at : timestamptz
+}
+
+entity connector_onboarding_requests {
+  * id : uuid <<PK>>
+  --
+  account_id : uuid <<FK>>
+  user_id : uuid <<FK>>
+  status : text
+  worker_id : text
+}
+
+entity connector_cursors {
+  * account_id : uuid <<FK>>
+  * group_id : text <<FK>>
+  --
+  last_external_message_id : text
+  last_received_at : timestamptz
+  last_sequence_no : bigint
+}
+
 entity messages {
   * id : uuid <<PK>>
   --
   group_id : text <<FK>>
+  platform : text
   wa_message_id : text
+  sender_jid : text
+  sender_name : text
   kind : text
   text : text
   received_at : timestamptz
+  reply_to : text
+  content_hash : text
+  edited_at : timestamptz
+  deleted_at : timestamptz
 }
+
+entity message_revisions {
+  * id : uuid <<PK>>
+  --
+  message_id : uuid <<FK>>
+  revision_no : int
+  change_type : created | updated | deleted
+  raw : jsonb
+}
+
+entity media_objects {
+  * id : uuid <<PK>>
+  --
+  message_id : uuid <<FK>>
+  media_key : text
+  object_key : text
+  thumbnail_key : text
+  object_path : text
+  mime : text
+  status : text
+  ocr_text : text
+}
+
 entity audio_jobs {
   * id : uuid <<PK>>
   --
   message_id : uuid <<FK>>
   status : text
+  attempts : int
   transcript : text
+  language : text
+  next_attempt_at : timestamptz
 }
+
+entity ai_jobs {
+  * id : uuid <<PK>>
+  --
+  message_id : uuid <<FK>>
+  status : text
+  attempts : int
+  error : text
+}
+
 entity message_analyses {
   * message_id : uuid <<PK/FK>>
   --
   relevant : bool
-  facts : jsonb
-  entities : jsonb
-  events : jsonb
-  places : jsonb
-  embedding : vector(1536)
+  relevance_score : numeric
+  summary : text
+  facts/entities/events/places : jsonb
+  provenance/conflicts : jsonb
+  model : text
+  prompt_version : text
 }
+
+entity knowledge_topics {
+  * id : uuid <<PK>>
+  --
+  group_id : text <<FK>>
+  topic_key : text
+  title : text
+  summary : text
+  source_message_ids : jsonb
+}
+
+entity knowledge_items {
+  * id : uuid <<PK>>
+  --
+  topic_id : uuid <<FK>>
+  parent_item_id : uuid <<FK/self>>
+  item_key : text
+  item_role : summary | detail
+  content : text
+  embedding : vector(384)
+  source_message_ids : jsonb
+}
+
+entity ai_feedback {
+  * id : uuid <<PK>>
+  --
+  user_id : uuid <<FK>>
+  group_id : text <<FK>>
+  message_id : uuid <<FK>>
+  target_type : relevance | event | knowledge
+  decision : accept | reject | correct
+}
+
+entity ai_canonical_aliases {
+  * id : uuid <<PK>>
+  --
+  group_id : text <<FK>>
+  alias : text
+  canonical_key : text
+  kind : entity | knowledge | event
+}
+
+entity ai_knowledge_edges {
+  * id : uuid <<PK>>
+  --
+  group_id : text <<FK>>
+  source_key : text
+  target_key : text
+  relation : text
+  source_message_ids : jsonb
+}
+
+entity event_inbox {
+  * consumer_name : text <<PK>>
+  * event_id : text <<PK>>
+  --
+  subject : text
+  status : processing | processed | retry | failed
+  attempts : int
+  payload : jsonb
+}
+
+entity event_failures {
+  * id : uuid <<PK>>
+  --
+  event_id : text
+  consumer_name : text
+  subject : text
+  error : text
+  attempts : int
+}
+
+entity replay_jobs {
+  * id : uuid <<PK>>
+  --
+  requested_by : uuid <<FK>>
+  group_ids : jsonb
+  from_at/to_at : timestamptz
+  status : text
+  processed_count : int
+}
+
+app_users ||--o{ user_sessions
+app_users ||--o{ auth_email_tokens
+app_users ||--o{ user_roles
+app_users ||--o{ user_group_access
+wa_groups ||--o{ user_group_access
 wa_groups ||--o{ messages
+wa_groups ||--o{ knowledge_topics
+wa_groups ||--o{ ai_feedback
+wa_groups ||--o{ ai_canonical_aliases
+wa_groups ||--o{ ai_knowledge_edges
+wa_groups ||--o{ connector_cursors
+wa_groups ||--o| wa_groups : parent/topic
+
+app_users ||--o{ connector_accounts
+connector_accounts ||--o{ connector_auth_state
+connector_accounts ||--o| connector_leases
+connector_accounts ||--o{ connector_lease_history
+connector_accounts ||--o| connector_qr_sessions
+connector_accounts ||--o{ connector_onboarding_requests
+connector_accounts ||--o{ connector_cursors
+
+messages ||--o{ message_revisions
+messages ||--o{ media_objects
 messages ||--o{ audio_jobs
+messages ||--o| ai_jobs
 messages ||--o| message_analyses
+knowledge_topics ||--o{ knowledge_items
+knowledge_items ||--o{ knowledge_items : parent/detail
+messages ||--o{ ai_feedback
+app_users ||--o{ ai_feedback
+app_users ||--o{ replay_jobs
+
+note "PostGIS aktiviert in PostgreSQL für Ortsdaten.\npgvector wird primär für knowledge_items.embedding verwendet.\nNATS JetStream und MinIO sind Laufzeitdienste, keine relationalen Tabellen." as N1
+N1 .. wa_groups
+
+note bottom of wa_groups
+  Ein vollständig verwaister Chat wird gelöscht.
+  PostgreSQL kaskadiert auf Nachrichten, Medien,
+  Analysen, Events, Knowledge Base und AI-Jobs.
+  Die JSON-Payload-Stores event_inbox und
+  event_failures werden für entfernte Gruppen
+  und Nachrichten explizit bereinigt.
+end note
 @enduml

@@ -4,6 +4,8 @@ Ein MVP-Monorepo für die Auswertung klassischer WhatsApp-Gruppen normaler Consu
 
 Die priorisierte Produktplanung mit Beta-Ziel, Produktionsreife, Risiken und Definition of Done steht in [ROADMAP.md](ROADMAP.md).
 
+Die vollständige Referenz aller Umgebungsvariablen, SMTP-/Mailcow-Beispiele und Produktionshinweise steht in [CONFIGURATION.md](CONFIGURATION.md).
+
 ## Schnellstart
 
 Voraussetzungen: Docker oder Colima mit `docker-compose` sowie Node.js 20 und npm für lokale Frontend-/Connector-Entwicklung.
@@ -47,6 +49,46 @@ docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build 
 Compose-Container werden Datenbank, NATS und MinIO über die internen
 Servicenamen erreicht; die Werte in `.env.example` sind für lokale Prozesse
 außerhalb von Compose gedacht.
+
+Der Medienbucket wird nicht durch einen separaten Init-Container angelegt.
+Der `media-worker` stellt `MINIO_BUCKET` vor dem ersten Upload oder Cleanup
+idempotent sicher; der persistente MinIO-Speicher bleibt bei Neustarts erhalten.
+
+### Email-Verifizierung und Passwort-Reset
+
+Neue Nutzerkonten werden erst nach Bestätigung der E-Mail-Adresse aktiviert.
+Die Formulare für Anmeldung, Registrierung und Passwort-Reset unterstützen
+Deutsch, Spanisch, Katalanisch, Englisch und Französisch. Die ausgewählte
+Sprache wird als `wagi_locale`-Cookie gespeichert und für die jeweilige
+Verifizierungs- bzw. Reset-Mail verwendet.
+
+Administratoren verwalten Nutzer am Anfang der Admin-Seite und können dort
+neue Nutzer direkt mit Rolle und Startpasswort anlegen. Jeder Nutzer kann sein
+Profil unter `/profile` bearbeiten. Änderungen der E-Mail-Adresse erfordern
+das aktuelle Passwort und eine erneute E-Mail-Verifizierung; eine
+Passwortänderung beendet die bestehenden Sitzungen.
+
+Für lokale Tests ist SMTP standardmäßig deaktiviert. Für Registrierung und
+Passwort-Reset SMTP in `.env` aktivieren. Mailcow verwendet typischerweise
+Port 587 mit STARTTLS:
+
+```dotenv
+WAGI_PUBLIC_URL=https://conxtor.com
+SMTP_ENABLED=true
+SMTP_HOST=mail.example.com
+SMTP_PORT=587
+SMTP_USERNAME=noreply@conxtor.com
+SMTP_PASSWORD=replace-with-mailbox-password
+SMTP_USE_TLS=true
+SMTP_USE_SSL=false
+SMTP_FROM_EMAIL=noreply@conxtor.com
+SMTP_FROM_NAME=WAGI
+```
+
+Gmail/Google Workspace, Microsoft 365, SendGrid, Mailgun, Amazon SES und
+Postmark werden ebenfalls über dieselben SMTP-Variablen unterstützt. Konkrete
+Hosts, Ports und Anforderungen an App-Passwörter bzw. SMTP AUTH sind in
+[CONFIGURATION.md](CONFIGURATION.md) zusammengefasst.
 
 Für die interne Bereinigung verlassener Gruppen wird ein gemeinsames, zufällig
 gewähltes Secret benötigt. In einer neuen lokalen Umgebung `MEDIA_CLEANUP_TOKEN`
@@ -197,8 +239,9 @@ auch [Bekannte Risiken und Sicherheitsgrenzen](#bekannte-risiken-und-sicherheits
 
 Der Telegram-Konnektor verwendet bevorzugt eine direkte persönliche Telegram-
 Verbindung über MTProto. Dadurch kann der verbundene Nutzer seine eigenen
-Gruppen und Channels lesen und die Historie der letzten drei Tage zum ersten
-Aktivierungszeitpunkt nachladen. Die direkte Verbindung wird aktiviert, sobald
+Gruppen und Channels lesen und die Historie der letzten sieben Tage zum ersten
+Aktivierungszeitpunkt nachladen. Der Zeitraum ist über `TG_BACKFILL_DAYS`
+konfigurierbar. Die direkte Verbindung wird aktiviert, sobald
 `TG_API_ID` und `TG_API_HASH` gesetzt sind:
 
 ```dotenv
@@ -251,6 +294,13 @@ aus. Im optionalen Bot-Modus wird die Entfernung über Telegrams
 `my_chat_member`-Ereignis erkannt; die Bot API kann keine vollständige Liste
 aller Dialoge des Bots liefern.
 
+Bei vollständig verwaisten Chats werden außerdem die zugehörigen
+`event_inbox`- und `event_failures`-Einträge entfernt. Nachrichtenanalysen,
+Events in `message_analyses`, die Knowledge-Base-Hierarchie, AI-Jobs und
+Qualitätsdaten folgen der Datenbank-Kaskade. Bei gemeinsam genutzten Chats
+wird nur der Zugriff und Cursor des verlassenden Nutzers gelöscht; Daten für
+andere Nutzer bleiben erhalten.
+
 Im Direktmodus kann die Anmeldung bevorzugt direkt im Dashboard erfolgen: Im
 Telegram-Connector-Panel **Telegram-QR starten** auswählen und den QR-Code in
 der Telegram-App unter **Einstellungen** → **Geräte** scannen. Der QR-Login ist
@@ -299,7 +349,7 @@ Einträge per Konfiguration vorzuselektieren. Private Chats werden nicht
 importiert. Der Offset des Bot-Fallbacks wird in `TG_STATE_DIR` gespeichert; der
 Compose-Speicher `tg_state` sollte für stabile Fortsetzung nach Neustarts
 erhalten bleiben. Die Bot API stellt keine rückwirkende Gruppenhistorie bereit
-und ist deshalb für den Drei-Tage-Backfill nur eingeschränkt geeignet.
+und ist deshalb für den konfigurierten Backfill nur eingeschränkt geeignet.
 
 ### KI- und Audio-Konnektoren
 
@@ -312,12 +362,13 @@ Zusammenfassungen:
 AI_MODEL=heuristic-mvp
 ```
 
-`AI_MODEL` wird aktuell als Modellbezeichnung im Ergebnis geführt. Ein
-externer LLM-Provider ist noch nicht angeschlossen; Provider, API-Key,
-Prompt-Versionen und Modellwahl werden später hinter einem AI-Adapter ergänzt.
-Der Worker verbindet sich in Compose automatisch mit PostgreSQL und NATS.
+`AI_MODEL` wird als Modellbezeichnung im Ergebnis geführt. Der lokale Adapter
+ist der Standard; ein optionaler externer Provider oder Hermes-Agent kann über
+`AI_PROVIDER`, `AI_ENDPOINT`, `AI_API_KEY` bzw. `AI_HERMES_*` aktiviert werden.
+Prompt-Versionen, Modellwahl, Retry und Cooldown sind konfigurierbar. Der
+Worker verbindet sich in Compose automatisch mit PostgreSQL und NATS.
 
-Die Knowledge-Base verwendet im MVP ein Hybridmodell `hierarchy-v3`: strenge
+Die Knowledge-Base verwendet im MVP ein Hybridmodell `cascade-v4`: strenge
 Evidenzregeln, mehrsprachige Embeddings mit pgvector und optional eine Prüfung
 über einen entfernten Hermes-Agent.
 Ein einzelnes kurzes Posting, eine reine Terminzeile, ein einzelner Karten-Pin
@@ -477,10 +528,12 @@ eingeplant. Jobs, die länger als `MEDIA_STALE_PROCESSING_SECONDS` (Standard:
 automatisch wieder eingeplant oder als fehlgeschlagen markiert.
 
 Mit `WHISPER_ENABLED=false` bleibt die Audio-Pipeline aktiv, verwendet aber
-nur das MVP-Platzhalterergebnis. Im aktuellen MVP wird das eigentliche
-WhatsApp-Audio noch nicht aus WhatsApp/Telegram nach MinIO geladen; ohne lokal
-vorhandene Audioquelle wird deshalb ebenfalls ein Platzhalter erzeugt. Die
-vollständige Medienübernahme ist in [ROADMAP.md](ROADMAP.md) dokumentiert.
+nur das MVP-Platzhalterergebnis. Im Live-Betrieb übergeben WhatsApp- und
+Telegram-Connectoren verfügbare Quelldateien an die Medienpipeline und speichern
+sie dauerhaft in MinIO. Wenn für eine Nachricht keine Quelldatei verfügbar ist,
+wird der Audiojob als nicht verfügbar dokumentiert und erzeugt keinen falschen
+Transkripttext. Die verbleibenden Produktionsarbeiten sind in
+[ROADMAP.md](ROADMAP.md) dokumentiert.
 
 Die Compose-Umgebung startet standardmäßig im `WA_MOCK_MODE=true`, damit die vertikale Kette ohne WhatsApp-Konto demonstrierbar ist. Sie erzeugt drei ausgewählte Gruppen mit jeweils zehn Nachrichten: Text, Antworten, Sprachnachrichten, Bilder und Orte. Die Mock-Dialoge enthalten außerdem zusammengehörige Event-Bausteine, zum Beispiel einen Termintext in einer Nachricht und den Treffpunkt in einer späteren Ortsnachricht. Der AI-Worker verknüpft solche Quellen über `sourceMessageIds`. Für die Konfiguration eines echten Linked Devices und die Gruppenauswahl siehe [WhatsApp-Konnektor](#whatsapp-konnektor).
 
@@ -497,7 +550,7 @@ Die Compose-Umgebung startet standardmäßig im `WA_MOCK_MODE=true`, damit die v
 | Karten | Leaflet mit OpenStreetMap-Tiles und sichtbarer OSM-Attribution |
 | KI | `ai-worker`, validiertes strukturiertes Schema für Relevanz, Facts, Entities, Events, Places und Summary |
 | API | Go Standard Library + pgx, Health-/Readiness-/Metrics-Endpunkte |
-| UI | Next.js/React, responsive Gruppen- und Nachrichtenübersicht |
+| UI | Next.js/React, responsive Gruppen- und Nachrichtenübersicht; Knowledge Base maximal zweispaltig |
 
 PlantUML-Diagramme liegen in `docs/plantuml`: Gesamtarchitektur, Ingestion-Sequenz, KI-Pipeline, Deployment und Datenmodell. Die Mock-Bilder liegen unter `apps/web/public/mock`; Event-Karten werden im Dashboard interaktiv mit Leaflet gerendert und zeigen die Koordinaten aus den mehrteiligen Event-Quellen.
 
@@ -582,8 +635,9 @@ Administrator beim ersten API-Start automatisch an. Die Zugangsdaten werden
 nicht in dieser Dokumentation veröffentlicht; setze sie über
 `WAGI_BOOTSTRAP_ADMIN_EMAIL`, `WAGI_BOOTSTRAP_ADMIN_NAME` und
 `WAGI_BOOTSTRAP_ADMIN_PASSWORD`. Normale Nutzer können sich unter `/register`
-selbst registrieren. Sie sehen zunächst keine Gruppen; ein Administrator gibt
-in `/admin` Lese- und Verwaltungsrechte pro Gruppe frei. Sitzungen werden als
+selbst registrieren. Gruppen und Channels werden vom jeweiligen Nutzer unter
+`/groups` ausgewählt und verwaltet; die Admin-Seite verwaltet keine
+nutzerbezogenen Gruppenrechte. Sitzungen werden als
 zufällige, gehashte Token in PostgreSQL gespeichert und als HttpOnly-Cookie
 `wagi_session` geführt. Für HTTPS ist `WAGI_COOKIE_SECURE=true` zu setzen.
 Im Standardbetrieb über den gemeinsamen NGINX-Einstiegspunkt ist CORS nicht
@@ -645,10 +699,14 @@ Der MVP verarbeitet ausschließlich Gruppen, die der verknüpfte Account selbst 
 
 ## Nächste Schritte
 
-1. JetStream-Streams und Consumer explizit provisionieren und mit Retry/DLQ/idempotenter Verarbeitung absichern.
-2. MinIO-Upload/Download sowie echte WhatsApp-Medienentschlüsselung ergänzen.
-3. whisper.cpp als optionalen Worker-Pool mit CPU-/GPU-Profilen betreiben.
-4. LLM-Provider hinter einem AI-Adapter mit JSON-Schema-Validierung, Prompt-Versionen und Evaluationsdatensatz anbinden.
-5. OIDC-Login, Rollen, Audit-Log und Datenschutzfunktionen implementieren.
-6. Connector-Tests mit Fixtures, API-Integrationstests und UI-E2E-Tests hinzufügen.
-7. Telegram-Dateien über `getFile` laden und in MinIO ablegen; der MVP speichert zunächst Telegram-`file_id`-Referenzen und stößt Audio-Jobs an.
+1. Tenant-Isolation für Organisationen bzw. private Arbeitsbereiche ergänzen.
+2. Transport-/Speicherverschlüsselung, Secret-Management und Secret-Rotation
+   produktionsfest umsetzen.
+3. Löschfristen, Datenexport, Einwilligungs-/Hinweiskonzept und Audit-Log
+   ergänzen sowie die rechtlichen Plattform- und Datenschutzprüfungen abschließen.
+4. Strukturierte Logs mit Correlation-IDs, Metriken, Dashboards, Alerts und
+   fachliche Readiness-Prüfungen für externe Abhängigkeiten ausbauen.
+5. Connector-Fixtures, Contract-/API-/UI-E2E-Tests sowie Datenschutz- und
+   Lasttests ergänzen.
+6. Backups, Restore-Tests und Ressourcen-/Speicherlimits für Medien, Modelle,
+   whisper.cpp und KI-Verarbeitung einführen.

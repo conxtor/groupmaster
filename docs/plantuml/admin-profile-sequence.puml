@@ -1,0 +1,43 @@
+@startuml
+title WAGI – Nutzerverwaltung und Profil
+autonumber
+
+actor "Administrator" as Admin
+actor "Nutzer" as User
+participant "Next.js Web" as Web
+participant "Go API" as API
+database "PostgreSQL" as DB
+cloud "Mailcow / SMTP" as Mail
+
+== Adminübersicht ==
+Admin -> Web: /admin öffnen
+Web -> API: GET /api/v1/admin/users
+API -> DB: app_users + Rollen +\ncreated_at + MAX(last_seen_at)
+DB --> API: Nutzerliste
+API --> Web: Registrierungs- und letzte Verbindungsdaten
+
+Admin -> Web: Nutzerformular absenden
+Web -> API: POST /api/v1/admin/users
+API -> DB: Benutzer, Rolle und Passwort-Hash speichern
+API --> Web: 201 Created
+
+== Eigenes Profil ==
+User -> Web: /profile öffnen
+Web -> API: GET /api/v1/auth/me
+API -> DB: Profil lesen
+User -> Web: Änderungen speichern
+Web -> API: PATCH /api/v1/auth/profile
+API -> DB: aktuelles Passwort prüfen
+API -> DB: Name, Sprache oder Passwort aktualisieren
+alt neue E-Mail-Adresse
+  API -> DB: email_verified_at = NULL
+  API -> Mail: lokalisierte Verifizierungs-Mail
+  Mail --> User: Bestätigungslink
+  API --> Web: Sitzungsende nach Bestätigung
+else Passwort geändert
+  API -> DB: alle Sessions löschen
+  API --> Web: erneute Anmeldung erforderlich
+else Profildaten geändert
+  API --> Web: Profil gespeichert
+end
+@enduml

@@ -1,10 +1,11 @@
 "use client";
 
+import { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AuthGate, apiFetch } from "../auth";
 
-type AdminUser = { id: string; email: string; name: string; status: "active" | "disabled"; roles: string[]; createdAt: string };
+type AdminUser = { id: string; email: string; name: string; status: "active" | "disabled"; roles: string[]; createdAt: string; lastConnectedAt?: string };
 type LabelCount = { label: string; count: number };
 type Observability = {
   generatedAt: string;
@@ -52,6 +53,8 @@ function AdminContent() {
   const [observability, setObservability] = useState<Observability | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "user" });
+  const [creatingUser, setCreatingUser] = useState(false);
 
   async function loadUsers() {
     const response = await apiFetch("/api/v1/admin/users");
@@ -85,12 +88,26 @@ function AdminContent() {
     await loadUsers();
   }
 
+  async function createUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setCreatingUser(true); setError(null);
+    try {
+      const response = await apiFetch("/api/v1/admin/users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(newUser) });
+      const body = await response.json().catch(() => null) as { error?: string } | null;
+      if (!response.ok) throw new Error(body?.error ?? "Nutzer konnte nicht angelegt werden");
+      setNewUser({ name: "", email: "", password: "", role: "user" });
+      await loadUsers();
+    } catch (value) { setError(value instanceof Error ? value.message : "Nutzer konnte nicht angelegt werden"); }
+    finally { setCreatingUser(false); }
+  }
+
   const summary = observability?.summary;
   const streamMessages = observability?.streams.reduce((total, stream) => total + stream.messages, 0) ?? 0;
 
   return <main className="shell adminPage">
     <header className="topbar"><div><p className="eyebrow">WAGI / ADMINISTRATION</p><h1>Betriebsübersicht</h1><p className="adminRefresh">{observability ? `Live-Daten: ${new Date(observability.generatedAt).toLocaleTimeString()}` : "Betriebsdaten werden geladen …"}{refreshing && " · aktualisiere …"}</p></div><nav className="pageNav"><Link href="/">Dashboard</Link><Link href="/groups">Gruppen</Link><Link href="/connectors">Konnektoren</Link><Link className="pageNavActive" href="/admin">Admin</Link></nav></header>
     {error && <div className="notice">{error}</div>}
+
+    <section className="panel adminPanel"><div className="panelHead"><div><h2>Benutzerverwaltung</h2><p className="muted">Nutzer anlegen, Rollen und Status verwalten. Gruppen und Connectoren verwaltet jeder Nutzer selbst.</p></div><span className="count">{users.length}</span></div><form className="adminCreateForm" onSubmit={createUser}><input aria-label="Name" placeholder="Name" required minLength={2} value={newUser.name} onChange={(event) => setNewUser({ ...newUser, name: event.target.value })} /><input aria-label="E-Mail" type="email" placeholder="E-Mail" required value={newUser.email} onChange={(event) => setNewUser({ ...newUser, email: event.target.value })} /><input aria-label="Passwort" type="password" placeholder="Passwort (mind. 10 Zeichen)" required minLength={10} value={newUser.password} onChange={(event) => setNewUser({ ...newUser, password: event.target.value })} /><select aria-label="Rolle" value={newUser.role} onChange={(event) => setNewUser({ ...newUser, role: event.target.value })}><option value="user">Nutzer</option><option value="admin">Administrator</option></select><button className="primaryButton" disabled={creatingUser}>{creatingUser ? "Wird angelegt …" : "Nutzer anlegen"}</button></form><div className="adminUserList">{users.map((user) => <div className="adminUserRow" key={user.id}><div><strong>{user.name}</strong><small>{user.email}</small><div className="adminUserMeta"><span>Registriert: {new Date(user.createdAt).toLocaleString()}</span><span>Letzte Verbindung: {user.lastConnectedAt ? new Date(user.lastConnectedAt).toLocaleString() : "Noch keine Verbindung"}</span></div></div><select value={user.roles[0] ?? "user"} onChange={(event) => void updateUser(user, { roles: [event.target.value] }).catch((value) => setError(value instanceof Error ? value.message : "Nutzer konnte nicht aktualisiert werden"))}><option value="user">Nutzer</option><option value="admin">Administrator</option></select><select value={user.status} onChange={(event) => void updateUser(user, { status: event.target.value as AdminUser["status"] }).catch((value) => setError(value instanceof Error ? value.message : "Nutzer konnte nicht aktualisiert werden"))}><option value="active">Aktiv</option><option value="disabled">Deaktiviert</option></select></div>)}</div></section>
 
     {summary && <section className="adminMetricsGrid">
       <article className="panel adminMetric"><small>Nachrichten</small><strong>{summary.messages.toLocaleString()}</strong><span>{summary.recentMessages.toLocaleString()} in den letzten 24 Stunden</span></article>
@@ -127,7 +144,6 @@ function AdminContent() {
       <section className="panel adminPanel"><div className="panelHead"><div><h2>NATS / JetStream Streams</h2><p className="muted">Streamstatus, gespeicherte Nachrichten und Zustände der dauerhaften Consumer.</p></div></div><div className="streamList">{observability.streams.map((stream) => <article className="streamCard" key={stream.name}><div className="streamHead"><div><strong>{stream.name}</strong><small>{stream.subjects.join(", ") || "keine Subjects"}</small></div><span className={stream.status === "ready" ? "streamStatus ready" : "streamStatus"}>{stream.status}</span></div>{stream.error ? <p className="streamError">{stream.error}</p> : <><div className="streamFacts"><span><small>Nachrichten</small><strong>{stream.messages.toLocaleString()}</strong></span><span><small>Speicher</small><strong>{formatBytes(stream.bytes)}</strong></span><span><small>Sequenz</small><strong>{stream.firstSequence} – {stream.lastSequence}</strong></span><span><small>Storage</small><strong>{stream.storage}</strong></span></div>{stream.consumers.length > 0 && <div className="streamConsumerList">{stream.consumers.map((consumer) => <div className="streamConsumer" key={consumer.name}><strong>{consumer.name}</strong><span>{consumer.filterSubject || "alle Subjects"}</span><span>Pending {consumer.pending} · Ack {consumer.ackPending} · Redelivered {consumer.redelivered}</span><span>Wartend {consumer.waiting} · max. {consumer.maxDeliver} Zustellungen</span></div>)}</div>}</>}</article>)}</div></section>
     </>}
 
-    <section className="panel adminPanel"><div className="panelHead"><div><h2>Benutzerverwaltung</h2><p className="muted">Gruppen und Connectoren verwaltet jeder Nutzer selbst im persönlichen Bereich.</p></div><span className="count">{users.length}</span></div><div className="adminUserList">{users.map((user) => <div className="adminUserRow" key={user.id}><div><strong>{user.name}</strong><small>{user.email}</small></div><select value={user.roles[0] ?? "user"} onChange={(event) => void updateUser(user, { roles: [event.target.value] }).catch((value) => setError(value instanceof Error ? value.message : "Nutzer konnte nicht aktualisiert werden"))}><option value="user">Nutzer</option><option value="admin">Administrator</option></select><select value={user.status} onChange={(event) => void updateUser(user, { status: event.target.value as AdminUser["status"] }).catch((value) => setError(value instanceof Error ? value.message : "Nutzer konnte nicht aktualisiert werden"))}><option value="active">Aktiv</option><option value="disabled">Deaktiviert</option></select></div>)}</div></section>
     <footer><span>Observability aktualisiert automatisch alle 5 Sekunden.</span><span>Letzter Nachrichtenstand: {summary?.lastMessageAt ? new Date(summary.lastMessageAt).toLocaleString() : "—"}</span></footer>
   </main>;
 }

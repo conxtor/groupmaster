@@ -1,22 +1,76 @@
 @startuml
-title WAGI – AI-Pipeline
+title WAGI – Medien- und AI-Pipeline
+skinparam componentStyle rectangle
+
 start
-:Nachricht aus NATS empfangen;
-if (Audio oder Medien?) then (ja)
-  :Media-Job anlegen;
-  :MinIO-Objekt laden;
-  :faster-whisper / STT;
-  :Transkript publizieren;
-else (nein)
+:Connector publiziert wa.messages.received;
+:JetStream Durable Consumer\nWAGI_AI_MESSAGES liefert Event;
+:event_inbox beansprucht Event idempotent;
+:ai_jobs anlegen / Retrystatus setzen;
+:Nachricht + zeitnahen Gruppenkontext\naus PostgreSQL laden;
+
+if (Medientyp?) then (Audio)
+  :media.audio.requested;
+  :media-worker lädt lokale Quelle;
+  :Quelle dauerhaft in MinIO /\nmedia_objects speichern;
+  :whisper.cpp medium lokal ausführen\n(es, ca, de, en, fr; weitere aktivierbar);
+  :media.audio.transcribed publizieren;
+  :Transkript als vollständigen\nAnalysekontext übernehmen;
+elseif (Bild)
+  :media.objects.requested;
+  :MinIO-Objekt + Thumbnail speichern;
+  :Lokales OCR / Bildanalyse;
+  :media.image.analyzed publizieren;
+  :OCR-Kontext übernehmen;
+elseif (Dokument)
+  :media.objects.requested;
+  :Originaldokument in MinIO speichern;
+  :Lokale Dokumentextraktion / OCR;
+  :Vollständigen Text in\nmedia_objects.ocr_text speichern;
+  :media.document.analyzed publizieren;
+  :Nur begrenzten Analyseauszug verwenden;\nOriginal bleibt über sicheren Media-Link verfügbar;
+elseif (Video)
+  :media.objects.requested;
+  :Original + Vorschau in MinIO speichern;
+else (Text / Ort)
+  :Nachrichtentext direkt verwenden;
 endif
-:Text normalisieren;
-:Relevanz klassifizieren;
-:Facts extrahieren;
-:Entities erkennen;
-:Events und Zeitangaben erkennen;
-:Places / Geometrien erkennen;
-:Zusammenfassung erzeugen;
-:Strukturiertes Ergebnis validieren;
-:Postgres + pgvector persistieren;
+
+:Sprache der Gruppe bestimmen;
+:Deterministische Heuristik-Kaskade ausführen;
+:Relevanz und Relevance-Score;
+:Facts und Entities extrahieren;
+:Events über mehrere Nachrichten\nmit Quellenbelegen zusammenführen;
+:Orte, Koordinaten und Widersprüche erkennen;
+:Knowledge-Thema und hierarchische\nDetailbeiträge bestimmen;
+
+if (Embeddings aktiviert?) then (ja)
+  :fastembed multilingual lokal laden\nund pgvector-Abgleich durchführen;
+else (nein)
+  :Lexikalische Heuristik verwenden;
+endif
+
+if (Hermes-Agent aktiviert?) then (ja)
+  :Kandidaten an Hermes-Agent senden;
+  if (Antwort gültig?) then (ja)
+    :Accept / Reject / Review anwenden;
+  else (nein)
+    :Lokales Ergebnis behalten;\nRetry + Cooldown protokollieren;
+  endif
+else (nein)
+  :Lokales Ergebnis behalten;
+endif
+
+:JSON-Schema, Provenance und\nKonfidenzen validieren;
+:message_analyses, ai_jobs,\nKnowledge-Hierarchie und Graph speichern;
+:ai.messages.analyzed publizieren;
+
+fork
+  :Web/API liest Dashboard, Events\nund Knowledge Base aus PostgreSQL;
+fork again
+  :Bei Fehler: Backoff, event_inbox,\nevent_failures und DLQ-Eintrag;
+fork again
+  :Replay/Backfill kann ausgewählte\nZeiträume erneut anfordern;
+end fork
 stop
 @enduml

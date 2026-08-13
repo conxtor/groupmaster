@@ -28,7 +28,7 @@ export function AccountBar({ user }: { user: AuthUser }) {
 
   return <div className="accountBar">
     <span className="accountIdentity"><strong>{user.name}</strong><small>{user.email}</small></span>
-    {isAdmin && <Link href="/admin">Administration</Link>}
+    <Link href="/profile">Profil</Link>{isAdmin && <Link href="/admin">Administration</Link>}
     <button type="button" className="textButton" onClick={() => void logout()}>Abmelden</button>
   </div>;
 }
