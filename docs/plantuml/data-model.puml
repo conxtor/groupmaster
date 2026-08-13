@@ -157,6 +157,7 @@ entity media_objects {
   --
   message_id : uuid <<FK>>
   media_key : text
+  bucket : text
   object_key : text
   thumbnail_key : text
   object_path : text

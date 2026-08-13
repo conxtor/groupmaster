@@ -143,14 +143,15 @@ type natsObservabilityView struct {
 }
 
 type minioObservabilityView struct {
-	Endpoint     string     `json:"endpoint"`
-	Bucket       string     `json:"bucket"`
-	Connected    bool       `json:"connected"`
-	BucketExists bool       `json:"bucketExists"`
-	ObjectCount  int64      `json:"objectCount"`
-	TotalBytes   int64      `json:"totalBytes"`
-	LastModified *time.Time `json:"lastModified,omitempty"`
-	Error        string     `json:"error,omitempty"`
+	Endpoint     string                         `json:"endpoint"`
+	Bucket       string                         `json:"bucket"`
+	Connected    bool                           `json:"connected"`
+	BucketExists bool                           `json:"bucketExists"`
+	ObjectCount  int64                          `json:"objectCount"`
+	TotalBytes   int64                          `json:"totalBytes"`
+	LastModified *time.Time                     `json:"lastModified,omitempty"`
+	Buckets      []minioBucketObservabilityView `json:"buckets"`
+	Error        string                         `json:"error,omitempty"`
 }
 
 type adminObservabilityView struct {

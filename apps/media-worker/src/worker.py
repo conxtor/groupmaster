@@ -36,6 +36,13 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "miniosecret")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "wa-media")
+MINIO_BUCKETS = {
+    "image": os.getenv("MINIO_BUCKET_IMAGES", "wa-media-images"),
+    "video": os.getenv("MINIO_BUCKET_VIDEOS", "wa-media-videos"),
+    "audio": os.getenv("MINIO_BUCKET_AUDIO", "wa-media-audio"),
+    "document": os.getenv("MINIO_BUCKET_DOCUMENTS", "wa-media-documents"),
+    "other": os.getenv("MINIO_BUCKET_OTHER", "wa-media-other"),
+}
 MEDIA_MAX_RETRIES = max(1, int(os.getenv("MEDIA_MAX_RETRIES", "3")))
 MEDIA_STALE_PROCESSING_SECONDS = max(60, int(os.getenv("MEDIA_STALE_PROCESSING_SECONDS", "900")))
 MEDIA_ANALYSIS_EVENT_MAX_CHARS = max(2000, int(os.getenv("MEDIA_ANALYSIS_EVENT_MAX_CHARS", "12000")))
@@ -137,15 +144,27 @@ def s3_client():
     return _s3
 
 
-def cleanup_group_media(object_keys: set[str], local_paths: set[str]) -> tuple[int, int]:
+def media_bucket(kind: str | None, mime: str | None) -> str:
+    normalized_kind = str(kind or "").strip().lower()
+    normalized_mime = str(mime or "").split(";", 1)[0].strip().lower()
+    if normalized_kind in MINIO_BUCKETS:
+        return MINIO_BUCKETS[normalized_kind]
+    for media_kind in ("image", "video", "audio", "document"):
+        if normalized_mime.startswith(f"{media_kind}/") or (media_kind == "document" and (normalized_mime.startswith("application/") or normalized_mime.startswith("text/"))):
+            return MINIO_BUCKETS[media_kind]
+    return MINIO_BUCKETS["other"]
+
+
+def cleanup_group_media(object_keys_by_bucket: dict[str, set[str]], local_paths: set[str]) -> tuple[int, int]:
     deleted_objects = 0
-    if object_keys:
+    if object_keys_by_bucket:
         client = s3_client()
-        ensure_bucket()
-        for start in range(0, len(object_keys), 1000):
-            batch = sorted(object_keys)[start:start + 1000]
-            client.delete_objects(Bucket=MINIO_BUCKET, Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True})
-            deleted_objects += len(batch)
+        for bucket, object_keys in object_keys_by_bucket.items():
+            ensure_bucket(bucket)
+            for start in range(0, len(object_keys), 1000):
+                batch = sorted(object_keys)[start:start + 1000]
+                client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True})
+                deleted_objects += len(batch)
 
     media_root = MEDIA_DIR.resolve()
     deleted_files = 0
@@ -177,7 +196,7 @@ async def on_group_cleanup(db, message):
             await message.respond(json.dumps({"ok": False, "error": "invalid cleanup scope"}).encode())
             return
         rows = await db.fetch(
-            """SELECT mo.object_key, mo.thumbnail_key, mo.object_path, mo.thumbnail_path, aj.object_path AS audio_object_path
+            """SELECT mo.object_key, mo.thumbnail_key, mo.bucket, mo.object_path, mo.thumbnail_path, mo.mime, m.kind, m.media_mime, aj.object_path AS audio_object_path
                FROM wa_groups g
                LEFT JOIN messages m ON m.group_id = g.id
                LEFT JOIN media_objects mo ON mo.message_id = m.id
@@ -185,24 +204,27 @@ async def on_group_cleanup(db, message):
                WHERE g.platform=$1 AND g.id=ANY($2::text[])""",
             platform, group_ids,
         )
-        object_keys = {str(value) for row in rows for value in (row["object_key"], row["thumbnail_key"]) if value}
+        object_keys_by_bucket: dict[str, set[str]] = {}
+        for row in rows:
+            bucket = str(row["bucket"] or MINIO_BUCKET)
+            object_keys_by_bucket.setdefault(bucket, set()).update(str(value) for value in (row["object_key"], row["thumbnail_key"]) if value)
         local_paths = {str(value) for row in rows for value in (row["object_path"], row["thumbnail_path"], row["audio_object_path"]) if value}
-        deleted_objects, deleted_files = await asyncio.to_thread(cleanup_group_media, object_keys, local_paths)
+        deleted_objects, deleted_files = await asyncio.to_thread(cleanup_group_media, object_keys_by_bucket, local_paths)
         await message.respond(json.dumps({"ok": True, "deletedObjects": deleted_objects, "deletedFiles": deleted_files}).encode())
     except Exception as error:
         log.exception("group media cleanup failed")
         await message.respond(json.dumps({"ok": False, "error": str(error)}).encode())
 
 
-def ensure_bucket():
+def ensure_bucket(bucket: str = MINIO_BUCKET):
     client = s3_client()
     try:
-        client.head_bucket(Bucket=MINIO_BUCKET)
+        client.head_bucket(Bucket=bucket)
     except Exception:
         try:
-            client.create_bucket(Bucket=MINIO_BUCKET)
+            client.create_bucket(Bucket=bucket)
         except Exception as error:
-            log.warning("MinIO bucket could not be created: %s", error)
+            log.warning("MinIO bucket %s could not be created: %s", bucket, error)
 
 
 def extract_ocr(source: Path) -> str:
@@ -256,21 +278,22 @@ def bounded_analysis_text(value: str | None) -> str:
     )
 
 
-def stage_media(data: dict) -> tuple[str, str | None, str, int, str]:
+def stage_media(data: dict) -> tuple[str, str, str | None, str, int, str]:
     source = Path(str(data["objectPath"]))
     if not source.is_file():
         raise FileNotFoundError(f"Medienquelle nicht gefunden: {source}")
     message_id = str(data["messageId"])
     media_key = str(data["mediaKey"])
     mime = str(data.get("mediaMime") or "application/octet-stream")
+    bucket = media_bucket(data.get("kind"), mime)
     suffix = source.suffix.lower() or ".bin"
     object_key = f"messages/{message_id}/original{suffix}"
     thumbnail_key = None
     thumbnail_path = None
     ocr_text = ""
-    ensure_bucket()
+    ensure_bucket(bucket)
     client = s3_client()
-    client.upload_file(str(source), MINIO_BUCKET, object_key, ExtraArgs={"ContentType": mime})
+    client.upload_file(str(source), bucket, object_key, ExtraArgs={"ContentType": mime})
     if mime.startswith("image/"):
         try:
             thumb_dir = MEDIA_DIR / "thumbs"
@@ -280,7 +303,7 @@ def stage_media(data: dict) -> tuple[str, str | None, str, int, str]:
                 image.thumbnail((640, 640))
                 image.convert("RGB").save(thumb, format="JPEG", quality=82)
             thumbnail_key = f"messages/{message_id}/thumbnail.jpg"
-            client.upload_file(str(thumb), MINIO_BUCKET, thumbnail_key, ExtraArgs={"ContentType": "image/jpeg"})
+            client.upload_file(str(thumb), bucket, thumbnail_key, ExtraArgs={"ContentType": "image/jpeg"})
             thumbnail_path = str(thumb)
             ocr_text = extract_ocr(source)
         except Exception as error:
@@ -290,7 +313,7 @@ def stage_media(data: dict) -> tuple[str, str | None, str, int, str]:
             ocr_text = extract_document_text(source, mime)
         except Exception as error:
             log.warning("document analysis failed for %s: %s", message_id, error)
-    return object_key, thumbnail_key, thumbnail_path or "", source.stat().st_size, ocr_text
+    return bucket, object_key, thumbnail_key, thumbnail_path or "", source.stat().st_size, ocr_text
 
 
 async def on_media(db, js, message):
@@ -327,14 +350,14 @@ async def on_media(db, js, message):
 
 
 async def stage_and_record_media(db, data: dict) -> str:
-    object_key, thumbnail_key, thumbnail_path, size, ocr_text = await asyncio.to_thread(stage_media, data)
+    bucket, object_key, thumbnail_key, thumbnail_path, size, ocr_text = await asyncio.to_thread(stage_media, data)
     await db.execute(
-        """INSERT INTO media_objects (message_id, media_key, object_key, thumbnail_key, object_path, thumbnail_path, mime, bytes, status, ocr_text, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'completed',$9,NOW())
+        """INSERT INTO media_objects (message_id, media_key, bucket, object_key, thumbnail_key, object_path, thumbnail_path, mime, bytes, status, ocr_text, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'completed',$10,NOW())
            ON CONFLICT (message_id, media_key) DO UPDATE SET object_key=EXCLUDED.object_key, thumbnail_key=EXCLUDED.thumbnail_key,
              object_path=EXCLUDED.object_path, thumbnail_path=EXCLUDED.thumbnail_path, mime=EXCLUDED.mime, bytes=EXCLUDED.bytes,
-             status='completed', error=NULL, ocr_text=EXCLUDED.ocr_text, updated_at=NOW()""",
-        data["messageId"], data["mediaKey"], object_key, thumbnail_key, data.get("objectPath"), thumbnail_path or None,
+             bucket=EXCLUDED.bucket, status='completed', error=NULL, ocr_text=EXCLUDED.ocr_text, updated_at=NOW()""",
+        data["messageId"], data["mediaKey"], bucket, object_key, thumbnail_key, data.get("objectPath"), thumbnail_path or None,
         data.get("mediaMime"), size, ocr_text or None,
     )
     return ocr_text
@@ -380,6 +403,7 @@ async def repair_local_media(db, js):
             "messageId": str(row["id"]),
             "mediaKey": str(row["media_key"]),
             "mediaMime": row["media_mime"],
+            "kind": row["kind"],
             "platform": row["platform"],
             "waMessageId": row["wa_message_id"],
         }

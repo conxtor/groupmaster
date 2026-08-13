@@ -727,7 +727,7 @@ async function persistDirectMessage(message: any, entity: any) {
   const messageId = result.rows[0].id;
   const data: WhatsAppMessageReceived = { messageId, waMessageId, groupId, platform: "telegram", chatType: group.chatType, externalChatId: String(entity.id), senderJid, senderName, kind, text, receivedAt: new Date(timestamp * 1000).toISOString(), hasMedia: Boolean(mediaKey), mediaKey, mediaMime: downloaded?.mediaMime, mediaObjectPath: downloaded?.objectPath, replyToWaMessageId: message.replyTo?.replyToMsgId ? `${groupId}:${message.replyTo.replyToMsgId}` : undefined, raw, changeType: existing.rows[0] ? "updated" : "created", sequenceNo: timestamp };
   await publish(subjects.messageReceived, subjects.messageReceived, data);
-  if (mediaKey && downloaded?.objectPath) await publish(subjects.mediaRequested, subjects.mediaRequested, { messageId, mediaKey, objectPath: downloaded.objectPath, mediaMime: downloaded.mediaMime, platform: "telegram" });
+  if (mediaKey && downloaded?.objectPath) await publish(subjects.mediaRequested, subjects.mediaRequested, { messageId, mediaKey, objectPath: downloaded.objectPath, mediaMime: downloaded.mediaMime, kind, platform: "telegram" });
   if (kind === "audio" && mediaKey && downloaded?.objectPath) {
     const job = await pool.query<{ id: string }>("SELECT id FROM audio_jobs WHERE message_id=$1 ORDER BY created_at DESC LIMIT 1", [messageId]);
     const jobId = job.rows[0]?.id ?? randomUUID();
@@ -1134,7 +1134,7 @@ async function persistMessage(message: TelegramMessage) {
     sequenceNo: message.date,
   };
   await publish(subjects.messageReceived, subjects.messageReceived, data);
-  if (media && objectPath) await publish(subjects.mediaRequested, subjects.mediaRequested, { messageId: data.messageId, mediaKey: media.mediaKey, objectPath, mediaMime: media.mediaMime, platform: "telegram", fileName: media.fileName });
+  if (media && objectPath) await publish(subjects.mediaRequested, subjects.mediaRequested, { messageId: data.messageId, mediaKey: media.mediaKey, objectPath, mediaMime: media.mediaMime, kind, platform: "telegram", fileName: media.fileName });
 
   if (kind === "audio" && media && objectPath) {
     const existing = await pool.query<{ id: string }>("SELECT id FROM audio_jobs WHERE message_id = $1 ORDER BY created_at DESC LIMIT 1", [data.messageId]);

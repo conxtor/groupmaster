@@ -821,7 +821,7 @@ async function persistMessage(message: WAMessage) {
   };
   await publish(subjects.messageReceived, subjects.messageReceived, data);
   if (objectPath && mediaKey) {
-    await publish(subjects.mediaRequested, subjects.mediaRequested, { messageId, mediaKey, objectPath, mediaMime, platform: "whatsapp" });
+    await publish(subjects.mediaRequested, subjects.mediaRequested, { messageId, mediaKey, objectPath, mediaMime, kind, platform: "whatsapp" });
   }
   if (kind === "audio") {
     const existing = await pool.query<{ id: string; status: string; transcript: string | null }>("SELECT id, status, transcript FROM audio_jobs WHERE message_id = $1 ORDER BY created_at DESC LIMIT 1", [data.messageId]);

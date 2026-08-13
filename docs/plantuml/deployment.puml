@@ -21,7 +21,7 @@ node "Lokaler Docker-Compose-Stack" as Local {
   component "nats-provisioner" as LocalProvisioner
   database "db\nPostgreSQL 15 + PostGIS/pgvector" as LocalDB
   queue "nats:4222\nJetStream /data/jetstream" as LocalNATS
-  storage "minio:9000\nwa-media" as LocalMinio
+  storage "minio:9000\nseparate media buckets" as LocalMinio
   component "SMTP-Konfiguration\n.env" as LocalSMTP
   folder "Named Volumes\nAuth, TG-State, Medien,\nWhisper- und AI-Modelle" as LocalVolumes
 }
@@ -37,7 +37,7 @@ node "Dockge / Produktionsserver" as Production {
   component "migrate + nats-provisioner\nEinmalige Jobs" as ProdInit
   database "postgres\ninterner Dienst" as ProdDB
   queue "nats\ninterner Dienst + JetStream" as ProdNATS
-  storage "minio\ninterner Dienst" as ProdMinio
+  storage "minio\ninterner Dienst\nseparate media buckets" as ProdMinio
   component "SMTP-Client\nAPI → Mailcow" as ProdSMTP
   folder "Named Volumes\nPersistente Sitzungen und Daten" as ProdVolumes
 }
@@ -99,9 +99,11 @@ end note
 
 note right of ProdMedia
   Kein separater Bucket-Initialisierungs-Service.
-  Der media-worker prüft und erstellt
-  MINIO_BUCKET vor Uploads und Cleanups
-  idempotent.
+  Der media-worker prüft und erstellt die
+  typabhängigen Buckets vor Uploads und
+  Cleanups idempotent.
+  Die API startet optional die isolierte,
+  wiederaufnehmbare Legacy-Migration.
 end note
 
 note right of Mail

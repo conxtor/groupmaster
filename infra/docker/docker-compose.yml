@@ -80,6 +80,12 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
       MINIO_BUCKET: ${MINIO_BUCKET:-wa-media}
+      MINIO_BUCKET_IMAGES: ${MINIO_BUCKET_IMAGES:-wa-media-images}
+      MINIO_BUCKET_VIDEOS: ${MINIO_BUCKET_VIDEOS:-wa-media-videos}
+      MINIO_BUCKET_AUDIO: ${MINIO_BUCKET_AUDIO:-wa-media-audio}
+      MINIO_BUCKET_DOCUMENTS: ${MINIO_BUCKET_DOCUMENTS:-wa-media-documents}
+      MINIO_BUCKET_OTHER: ${MINIO_BUCKET_OTHER:-wa-media-other}
+      MEDIA_BUCKET_MIGRATION_ENABLED: ${MEDIA_BUCKET_MIGRATION_ENABLED:-true}
       WAGI_CORS_ORIGIN: ${WAGI_CORS_ORIGIN:-}
       WAGI_COOKIE_SECURE: ${WAGI_COOKIE_SECURE:-false}
       WAGI_PUBLIC_URL: ${WAGI_PUBLIC_URL:-http://localhost:3000}
@@ -107,6 +113,7 @@ services:
     depends_on:
       db: {condition: service_healthy}
       nats: {condition: service_healthy}
+      minio: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 
@@ -376,6 +383,11 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
       MINIO_BUCKET: ${MINIO_BUCKET:-wa-media}
+      MINIO_BUCKET_IMAGES: ${MINIO_BUCKET_IMAGES:-wa-media-images}
+      MINIO_BUCKET_VIDEOS: ${MINIO_BUCKET_VIDEOS:-wa-media-videos}
+      MINIO_BUCKET_AUDIO: ${MINIO_BUCKET_AUDIO:-wa-media-audio}
+      MINIO_BUCKET_DOCUMENTS: ${MINIO_BUCKET_DOCUMENTS:-wa-media-documents}
+      MINIO_BUCKET_OTHER: ${MINIO_BUCKET_OTHER:-wa-media-other}
       MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
     volumes:
       - whisper_models:/models

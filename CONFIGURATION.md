@@ -142,7 +142,13 @@ DMARC in Mailcow bzw. DNS einrichten.
 | `MINIO_ROOT_USER` | lokal `minio` | MinIO-Administrator. |
 | `MINIO_ROOT_PASSWORD` | lokal `miniosecret` | MinIO-Administratorpasswort; produktiv ersetzen. |
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Root-Fallback | API-/Worker-Zugang. |
-| `MINIO_BUCKET` | `wa-media` | Medienbucket; der `media-worker` legt ihn beim ersten Medienzugriff idempotent an. |
+| `MINIO_BUCKET` | `wa-media` | Legacy-Bucket für die einmalige Migration und Rückwärtskompatibilität. |
+| `MINIO_BUCKET_IMAGES` | `wa-media-images` | Bucket für Bildoriginale und Bildthumbnails. |
+| `MINIO_BUCKET_VIDEOS` | `wa-media-videos` | Bucket für Videodateien. |
+| `MINIO_BUCKET_AUDIO` | `wa-media-audio` | Bucket für Audiodateien. |
+| `MINIO_BUCKET_DOCUMENTS` | `wa-media-documents` | Bucket für Dokumente und extrahierte Dokumentmedien. |
+| `MINIO_BUCKET_OTHER` | `wa-media-other` | Fallback-Bucket für nicht klassifizierte Medientypen. |
+| `MEDIA_BUCKET_MIGRATION_ENABLED` | `true` | API-Startmigration von `MINIO_BUCKET` in die typabhängigen Buckets. Zum späteren Entfernen/Deaktivieren auf `false` setzen. |
 | `MEDIA_DIR` | `/data/media` | Lokales Arbeits-/Medienverzeichnis. |
 | `MEDIA_SIGNING_SECRET` | produktiv erforderlich | Secret für kurzlebige Medien-URLs. |
 | `MEDIA_CLEANUP_TOKEN` | erforderlich | Interner Bereinigungstoken. |
@@ -151,8 +157,14 @@ MinIO, NATS, PostgreSQL und Connector-Ports werden produktiv nicht über
 Traefik veröffentlicht. Medien laufen über die API.
 
 Es gibt keinen separaten Bucket-Initialisierungscontainer. Der `media-worker` prüft den
-konfigurierten Bucket vor Uploads und Bereinigungen und legt ihn bei Bedarf
-idempotent an. Der persistente MinIO-Datenträger bleibt bei Neustarts erhalten.
+jeweiligen Zielbucket vor Uploads und Bereinigungen und legt ihn bei Bedarf
+idempotent an. Bei aktivierter `MEDIA_BUCKET_MIGRATION_ENABLED` prüft die API beim
+Start, ob der Legacy-Bucket vorhanden ist, kopiert bestehende Objekte anhand des
+Medientyps, trägt den Zielbucket in `media_objects.bucket` ein und löscht die alte
+Kopie erst danach. Der Ablauf ist wiederaufnehmbar und kann nach Abschluss durch
+Deaktivieren der Option und Entfernen der isolierten Datei
+`apps/api/cmd/api/media_buckets.go` aus dem API-Build entfernt werden. Der persistente
+MinIO-Datenträger bleibt bei Neustarts erhalten.
 
 ## Connector-Pools und WhatsApp
 

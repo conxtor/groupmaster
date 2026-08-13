@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -26,8 +25,18 @@ type minioListBucketResult struct {
 	} `xml:"Contents"`
 }
 
+type minioBucketObservabilityView struct {
+	Bucket       string     `json:"bucket"`
+	Connected    bool       `json:"connected"`
+	BucketExists bool       `json:"bucketExists"`
+	ObjectCount  int64      `json:"objectCount"`
+	TotalBytes   int64      `json:"totalBytes"`
+	LastModified *time.Time `json:"lastModified,omitempty"`
+	Error        string     `json:"error,omitempty"`
+}
+
 func (a *app) collectMinIOObservability(parent context.Context) minioObservabilityView {
-	view := minioObservabilityView{Endpoint: a.minioEndpoint, Bucket: a.minioBucket}
+	view := minioObservabilityView{Endpoint: a.minioEndpoint, Bucket: a.minioBucket, Buckets: make([]minioBucketObservabilityView, 0)}
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 
@@ -35,110 +44,65 @@ func (a *app) collectMinIOObservability(parent context.Context) minioObservabili
 		view.Error = "MinIO ist nicht konfiguriert"
 		return view
 	}
-
-	continuationToken := ""
-	for page := 0; page < 101; page++ {
-		result, err := a.listMinIOObjects(ctx, continuationToken)
-		if err != nil {
-			view.Error = err.Error()
-			return view
+	buckets := append([]string{a.minioBucket}, a.minioBuckets.all()...)
+	seen := make(map[string]struct{}, len(buckets))
+	for _, bucket := range buckets {
+		if _, ok := seen[bucket]; ok || strings.TrimSpace(bucket) == "" {
+			continue
 		}
-		view.Connected = true
-		view.BucketExists = true
-		for _, object := range result.Contents {
-			view.ObjectCount++
-			view.TotalBytes += object.Size
-			if view.LastModified == nil || object.LastModified.After(*view.LastModified) {
-				lastModified := object.LastModified
-				view.LastModified = &lastModified
+		seen[bucket] = struct{}{}
+		bucketView := minioBucketObservabilityView{Bucket: bucket}
+		continuationToken := ""
+		for page := 0; page < 101; page++ {
+			result, err := a.listMinIOObjects(ctx, bucket, continuationToken)
+			if err != nil {
+				bucketView.Error = err.Error()
+				break
 			}
+			bucketView.Connected = true
+			bucketView.BucketExists = true
+			view.Connected = true
+			view.BucketExists = true
+			for _, object := range result.Contents {
+				bucketView.ObjectCount++
+				bucketView.TotalBytes += object.Size
+				if bucketView.LastModified == nil || object.LastModified.After(*bucketView.LastModified) {
+					lastModified := object.LastModified
+					bucketView.LastModified = &lastModified
+				}
+			}
+			if !result.IsTruncated || result.NextContinuationToken == "" {
+				break
+			}
+			continuationToken = result.NextContinuationToken
 		}
-		if !result.IsTruncated || result.NextContinuationToken == "" {
-			return view
+		if bucketView.Error != "" && view.Error == "" {
+			view.Error = bucketView.Error
 		}
-		continuationToken = result.NextContinuationToken
+		view.ObjectCount += bucketView.ObjectCount
+		view.TotalBytes += bucketView.TotalBytes
+		if bucketView.LastModified != nil && (view.LastModified == nil || bucketView.LastModified.After(*view.LastModified)) {
+			lastModified := *bucketView.LastModified
+			view.LastModified = &lastModified
+		}
+		view.Buckets = append(view.Buckets, bucketView)
 	}
-	view.Error = "MinIO-Bestand ist größer als die Observability-Abfragegrenze von 100.000 Objekten"
 	return view
 }
 
-func (a *app) listMinIOObjects(ctx context.Context, continuationToken string) (minioListBucketResult, error) {
+func (a *app) listMinIOObjects(ctx context.Context, bucket, continuationToken string) (minioListBucketResult, error) {
 	var result minioListBucketResult
-	endpoint, err := url.Parse(a.minioEndpoint)
-	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
-		return result, fmt.Errorf("ungültiger MinIO-Endpoint")
-	}
-	if a.minioAccessKey == "" || a.minioSecretKey == "" {
-		return result, fmt.Errorf("MinIO-Zugangsdaten fehlen")
-	}
-
-	requestURL := *endpoint
-	requestURL.Path = strings.TrimRight(endpoint.Path, "/") + "/" + a.minioBucket
-	requestURL.RawPath = ""
 	query := url.Values{"list-type": []string{"2"}}
 	if continuationToken != "" {
 		query.Set("continuation-token", continuationToken)
 	}
-	requestURL.RawQuery = canonicalMinIOQuery(query)
-
-	now := time.Now().UTC()
-	payloadHash := sha256Hex(nil)
-	canonicalURI := requestURL.EscapedPath()
-	if canonicalURI == "" {
-		canonicalURI = "/"
-	}
-	canonicalHeaders := "host:" + requestURL.Host + "\n" +
-		"x-amz-content-sha256:" + payloadHash + "\n" +
-		"x-amz-date:" + now.Format("20060102T150405Z") + "\n"
-	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
-	canonicalRequest := strings.Join([]string{
-		http.MethodGet,
-		canonicalURI,
-		requestURL.RawQuery,
-		canonicalHeaders,
-		signedHeaders,
-		payloadHash,
-	}, "\n")
-	date := now.Format("20060102")
-	credentialScope := date + "/" + minioSigningRegion + "/s3/aws4_request"
-	stringToSign := strings.Join([]string{
-		"AWS4-HMAC-SHA256",
-		now.Format("20060102T150405Z"),
-		credentialScope,
-		sha256Hex([]byte(canonicalRequest)),
-	}, "\n")
-	signingKey := hmacSHA256(
-		hmacSHA256(
-			hmacSHA256(
-				hmacSHA256([]byte("AWS4"+a.minioSecretKey), []byte(date)),
-				[]byte(minioSigningRegion),
-			),
-			[]byte("s3"),
-		),
-		[]byte("aws4_request"),
-	)
-	signature := hmacSHA256Hex(signingKey, []byte(stringToSign))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	response, err := a.minioRequestQuery(ctx, http.MethodGet, bucket, "", query, nil, nil)
 	if err != nil {
-		return result, fmt.Errorf("MinIO-Anfrage konnte nicht erstellt werden: %w", err)
-	}
-	req.Header.Set("x-amz-content-sha256", payloadHash)
-	req.Header.Set("x-amz-date", now.Format("20060102T150405Z"))
-	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+a.minioAccessKey+"/"+credentialScope+", SignedHeaders="+signedHeaders+", Signature="+signature)
-
-	response, err := (&http.Client{Timeout: 7 * time.Second}).Do(req)
-	if err != nil {
-		return result, fmt.Errorf("MinIO nicht erreichbar: %w", err)
+		return result, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
-		detail := strings.TrimSpace(string(body))
-		if detail == "" {
-			detail = response.Status
-		}
-		return result, fmt.Errorf("MinIO-Bucket konnte nicht gelesen werden: %s", detail)
+		return result, minioResponseError(response)
 	}
 	if err := xml.NewDecoder(response.Body).Decode(&result); err != nil {
 		return result, fmt.Errorf("MinIO-Antwort konnte nicht gelesen werden: %w", err)

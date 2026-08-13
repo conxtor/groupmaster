@@ -40,7 +40,7 @@ package "Event- und Verarbeitungsplattform" {
 
 package "Persistenz" {
   database "PostgreSQL\nPostGIS + pgvector" as DB
-  storage "MinIO\nwa-media" as MinIO
+  storage "MinIO\nwa-media-images\nwa-media-videos\nwa-media-audio\nwa-media-documents\nwa-media-other" as MinIO
   folder "Shared media_data\nIncoming-Dateien" as MediaVolume
 }
 
@@ -113,8 +113,13 @@ note right of TGConnector
 end note
 
 note right of Media
-  MinIO-Bucket wird vor Upload und Cleanup
-  idempotent geprüft/angelegt.
+  Medientypen werden auf getrennte
+  MinIO-Buckets geroutet. Buckets werden
+  vor Upload und Cleanup idempotent geprüft
+  und angelegt.
+  Die API migriert Legacy-Objekte beim Start
+  wiederaufnehmbar und aktualisiert
+  media_objects.bucket.
   Es gibt keinen separaten Init-Container.
 end note
 

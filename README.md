@@ -535,6 +535,15 @@ wird der Audiojob als nicht verfügbar dokumentiert und erzeugt keinen falschen
 Transkripttext. Die verbleibenden Produktionsarbeiten sind in
 [ROADMAP.md](ROADMAP.md) dokumentiert.
 
+Medien werden in MinIO nach Typ getrennt gespeichert: Bilder in
+`MINIO_BUCKET_IMAGES`, Videos in `MINIO_BUCKET_VIDEOS`, Audio in
+`MINIO_BUCKET_AUDIO`, Dokumente in `MINIO_BUCKET_DOCUMENTS` und sonstige Medien
+in `MINIO_BUCKET_OTHER`. Die API startet standardmäßig mit der aktivierten,
+wiederaufnehmbaren Migration aus dem bisherigen `MINIO_BUCKET` und aktualisiert
+die Zuordnung in `media_objects.bucket`, bevor Legacy-Objekte gelöscht werden.
+Die Bucket-Migration ist in `apps/api/cmd/api/media_buckets.go` isoliert und kann
+nach Abschluss über `MEDIA_BUCKET_MIGRATION_ENABLED=false` deaktiviert werden.
+
 Die Compose-Umgebung startet standardmäßig im `WA_MOCK_MODE=true`, damit die vertikale Kette ohne WhatsApp-Konto demonstrierbar ist. Sie erzeugt drei ausgewählte Gruppen mit jeweils zehn Nachrichten: Text, Antworten, Sprachnachrichten, Bilder und Orte. Die Mock-Dialoge enthalten außerdem zusammengehörige Event-Bausteine, zum Beispiel einen Termintext in einer Nachricht und den Treffpunkt in einer späteren Ortsnachricht. Der AI-Worker verknüpft solche Quellen über `sourceMessageIds`. Für die Konfiguration eines echten Linked Devices und die Gruppenauswahl siehe [WhatsApp-Konnektor](#whatsapp-konnektor).
 
 ## Architektur

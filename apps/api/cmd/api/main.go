@@ -23,22 +23,24 @@ import (
 )
 
 type app struct {
-	db                *pgxpool.Pool
-	nc                *nats.Conn
-	js                nats.JetStreamContext
-	mediaDir          string
-	mediaSecret       string
-	corsOrigin        string
-	waPoolSize        int
-	tgPoolSize        int
-	waOnboardingSlots int
-	tgOnboardingSlots int
-	mediaCleanupToken string
-	minioEndpoint     string
-	minioAccessKey    string
-	minioSecretKey    string
-	minioBucket       string
-	email             *emailService
+	db                          *pgxpool.Pool
+	nc                          *nats.Conn
+	js                          nats.JetStreamContext
+	mediaDir                    string
+	mediaSecret                 string
+	corsOrigin                  string
+	waPoolSize                  int
+	tgPoolSize                  int
+	waOnboardingSlots           int
+	tgOnboardingSlots           int
+	mediaCleanupToken           string
+	minioEndpoint               string
+	minioAccessKey              string
+	minioSecretKey              string
+	minioBucket                 string
+	minioBuckets                mediaBucketConfig
+	mediaBucketMigrationEnabled bool
+	email                       *emailService
 }
 
 type group struct {
@@ -205,6 +207,14 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 func ensureEventStream(js nats.JetStreamContext) error {
@@ -1208,22 +1218,27 @@ func main() {
 		log.Fatal(err)
 	}
 	a := &app{
-		db:                db,
-		nc:                natsConn,
-		js:                js,
-		mediaDir:          env("MEDIA_DIR", "/data/media"),
-		mediaSecret:       env("MEDIA_SIGNING_SECRET", uuid.NewString()),
-		corsOrigin:        env("WAGI_CORS_ORIGIN", ""),
-		waPoolSize:        envInt("WA_CONNECTOR_POOL_SIZE", 5),
-		tgPoolSize:        envInt("TG_CONNECTOR_POOL_SIZE", 5),
-		waOnboardingSlots: envInt("WA_ONBOARDING_SLOTS", 1),
-		tgOnboardingSlots: envInt("TG_ONBOARDING_SLOTS", 1),
-		mediaCleanupToken: env("MEDIA_CLEANUP_TOKEN", ""),
-		minioEndpoint:     env("MINIO_ENDPOINT", "http://minio:9000"),
-		minioAccessKey:    env("MINIO_ACCESS_KEY", env("MINIO_ROOT_USER", "minio")),
-		minioSecretKey:    env("MINIO_SECRET_KEY", env("MINIO_ROOT_PASSWORD", "miniosecret")),
-		minioBucket:       env("MINIO_BUCKET", "wa-media"),
-		email:             newEmailService(),
+		db:                          db,
+		nc:                          natsConn,
+		js:                          js,
+		mediaDir:                    env("MEDIA_DIR", "/data/media"),
+		mediaSecret:                 env("MEDIA_SIGNING_SECRET", uuid.NewString()),
+		corsOrigin:                  env("WAGI_CORS_ORIGIN", ""),
+		waPoolSize:                  envInt("WA_CONNECTOR_POOL_SIZE", 5),
+		tgPoolSize:                  envInt("TG_CONNECTOR_POOL_SIZE", 5),
+		waOnboardingSlots:           envInt("WA_ONBOARDING_SLOTS", 1),
+		tgOnboardingSlots:           envInt("TG_ONBOARDING_SLOTS", 1),
+		mediaCleanupToken:           env("MEDIA_CLEANUP_TOKEN", ""),
+		minioEndpoint:               env("MINIO_ENDPOINT", "http://minio:9000"),
+		minioAccessKey:              env("MINIO_ACCESS_KEY", env("MINIO_ROOT_USER", "minio")),
+		minioSecretKey:              env("MINIO_SECRET_KEY", env("MINIO_ROOT_PASSWORD", "miniosecret")),
+		minioBucket:                 env("MINIO_BUCKET", "wa-media"),
+		minioBuckets:                newMediaBucketConfig(),
+		mediaBucketMigrationEnabled: envBool("MEDIA_BUCKET_MIGRATION_ENABLED", true),
+		email:                       newEmailService(),
+	}
+	if err := a.migrateMediaBuckets(ctx); err != nil {
+		log.Fatal(err)
 	}
 	if err := a.bootstrapAdmin(); err != nil {
 		log.Fatal(err)
