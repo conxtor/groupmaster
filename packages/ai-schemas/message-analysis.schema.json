@@ -2,10 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "WAGI message analysis",
   "type": "object",
-  "required": ["messageId", "relevant", "relevanceScore", "summary", "facts", "entities", "events", "places", "knowledge", "model"],
+  "required": ["messageId", "relevant", "relevanceLevel", "relevanceScore", "summary", "facts", "entities", "events", "places", "knowledge", "model"],
   "properties": {
     "messageId": {"type": "string", "format": "uuid"},
     "relevant": {"type": "boolean"},
+    "relevanceLevel": {"type": "string", "enum": ["high", "medium", "low"]},
     "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
     "summary": {"type": "string"},
     "facts": {"type": "array", "items": {"type": "object"}},

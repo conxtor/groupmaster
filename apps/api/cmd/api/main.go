@@ -325,6 +325,11 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("relevant") == "true" {
 		conditions = append(conditions, "COALESCE(a.relevant, FALSE) = TRUE")
 	}
+	if value := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("relevanceLevel"))); value != "" {
+		if value == "high" || value == "medium" || value == "low" {
+			conditions = append(conditions, "COALESCE(a.relevance_level, CASE WHEN COALESCE(a.relevance_score, 0) >= 0.75 THEN 'high' WHEN COALESCE(a.relevance_score, 0) >= 0.45 THEN 'medium' ELSE 'low' END) = "+arg(value))
+		}
+	}
 	if r.URL.Query().Get("event") == "true" {
 		conditions = append(conditions, "COALESCE(jsonb_array_length(a.events), 0) > 0")
 	}
@@ -354,7 +359,7 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(m.platform, CASE WHEN m.group_id LIKE 'tg:%%' THEN 'telegram' ELSE 'whatsapp' END),
 		       m.received_at, m.has_media, m.media_status, m.deleted_at,
 		       mo.object_path, mo.thumbnail_path, mo.ocr_text, aj.id::text, aj.transcript, aj.status, aj.attempts, aj.error, aj.next_attempt_at,
-		       COALESCE(jsonb_build_object('relevant', a.relevant, 'score', a.relevance_score, 'summary', a.summary, 'facts', a.facts, 'entities', a.entities, 'events', a.events, 'places', a.places, 'model', a.model, 'schemaVersion', a.schema_version, 'promptVersion', a.prompt_version, 'provenance', a.provenance, 'conflicts', a.conflicts), '{}'::jsonb)
+		       COALESCE(jsonb_build_object('relevant', a.relevant, 'relevanceLevel', COALESCE(a.relevance_level, CASE WHEN COALESCE(a.relevance_score, 0) >= 0.75 THEN 'high' WHEN COALESCE(a.relevance_score, 0) >= 0.45 THEN 'medium' ELSE 'low' END), 'score', a.relevance_score, 'summary', a.summary, 'facts', a.facts, 'entities', a.entities, 'events', a.events, 'places', a.places, 'model', a.model, 'schemaVersion', a.schema_version, 'promptVersion', a.prompt_version, 'provenance', a.provenance, 'conflicts', a.conflicts), '{}'::jsonb)
 		FROM messages m JOIN wa_groups g ON g.id = m.group_id
 		LEFT JOIN message_analyses a ON a.message_id = m.id
 		LEFT JOIN LATERAL (SELECT object_path, thumbnail_path, ocr_text FROM media_objects WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) mo ON TRUE
@@ -645,8 +650,8 @@ func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "messageId and targetKey are required"})
 		return
 	}
-	if request.TargetType != "relevance" && request.TargetType != "event" && request.TargetType != "knowledge" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "targetType must be relevance, event or knowledge"})
+	if request.TargetType != "relevance" && request.TargetType != "event" && request.TargetType != "place" && request.TargetType != "knowledge" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "targetType must be relevance, event, place or knowledge"})
 		return
 	}
 	if request.Decision != "accept" && request.Decision != "reject" && request.Decision != "correct" {
@@ -689,6 +694,26 @@ func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
 		user.ID, groupID, request.MessageID, request.TargetType, request.TargetKey, request.Decision, correctionJSON, strings.TrimSpace(request.Note)).Scan(&feedbackID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "feedback could not be saved"})
 		return
+	}
+	if request.TargetType == "relevance" {
+		level, _ := request.Correction["relevanceLevel"].(string)
+		level = normalizeLearningLevel(level)
+		if request.Decision == "accept" {
+			level = "high"
+		}
+		if request.Decision == "reject" {
+			level = "low"
+		}
+		if level != "" {
+			request.Correction["relevanceLevel"] = level
+			correctionJSON, _ = json.Marshal(request.Correction)
+			_, _ = a.db.Exec(r.Context(), `UPDATE ai_feedback SET correction=$2::jsonb WHERE id=$1::uuid`, feedbackID, correctionJSON)
+			levelScore := map[string]float64{"high": 0.86, "medium": 0.60, "low": 0.20}[level]
+			_, _ = a.db.Exec(r.Context(), `UPDATE message_analyses SET relevance_level=$2, relevance_score=$3, relevant=($2 <> 'low'), updated_at=NOW() WHERE message_id=$1::uuid`, request.MessageID, level, levelScore)
+		}
+	}
+	if err := a.recordAILearningFeedback(r.Context(), groupID, request.MessageID, request.TargetType, request.Decision, request.Correction); err != nil {
+		log.Printf("AI learning feedback could not be recorded: %v", err)
 	}
 	if request.TargetType == "knowledge" {
 		alias, _ := correction["alias"].(string)
@@ -1259,6 +1284,8 @@ func main() {
 	mux.HandleFunc("/api/v1/admin/users", requireAdmin(a, a.adminUsers))
 	mux.HandleFunc("/api/v1/admin/users/", requireAdmin(a, a.adminUsers))
 	mux.HandleFunc("/api/v1/admin/observability", requireAdmin(a, a.adminObservability))
+	mux.HandleFunc("/api/v1/admin/ai-learning", requireAdmin(a, a.adminAILearning))
+	mux.HandleFunc("/api/v1/admin/ai-learning/", requireAdmin(a, a.adminAILearning))
 	mux.HandleFunc("/api/v1/connectors/accounts", requireAuthenticated(a, a.connectorAccounts))
 	mux.HandleFunc("/api/v1/connectors/accounts/", requireAuthenticated(a, a.connectorAccountAction))
 	mux.HandleFunc("/api/v1/status", requireAuthenticated(a, a.status))

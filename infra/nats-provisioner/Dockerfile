@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-alpine
 WORKDIR /app
 RUN pip install --no-cache-dir nats-py
 COPY provision.py ./provision.py

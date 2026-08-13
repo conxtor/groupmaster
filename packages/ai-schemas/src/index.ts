@@ -2,10 +2,11 @@ import type { MessageAnalysis } from "@wagi/contracts";
 
 export const analysisSchema = {
   type: "object",
-  required: ["messageId", "relevant", "relevanceScore", "summary", "facts", "entities", "events", "places", "model"],
+  required: ["messageId", "relevant", "relevanceLevel", "relevanceScore", "summary", "facts", "entities", "events", "places", "model"],
   properties: {
     messageId: { type: "string" },
     relevant: { type: "boolean" },
+    relevanceLevel: { type: "string", enum: ["high", "medium", "low"] },
     relevanceScore: { type: "number", minimum: 0, maximum: 1 },
     summary: { type: "string" },
     facts: { type: "array" },

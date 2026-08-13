@@ -42,6 +42,16 @@ Im lokalen Stack veröffentlicht nur NGINX den Web-Port. Im Dockge-Stack wird
 nur das Web-Image über Traefik geroutet; API, Datenbank, NATS, MinIO und beide
 Connectoren bleiben intern.
 
+### Container-Basis-Images
+
+Die Compose-Builds verwenden nach Möglichkeit kleine Basis-Images: Node.js,
+NATS, NGINX, der Migration-Runner und der NATS-Provisioner verwenden Alpine;
+die Go-API verwendet ein statisches Distroless-Laufzeit-Image. Die AI- und
+Media-Worker verwenden `python:3.12-slim`, weil FastEmbed/ONNX sowie
+Whisper.cpp, FFmpeg, Tesseract und Poppler dort mit den verfügbaren nativen
+Paketen und Binary-Wheels zuverlässig zusammenarbeiten. Die PostgreSQL- und
+MinIO-Images bleiben die benötigten Hersteller-Images.
+
 ## Nutzer, Login und Rollen
 
 | Variable | Standard | Bedeutung |
@@ -259,6 +269,22 @@ keine Bereinigung aus.
 | `MEDIA_MAX_RETRIES`, `MEDIA_STALE_PROCESSING_SECONDS` | 3 / 900 | Medien-Retry und Recovery. |
 | `MEDIA_ANALYSIS_EVENT_MAX_CHARS` | 12000 | OCR-/Dokument-Payload. |
 | `AUDIO_WORK_DIR`, `LOG_LEVEL` | dienstabhängig | Arbeitsverzeichnis und Log-Level. |
+
+Die Relevanz wird als `high`, `medium` oder `low` gespeichert. Die dafür
+verwendeten globalen Sprachbegriffe sowie gruppenspezifischen Lerngewichte
+werden nicht über Umgebungsvariablen, sondern in der Tabelle
+`ai_learning_terms` gepflegt. Administratoren können sie unter
+`/admin/ai-learning` nach Sprache und Kategorie verwalten. Die Kategorien sind
+Relevanz, Event, Ort, Knowledge-Schlüsselwort und Ausschlusswort.
+
+Die Migration `014_relevance_learning.sql` legt die Lernstruktur und die
+initialen Heuristikbegriffe an. Die Folge-Migration
+`015_more_exclusion_words.sql` ergänzt die fünf unterstützten Sprachen um
+weitere Füllwörter, Gesprächspartikeln und häufige Floskeln. Die Ausschluss-
+und Füllwortlisten werden zur Laufzeit ausschließlich aus der Datenbank geladen;
+im AI-Worker und in der API gibt es dafür keine parallelen statischen Listen.
+Die bestehende Migration 014 wird nicht nachträglich geändert, damit ihre
+Prüfsumme bei bereits installierten Systemen stabil bleibt.
 
 ## Betriebsregeln
 

@@ -73,7 +73,7 @@ function AdminContent() {
   const streamMessages = observability?.streams.reduce((total, stream) => total + stream.messages, 0) ?? 0;
 
   return <main className="shell adminPage">
-    <header className="topbar"><div><p className="eyebrow">WAGI / ADMINISTRATION</p><h1>Betriebsübersicht</h1><p className="adminRefresh">{observability ? `Live-Daten: ${new Date(observability.generatedAt).toLocaleTimeString()}` : "Betriebsdaten werden geladen …"}{refreshing && " · aktualisiere …"}</p></div><nav className="pageNav"><Link href="/">Dashboard</Link><Link href="/groups">Gruppen</Link><Link href="/connectors">Konnektoren</Link><Link className="pageNavActive" href="/admin">Admin</Link></nav></header>
+    <header className="topbar"><div><p className="eyebrow">WAGI / ADMINISTRATION</p><h1>Betriebsübersicht</h1><p className="adminRefresh">{observability ? `Live-Daten: ${new Date(observability.generatedAt).toLocaleTimeString()}` : "Betriebsdaten werden geladen …"}{refreshing && " · aktualisiere …"}</p></div><nav className="pageNav"><Link href="/">Dashboard</Link><Link href="/groups">Gruppen</Link><Link href="/connectors">Konnektoren</Link><Link href="/admin/users">Benutzer</Link><Link href="/admin/ai-learning">Lernmodell</Link><Link className="pageNavActive" href="/admin">Admin</Link></nav></header>
     {error && <div className="notice">{error}</div>}
     <section className="panel adminPanel adminSubpageLink"><div><h2>Benutzerverwaltung</h2><p className="muted">Konten, Rollen und Status befinden sich auf einer eigenen Admin-Seite.</p></div><Link className="secondaryButton" href="/admin/users">Benutzer verwalten</Link></section>
 

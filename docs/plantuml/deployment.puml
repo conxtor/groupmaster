@@ -15,10 +15,10 @@ node "Lokaler Docker-Compose-Stack" as Local {
   component "tg-connector:3002\nOnboarding + Pool" as LocalTG
   component "wa-connector-worker\ninterner Pool-Worker" as LocalWAW
   component "tg-connector-worker\ninterner Pool-Worker" as LocalTGW
-  component "ai-worker\nPython" as LocalAI
-  component "media-worker\nPython + whisper.cpp" as LocalMedia
-  component "migrate\nversionierte SQL-Migrationen" as LocalMigrate
-  component "nats-provisioner" as LocalProvisioner
+  component "ai-worker\nPython 3.12-slim" as LocalAI
+  component "media-worker\nPython 3.12-slim + whisper.cpp" as LocalMedia
+  component "migrate\npostgres:15-alpine\nversionierte SQL-Migrationen" as LocalMigrate
+  component "nats-provisioner\npython:3.12-alpine" as LocalProvisioner
   database "db\nPostgreSQL 15 + PostGIS/pgvector" as LocalDB
   queue "nats:4222\nJetStream /data/jetstream" as LocalNATS
   storage "minio:9000\nseparate media buckets" as LocalMinio
@@ -112,6 +112,15 @@ note right of Mail
   muss aus dem API-Container erreichbar sein.
   Verifizierungs- und Reset-Mails werden
   in der Sprache des Formulars versendet.
+end note
+
+note right of LocalProvisioner
+  Kleine Basis-Images werden bevorzugt:
+  Node.js, NATS, NGINX, Migration-Runner
+  und dieser Provisioner verwenden Alpine.
+  Die API läuft distroless. Python Slim
+  bleibt für ONNX, Whisper und OCR wegen
+  nativer Paketkompatibilität bestehen.
 end note
 
 note bottom of LocalVolumes

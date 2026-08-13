@@ -47,6 +47,7 @@ Ziel: Ein einzelner vertrauenswürdiger Nutzer kann reale Gruppen sicher verbind
 - [x] Widersprüchliche Zeit-, Orts- und Terminangaben erkennen, mit Quellen belegen und als Konflikt markieren
 - [x] Kaskadenqualität `cascade-v4`: stabiles Event-/Knowledge-Deduping, begrenzte Zeit-/Antwortfenster, kanonische Alias-Zuordnung und belegte Knowledge-Graph-Beziehungen
 - [x] Nutzerfeedback für Relevanz, Events und Knowledge-Base über `POST /api/v1/ai/feedback` speichern und betroffene Nachrichten idempotent neu analysieren
+- [x] Dreistufige Relevanz (`high`/`medium`/`low`) mit sprach- und gruppengebundenem Lernmodell für Relevanz, Events und Orte; System-Schlüssel- und Ausschlusswörter sind in `ai_learning_terms` editierbar
 
 ### Nutzeroberfläche
 
@@ -118,7 +119,7 @@ Ziel: Aus der Analyseoberfläche wird ein persönlicher Gruppenassistent.
 - [ ] Export nach JSON, CSV, PDF und Kalenderformaten
 - [ ] Semantische Suche über Nachrichten, Events und Orte
 - [x] Feedbackschleife für Nutzerkorrekturen und kanonische Alias-/Beziehungsaktualisierung
-- [ ] Modellverbesserung aus dem Feedback-Datensatz und automatisierte Schwellenwert-Evaluation
+- [ ] Modellverbesserung aus dem Feedback-Datensatz und automatisierte Schwellenwert-Evaluation (über die lokale Wortgewichtung hinaus)
 - [ ] Benutzerspezifische Relevanzregeln und thematische Profile
 - [ ] Erweiterte Kartenansicht mit Event-Zeitachse und Routen
 - [ ] Weitere Connectoren über das gemeinsame Connector-SDK

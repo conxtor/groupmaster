@@ -84,7 +84,7 @@ Media --> DB : media_objects, audio_jobs
 Media --> NATS : media.audio.transcribed\nmedia.image.analyzed\nmedia.document.analyzed
 
 NATS --> AI : wa.messages.received\nmedia.*.analyzed\nreplay.requested
-AI --> DB : ai_jobs, message_analyses,\nknowledge hierarchy + graph
+AI --> DB : ai_jobs, message_analyses,\nknowledge hierarchy + graph,\nai_learning_terms
 AI --> NATS : ai.messages.analyzed\nDLQ bei Fehlern
 AI ..> MinIO : optional document/media context
 Provisioner --> NATS : WAGI_EVENTS,\nWAGI_* durable consumers
@@ -121,6 +121,15 @@ note right of Media
   wiederaufnehmbar und aktualisiert
   media_objects.bucket.
   Es gibt keinen separaten Init-Container.
+end note
+
+note right of AI
+  Ausschluss- und Füllwörter werden nicht
+  mehr statisch im Code gepflegt. Globale
+  Systembegriffe sowie gruppengebundene
+  Lerngewichte kommen aus ai_learning_terms
+  (Migrationen 014 und 015) und können
+  sprachbezogen administriert werden.
 end note
 
 note bottom of DB

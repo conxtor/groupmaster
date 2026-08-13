@@ -37,6 +37,7 @@ else (Text / Ort)
 endif
 
 :Sprache der Gruppe bestimmen;
+:Globale und gruppengebundene Lernbegriffe\naus ai_learning_terms laden;
 :Deterministische Heuristik-Kaskade ausführen;
 :Relevanz und Relevance-Score;
 :Facts und Entities extrahieren;
@@ -63,6 +64,7 @@ endif
 
 :JSON-Schema, Provenance und\nKonfidenzen validieren;
 :message_analyses, ai_jobs,\nKnowledge-Hierarchie und Graph speichern;
+:Relevanz-, Event-, Orts- und\nKnowledge-Feedback in ai_learning_terms lernen;
 :ai.messages.analyzed publizieren;
 
 fork

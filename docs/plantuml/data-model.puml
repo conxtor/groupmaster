@@ -190,6 +190,7 @@ entity message_analyses {
   * message_id : uuid <<PK/FK>>
   --
   relevant : bool
+  relevance_level : high | medium | low
   relevance_score : numeric
   summary : text
   facts/entities/events/places : jsonb
@@ -226,8 +227,24 @@ entity ai_feedback {
   user_id : uuid <<FK>>
   group_id : text <<FK>>
   message_id : uuid <<FK>>
-  target_type : relevance | event | knowledge
+  target_type : relevance | event | place | knowledge
   decision : accept | reject | correct
+}
+
+entity ai_learning_terms {
+  * id : uuid <<PK>>
+  --
+  group_id : text <<FK, nullable>>
+  language : de | es | ca | en | fr
+  category : relevance | event | place | keyword | exclusion
+  topic_key : text <<nullable>>
+  term : text
+  weight : numeric
+  relevance_level : high | medium | low <<nullable>>
+  enabled : bool
+  source : system | admin | feedback | inferred
+  positive_count / negative_count : int
+  updated_at : timestamptz
 }
 
 entity ai_canonical_aliases {
@@ -287,6 +304,7 @@ wa_groups ||--o{ user_group_access
 wa_groups ||--o{ messages
 wa_groups ||--o{ knowledge_topics
 wa_groups ||--o{ ai_feedback
+wa_groups ||--o{ ai_learning_terms
 wa_groups ||--o{ ai_canonical_aliases
 wa_groups ||--o{ ai_knowledge_edges
 wa_groups ||--o{ connector_cursors
@@ -321,5 +339,15 @@ note bottom of wa_groups
   Die JSON-Payload-Stores event_inbox und
   event_failures werden für entfernte Gruppen
   und Nachrichten explizit bereinigt.
+end note
+
+note right of ai_learning_terms
+  Globale Systembegriffe verwenden
+  group_id = NULL. Gruppeneinträge werden
+  zusätzlich geladen und haben in ihrer
+  Gruppe stärkeres Gewicht. Migration 015
+  ergänzt mehrsprachige Füllwörter und
+  Gesprächsfloskeln; der laufende Code
+  enthält dafür keine statische Stopword-Liste.
 end note
 @enduml

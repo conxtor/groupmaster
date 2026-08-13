@@ -129,6 +129,7 @@ export interface ReplayRequested {
 export interface MessageAnalysis {
   messageId: string;
   relevant: boolean;
+  relevanceLevel: "high" | "medium" | "low";
   relevanceScore: number;
   summary: string;
   facts: Array<{ text: string; confidence: number }>;

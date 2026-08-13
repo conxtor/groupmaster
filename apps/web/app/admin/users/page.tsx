@@ -69,7 +69,7 @@ function UserAdminContent() {
   return <main className="shell adminPage">
     <header className="topbar">
       <div><p className="eyebrow">WAGI / ADMINISTRATION</p><h1>Benutzerverwaltung</h1><p className="muted">Konten, Rollen und Zugriffsstatus verwalten.</p></div>
-      <nav className="pageNav"><Link href="/">Dashboard</Link><Link href="/admin">Admin-Übersicht</Link><Link className="pageNavActive" href="/admin/users">Benutzer</Link></nav>
+      <nav className="pageNav"><Link href="/">Dashboard</Link><Link href="/admin">Admin-Übersicht</Link><Link className="pageNavActive" href="/admin/users">Benutzer</Link><Link href="/admin/ai-learning">Lernmodell</Link></nav>
     </header>
     {error && <div className="notice">{error}</div>}
     <section className="panel adminPanel">

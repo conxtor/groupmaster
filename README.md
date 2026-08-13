@@ -399,10 +399,33 @@ reiner Gruß, eine allgemeine Terminzeile oder ein einzelner Karten-Pin wird
 nicht mehr als Event ausgegeben. Quellen werden nur in einem zeitlich
 begrenzten Nachrichtenfenster und bei Antwortbeziehungen zusammengeführt.
 Feedback kann über `POST /api/v1/ai/feedback` mit `targetType` `relevance`,
-`event` oder `knowledge` gespeichert werden. Eine Rückmeldung löst die
+`event`, `place` oder `knowledge` gespeichert werden. Relevanz wird dabei in
+den drei Stufen `high`, `medium` und `low` gespeichert; die Nachrichtenkarten
+im Dashboard bieten dafür direkte Aktionen sowie Bestätigen-/Verwerfen-Aktionen
+für erkannte Events und Orte. Eine Rückmeldung löst die
 erneute Analyse der betroffenen Nachricht aus. Bei Knowledge-Korrekturen mit
 `alias`, `canonicalKey` und optional `topicKey` wird zusätzlich ein
 gruppengebundener kanonischer Begriff gelernt.
+
+Die neue Lernschicht liegt in `ai_learning_terms` und ist nach Sprache und
+optional nach Gruppe gebunden. Globale Systembegriffe bilden die Defaults;
+Feedback aus einer Gruppe erzeugt zusätzliche positive oder negative
+Wortgewichte für Relevanz, Events und Orte. Die gruppenspezifischen Gewichte
+werden zusammen mit den globalen Werten geladen und beeinflussen dadurch nur
+die jeweilige Gruppe stärker. Administratoren verwalten diese Begriffe,
+Ausschlusswörter und Knowledge-Schlüsselwörter unter `/admin/ai-learning`.
+Die Migration `infra/migrations/014_relevance_learning.sql` legt das Modell und
+die initialen, aus der bisherigen Heuristik übernommenen Begriffe an.
+`infra/migrations/015_more_exclusion_words.sql` ergänzt die globalen
+Ausschlussbegriffe um zusätzliche Füllwörter, Gesprächspartikeln und typische
+Floskeln in Deutsch, Spanisch, Katalanisch, Englisch und Französisch.
+
+Füll- und Ausschlusswörter werden im laufenden Betrieb ausschließlich aus
+`ai_learning_terms` geladen. AI-Worker und API enthalten dafür keine statischen
+mehrsprachigen Stopword-Listen mehr; Änderungen können dadurch pro Sprache und
+optional pro Gruppe über die Administrationsseite gepflegt werden. Fachliche
+Event-, Orts- und Knowledge-Regeln bleiben als erklärbare Heuristik-Fallbacks
+erhalten.
 
 Die Persistenz dafür liegt in `infra/migrations/011_ai_quality_feedback.sql`.
 Sie enthält Feedback, kanonische Alias-Zuordnungen und ausschließlich aus
@@ -560,6 +583,7 @@ Die Compose-Umgebung startet standardmäßig im `WA_MOCK_MODE=true`, damit die v
 | KI | `ai-worker`, validiertes strukturiertes Schema für Relevanz, Facts, Entities, Events, Places und Summary |
 | API | Go Standard Library + pgx, Health-/Readiness-/Metrics-Endpunkte |
 | UI | Next.js/React, responsive Gruppen- und Nachrichtenübersicht; Knowledge Base maximal zweispaltig |
+| Container-Basen | Alpine für Node.js, NATS, NGINX, Migration-Runner und NATS-Provisioner; Distroless für die API; Python Slim für AI-/Media-Worker wegen ONNX/Whisper/OCR-Kompatibilität |
 
 PlantUML-Diagramme liegen in `docs/plantuml`: Gesamtarchitektur, Ingestion-Sequenz, KI-Pipeline, Deployment und Datenmodell. Die Mock-Bilder liegen unter `apps/web/public/mock`; Event-Karten werden im Dashboard interaktiv mit Leaflet gerendert und zeigen die Koordinaten aus den mehrteiligen Event-Quellen.
 
@@ -596,7 +620,8 @@ Bootstrap-Administrator wird beim ersten erfolgreichen API-Start angelegt.
 - `POST /api/v1/auth/register` für normale Nutzerkonten
 - `GET/POST /api/v1/connectors/accounts` für eigene persistente Connector-Konten
 - `GET /api/v1/admin/users` und `PATCH /api/v1/admin/users/{id}` für Administratoren
-- Admin-Betriebsübersicht unter `/admin`; die Benutzerverwaltung liegt separat unter `/admin/users`.
+- `GET/POST/PATCH/DELETE /api/v1/admin/ai-learning[...]` für die sprach- und gruppenbezogene Lernmodellverwaltung
+- Admin-Betriebsübersicht unter `/admin`; die Benutzerverwaltung liegt separat unter `/admin/users`, das Lernmodell unter `/admin/ai-learning`.
 - `GET /healthz` und `GET /readyz`
 - `GET /api/v1/groups`
 - `PUT /api/v1/groups/{groupId}/select` mit `{ "selected": true|false }`
