@@ -65,6 +65,11 @@ let directQrExpiresAt: number | null = null;
 let directQrAuthPromise: Promise<void> | null = null;
 const mediaRetryCounts = new Map<string, number>();
 const directTopicGroups = new Map<string, Map<number, { groupId: string; title: string; topMessage: number }>>();
+// GramJS cannot reliably resolve a positive numeric chat id with
+// getEntity(number): it interprets that value as PeerUser. Keep the concrete
+// entities obtained from iterDialogs so backfill uses the correct Chat or
+// Channel input peer, including after a pool worker has been restarted.
+const directEntities = new Map<string, any>();
 let groupRefreshTimer: NodeJS.Timeout | null = null;
 let groupRefreshInProgress = false;
 let accountLease: ConnectorAccountLease | null = null;
@@ -515,6 +520,7 @@ async function saveDirectSession() {
 }
 
 async function upsertDirectGroup(entity: any) {
+  directEntities.set(String(entity.id), entity);
   const chatId = String(entity.id);
   const groupId = `tg:${chatId}`;
   const username = entity.username ? String(entity.username) : undefined;
@@ -547,6 +553,7 @@ function directTopicGroupId(entity: any, topicId: number) {
 }
 
 async function upsertDirectTopic(entity: any, topic: { id: number; title?: string; topMessage?: number }) {
+  directEntities.set(String(entity.id), entity);
   const parentGroupId = `tg:${String(entity.id)}`;
   const topicId = Number(topic.id);
   const groupId = directTopicGroupId(entity, topicId);
@@ -766,6 +773,7 @@ async function discoverDirectGroups() {
   try {
     const presentIds = new Set<string>();
     directTopicGroups.clear();
+    directEntities.clear();
     const iterator = (directClient as any).iterDialogs?.({});
     if (!iterator || typeof iterator[Symbol.asyncIterator] !== "function") throw new Error("Telegram liefert keine vollständige Dialogliste");
     for await (const dialog of iterator) {
@@ -802,11 +810,33 @@ function startGroupRefreshTimer() {
   groupRefreshTimer.unref?.();
 }
 
+async function resolveDirectGroupEntity(chatId: string) {
+  if (!directClient) return null;
+  const cached = directEntities.get(chatId);
+  if (cached) return cached;
+
+  // The normal startup path has already populated this cache. This fallback
+  // also handles a selection event arriving before the next group refresh and
+  // avoids ever passing a bare positive id to getEntity().
+  const iterator = (directClient as any).iterDialogs?.({});
+  if (iterator && typeof iterator[Symbol.asyncIterator] === "function") {
+    for await (const dialog of iterator) {
+      const entity = dialog?.entity;
+      if (entity && String(entity.id) === chatId && isDirectGroupEntity(entity) && !isDepartedDirectDialog(dialog, entity)) {
+        directEntities.set(chatId, entity);
+        return entity;
+      }
+    }
+  }
+  return null;
+}
+
 async function backfillDirectGroup(groupId: string) {
   if (!directClient || !directRuntimeStarted) return;
   const match = groupId.match(/^tg:([^:]+)(?::topic:(\d+))?$/);
   if (!match) return;
-  const entity = await directClient.getEntity(Number(match[1]));
+  const entity = await resolveDirectGroupEntity(match[1]);
+  if (!entity) throw new Error(`Telegram group entity unavailable for ${groupId}; refresh dialogs before backfill`);
   if (!isDirectGroupEntity(entity)) return;
   await discoverDirectTopics(entity);
   const topicId = match[2] ? Number(match[2]) : undefined;
