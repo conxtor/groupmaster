@@ -18,7 +18,11 @@ type Observability = {
   connectorPools: Array<{ platform: string; processingCapacity: number; onboardingCapacity: number; activeProcessing: number; activeOnboarding: number; availableProcessing: number; availableOnboarding: number; processingWaiting: number; processingWaitSeconds: number; onboardingWaiting: number; onboardingWaitSeconds: number }>;
   activeLeases: Array<{ accountId: string; platform: string; leaseKind: string; workerId: string; leaseUntil: string; remainingSeconds: number; userId: string; userName: string; userEmail: string; accountStatus: string }>;
   recentLeases: Array<{ id: string; accountId: string; platform: string; leaseKind: string; workerId: string; userId: string; userName: string; userEmail: string; accountStatus: string; startedAt: string; leaseUntil: string; endedAt?: string; durationSeconds: number; state: string; endReason?: string }>;
-  aiProcessingHistory: Array<{ id: string; messageId: string; mediaType: string; status: string; attempts: number; model?: string; groupSubject?: string; createdAt: string; updatedAt: string; durationSeconds: number; error?: string }>;
+  aiProcessingHistory: Array<{ id: string; messageId: string; mediaType: string; status: string; attempts: number; model?: string; groupSubject?: string; createdAt: string; updatedAt: string; durationMilliseconds: number; durationSeconds: number; error?: string }>;
+  aiProcessingPage: number;
+  aiProcessingPageSize: number;
+  aiProcessingTotal: number;
+  aiProcessingTotalPages: number;
   nats: { connected: boolean; servers: string[]; inMessages: number; outMessages: number; inBytes: number; outBytes: number; reconnects: number };
   minio: { endpoint: string; bucket: string; connected: boolean; bucketExists: boolean; objectCount: number; totalBytes: number; lastModified?: string; error?: string; buckets: Array<{ bucket: string; connected: boolean; bucketExists: boolean; objectCount: number; totalBytes: number; lastModified?: string; error?: string }> };
   streams: Array<{ name: string; status: string; subjects: string[]; storage: string; messages: number; bytes: number; firstSequence: number; lastSequence: number; error?: string; consumers: Array<{ name: string; filterSubject: string; pending: number; ackPending: number; redelivered: number; waiting: number; maxDeliver: number }> }>;
@@ -38,6 +42,14 @@ function formatWait(seconds: number) {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
+function formatProcessingDuration(milliseconds: number) {
+  if (!milliseconds || milliseconds < 1) return "—";
+  if (milliseconds < 1000) return `${milliseconds} ms`;
+  if (milliseconds < 60000) return `${(milliseconds / 1000).toFixed(1)} s`;
+  const totalSeconds = Math.round(milliseconds / 1000);
+  return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+}
+
 function platformLabel(platform: string) {
   return platform === "whatsapp" ? "WhatsApp" : platform === "telegram" ? "Telegram" : platform;
 }
@@ -50,13 +62,16 @@ function AdminContent() {
   const [observability, setObservability] = useState<Observability | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [aiPage, setAiPage] = useState(1);
 
-  async function loadObservability(showLoading = false) {
+  async function loadObservability(showLoading = false, page = aiPage) {
     if (showLoading) setRefreshing(true);
     try {
-      const response = await apiFetch("/api/v1/admin/observability");
+      const response = await apiFetch(`/api/v1/admin/observability?aiPage=${page}&aiPageSize=20`);
       if (!response.ok) throw new Error("Betriebsdaten konnten nicht geladen werden");
-      setObservability(await response.json() as Observability);
+      const body = await response.json() as Observability;
+      setObservability(body);
+      if (body.aiProcessingPage && body.aiProcessingPage !== page) setAiPage(body.aiProcessingPage);
       setError(null);
     } finally {
       if (showLoading) setRefreshing(false);
@@ -67,7 +82,7 @@ function AdminContent() {
     void loadObservability(true).catch((value) => setError(value instanceof Error ? value.message : "Laden fehlgeschlagen"));
     const interval = window.setInterval(() => { void loadObservability().catch((value) => setError(value instanceof Error ? value.message : "Aktualisierung fehlgeschlagen")); }, 5000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [aiPage]);
 
   const summary = observability?.summary;
   const streamMessages = observability?.streams.reduce((total, stream) => total + stream.messages, 0) ?? 0;
@@ -101,7 +116,7 @@ function AdminContent() {
 
       <section className="panel adminPanel"><div className="panelHead"><div><h2>Letzte 10 Nutzer in den Connector-Prozessen</h2><p className="muted">Historische Pool-Belegungen seit Aktivierung der Lease-Historie.</p></div><span className="count">{observability.recentLeases.length}</span></div>{observability.recentLeases.length ? <div className="observabilityTableWrap"><table className="observabilityTable historyTable"><thead><tr><th>Start</th><th>Nutzer</th><th>Connector</th><th>Worker / Lease</th><th>Dauer</th><th>Status</th><th>Ende</th></tr></thead><tbody>{observability.recentLeases.map((lease) => <tr key={lease.id}><td>{new Date(lease.startedAt).toLocaleString()}</td><td><strong>{lease.userName}</strong><br /><small>{lease.userEmail}</small></td><td>{platformLabel(lease.platform)}<br /><small>{kindLabel(lease.leaseKind)} · {lease.accountStatus}</small></td><td className="mono">{lease.workerId}<br /><small>{lease.accountId}</small></td><td>{formatWait(lease.durationSeconds)}</td><td className={lease.state === "expired" ? "metricWarning" : lease.state === "active" ? "metricGood" : ""}>{lease.state}</td><td>{lease.endedAt ? new Date(lease.endedAt).toLocaleString() : `bis ${new Date(lease.leaseUntil).toLocaleString()}`}{lease.endReason && <><br /><small>{lease.endReason}</small></>}</td></tr>)}</tbody></table></div> : <p className="adminEmpty">Noch keine historischen Connector-Leases vorhanden.</p>}</section>
 
-      {observability.aiProcessingHistory.length > 0 && <section className="panel adminPanel"><div className="panelHead"><div><h2>Letzte 20 KI-Verarbeitungen</h2><p className="muted">Nur vorhandene KI-Jobs mit Medientyp und gemessener Laufzeit.</p></div><span className="count">{observability.aiProcessingHistory.length}</span></div><div className="observabilityTableWrap"><table className="observabilityTable historyTable"><thead><tr><th>Abgeschlossen / geändert</th><th>Medientyp</th><th>Gruppe</th><th>Modell</th><th>Versuche</th><th>Verarbeitungsdauer</th><th>Status</th></tr></thead><tbody>{observability.aiProcessingHistory.map((job) => <tr key={job.id}><td>{new Date(job.updatedAt).toLocaleString()}</td><td><strong>{job.mediaType}</strong><br /><small>{job.messageId}</small></td><td>{job.groupSubject || "—"}</td><td>{job.model || "—"}</td><td>{job.attempts}</td><td>{formatWait(job.durationSeconds)}</td><td className={job.status === "failed" ? "metricWarning" : job.status === "completed" ? "metricGood" : ""}>{job.status}{job.error && <><br /><small className="metricWarning">{job.error}</small></>}</td></tr>)}</tbody></table></div></section>}
+      {observability.aiProcessingTotal > 0 && <section className="panel adminPanel"><div className="panelHead"><div><h2>Letzte 20 KI-Verarbeitungen</h2><p className="muted">Nur vorhandene KI-Jobs. Die Dauer misst ausschließlich aktive Worker-Zeit, ohne Warteschlange und Retry-Backoff.</p></div><span className="count">{observability.aiProcessingTotal.toLocaleString()}</span></div><div className="observabilityTableWrap"><table className="observabilityTable historyTable"><thead><tr><th>Abgeschlossen / geändert</th><th>Medientyp</th><th>Gruppe</th><th>Modell</th><th>Versuche</th><th>Verarbeitungsdauer</th><th>Status</th></tr></thead><tbody>{observability.aiProcessingHistory.map((job) => <tr key={job.id}><td>{new Date(job.updatedAt).toLocaleString()}</td><td><strong>{job.mediaType}</strong><br /><small>{job.messageId}</small></td><td>{job.groupSubject || "—"}</td><td>{job.model || "—"}</td><td>{job.attempts}</td><td>{formatProcessingDuration(job.durationMilliseconds)}</td><td className={job.status === "failed" ? "metricWarning" : job.status === "completed" ? "metricGood" : ""}>{job.status}{job.error && <><br /><small className="metricWarning">{job.error}</small></>}</td></tr>)}</tbody></table></div><div className="paginationControls"><button className="textButton" type="button" disabled={observability.aiProcessingPage <= 1} onClick={() => setAiPage((page) => Math.max(1, page - 1))}>← Neuere</button><span>Seite {observability.aiProcessingPage} von {observability.aiProcessingTotalPages}</span><button className="textButton" type="button" disabled={observability.aiProcessingPage >= observability.aiProcessingTotalPages} onClick={() => setAiPage((page) => Math.min(observability.aiProcessingTotalPages, page + 1))}>Ältere →</button></div></section>}
 
       <div className="observabilityGrid">
         <section className="panel adminPanel"><div className="panelHead"><div><h2>NATS</h2><p className="muted">Verbindungs- und Durchsatzdaten seit dem Start des API-Prozesses.</p></div></div><div className="natsStats"><div><small>Status</small><strong className={observability.nats.connected ? "metricGood" : "metricWarning"}>{observability.nats.connected ? "Verbunden" : "Getrennt"}</strong></div><div><small>Server</small><strong>{observability.nats.servers.join(", ") || "—"}</strong></div><div><small>Eingehend</small><strong>{observability.nats.inMessages.toLocaleString()} Nachrichten</strong><span>{formatBytes(observability.nats.inBytes)}</span></div><div><small>Ausgehend</small><strong>{observability.nats.outMessages.toLocaleString()} Nachrichten</strong><span>{formatBytes(observability.nats.outBytes)}</span></div></div></section>

@@ -450,7 +450,7 @@ async def main():
         await js.stream_info("WAGI_EVENTS")
     except Exception:
         try:
-            await js.add_stream(name="WAGI_EVENTS", subjects=["wa.>", "media.>", "ai.>", "connector.>", "replay.>"])
+            await js.add_stream(name="WAGI_EVENTS", subjects=["wa.>", "media.>", "ai.messages.>", "ai.feedback.>", "connector.>", "replay.>"])
         except Exception:
             await js.stream_info("WAGI_EVENTS")
 

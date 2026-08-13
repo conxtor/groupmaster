@@ -33,6 +33,7 @@ package "Connector-Pools" {
 
 package "Event- und Verarbeitungsplattform" {
   queue "NATS JetStream\nWAGI_EVENTS" as NATS
+  queue "NATS JetStream\nWAGI_REASSESSMENT" as ReassessmentNATS
   component "media-worker\nMinIO + OCR + whisper.cpp medium" as Media
   component "ai-worker\nHeuristik + Embeddings\noptional Hermes-Agent" as AI
   component "NATS Provisioner\nStreams + Durable Consumer" as Provisioner
@@ -54,6 +55,8 @@ Web --> API : same-origin /api/*\nNext.js internal rewrite in Dockge
 User --> Web : Login, Gruppen,\nConnector-Setup, Dashboard
 User --> Web : /profile\nName, E-Mail, Passwort, Sprache
 Admin --> Web : /admin\nNutzer anlegen, Rolle, Status
+Admin --> Web : /admin/ai-learning\nKategorien, Zeitmetriken, Suche
+Admin --> Web : /admin/ai-learning/{category}\nBegriffe, Bulk-Aktionen
 API --> Mail : SMTP STARTTLS/TLS\nsprachabhängige Auth-Mails
 Mail --> User : Verifizierungslink\nPasswort-Reset-Link
 
@@ -70,6 +73,7 @@ TelegramBot ..> TGConnector : optional Bot API fallback
 
 API --> DB : Auth, groups, accounts,\nselection, cursors, queries
 API --> NATS : control events, audio jobs,\nfeedback, replay
+API --> ReassessmentNATS : ai.reassessment.requested\nAdministrator-Job
 API --> MediaVolume : signed media streaming
 
 WAConnector --> DB : groups, messages,\nrevisions, contacts, cursors
@@ -84,10 +88,21 @@ Media --> DB : media_objects, audio_jobs
 Media --> NATS : media.audio.transcribed\nmedia.image.analyzed\nmedia.document.analyzed
 
 NATS --> AI : wa.messages.received\nmedia.*.analyzed\nreplay.requested
+ReassessmentNATS --> AI : ai.reassessment.requested\nseparater Durable Consumer
 AI --> DB : ai_jobs, message_analyses,\nknowledge hierarchy + graph,\nai_learning_terms
+AI --> DB : ai_learning_term_history\ncreated, feedback, inferred, admin
 AI --> NATS : ai.messages.analyzed\nDLQ bei Fehlern
 AI ..> MinIO : optional document/media context
 Provisioner --> NATS : WAGI_EVENTS,\nWAGI_* durable consumers
+Provisioner --> ReassessmentNATS : WAGI_REASSESSMENT\nWAGI_AI_REASSESSMENT
+
+note right of ReassessmentNATS
+  Neubewertung liest nur persistierte
+  Texte, Transkripte, OCR und Metadaten.
+  Keine Medien- oder Connector-Jobs.
+  Gedrosselt, damit Live-Verarbeitung
+  unabhängig weiterlaufen kann.
+end note
 
 note right of WAConnector
   Gemeinsamer Connector-SDK-Lebenszyklus:

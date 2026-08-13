@@ -96,17 +96,20 @@ type connectorLeaseHistoryView struct {
 }
 
 type aiProcessingHistoryView struct {
-	ID              string    `json:"id"`
-	MessageID       string    `json:"messageId"`
-	MediaType       string    `json:"mediaType"`
-	Status          string    `json:"status"`
-	Attempts        int       `json:"attempts"`
-	Model           string    `json:"model,omitempty"`
-	GroupSubject    string    `json:"groupSubject,omitempty"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
-	DurationSeconds int64     `json:"durationSeconds"`
-	Error           string    `json:"error,omitempty"`
+	ID           string    `json:"id"`
+	MessageID    string    `json:"messageId"`
+	MediaType    string    `json:"mediaType"`
+	Status       string    `json:"status"`
+	Attempts     int       `json:"attempts"`
+	Model        string    `json:"model,omitempty"`
+	GroupSubject string    `json:"groupSubject,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+	// DurationMilliseconds is active worker time only. Queueing, retry
+	// backoff and restart recovery time are intentionally excluded.
+	DurationMilliseconds int64  `json:"durationMilliseconds"`
+	DurationSeconds      int64  `json:"durationSeconds"`
+	Error                string `json:"error,omitempty"`
 }
 
 type jetStreamConsumerView struct {
@@ -155,17 +158,21 @@ type minioObservabilityView struct {
 }
 
 type adminObservabilityView struct {
-	GeneratedAt         time.Time                   `json:"generatedAt"`
-	Summary             observabilitySummary        `json:"summary"`
-	ProcessingLoops     []processingLoopView        `json:"processingLoops"`
-	Queues              []observabilityQueueView    `json:"queues"`
-	ConnectorPools      []connectorPoolView         `json:"connectorPools"`
-	ActiveLeases        []connectorLeaseView        `json:"activeLeases"`
-	RecentLeases        []connectorLeaseHistoryView `json:"recentLeases"`
-	AIProcessingHistory []aiProcessingHistoryView   `json:"aiProcessingHistory"`
-	NATS                natsObservabilityView       `json:"nats"`
-	MinIO               minioObservabilityView      `json:"minio"`
-	Streams             []jetStreamView             `json:"streams"`
+	GeneratedAt            time.Time                   `json:"generatedAt"`
+	Summary                observabilitySummary        `json:"summary"`
+	ProcessingLoops        []processingLoopView        `json:"processingLoops"`
+	Queues                 []observabilityQueueView    `json:"queues"`
+	ConnectorPools         []connectorPoolView         `json:"connectorPools"`
+	ActiveLeases           []connectorLeaseView        `json:"activeLeases"`
+	RecentLeases           []connectorLeaseHistoryView `json:"recentLeases"`
+	AIProcessingHistory    []aiProcessingHistoryView   `json:"aiProcessingHistory"`
+	AIProcessingPage       int                         `json:"aiProcessingPage"`
+	AIProcessingPageSize   int                         `json:"aiProcessingPageSize"`
+	AIProcessingTotal      int                         `json:"aiProcessingTotal"`
+	AIProcessingTotalPages int                         `json:"aiProcessingTotalPages"`
+	NATS                   natsObservabilityView       `json:"nats"`
+	MinIO                  minioObservabilityView      `json:"minio"`
+	Streams                []jetStreamView             `json:"streams"`
 }
 
 var observabilityConsumers = map[string][]string{
@@ -173,7 +180,8 @@ var observabilityConsumers = map[string][]string{
 		"WAGI_AI_MESSAGES", "WAGI_AI_TRANSCRIPTS", "WAGI_AI_IMAGES", "WAGI_AI_DOCUMENTS",
 		"WAGI_AI_REPLAY", "WAGI_MEDIA_OBJECTS", "WAGI_MEDIA_AUDIO",
 	},
-	"WAGI_DLQ": {},
+	"WAGI_DLQ":          {},
+	"WAGI_REASSESSMENT": {"WAGI_AI_REASSESSMENT"},
 }
 
 func (a *app) adminObservability(w http.ResponseWriter, r *http.Request) {
@@ -192,15 +200,19 @@ func (a *app) adminObservability(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) collectObservability(r *http.Request) (adminObservabilityView, error) {
 	ctx := r.Context()
+	aiPage := parseLearningPage(r.URL.Query().Get("aiPage"), 1)
+	aiPageSize := parseLearningPageSize(r.URL.Query().Get("aiPageSize"), 20)
 	view := adminObservabilityView{
-		GeneratedAt:         time.Now().UTC(),
-		ProcessingLoops:     make([]processingLoopView, 0),
-		Queues:              make([]observabilityQueueView, 0),
-		ConnectorPools:      make([]connectorPoolView, 0, 2),
-		ActiveLeases:        make([]connectorLeaseView, 0),
-		RecentLeases:        make([]connectorLeaseHistoryView, 0, 10),
-		AIProcessingHistory: make([]aiProcessingHistoryView, 0, 20),
-		Streams:             make([]jetStreamView, 0, len(observabilityConsumers)),
+		GeneratedAt:          time.Now().UTC(),
+		ProcessingLoops:      make([]processingLoopView, 0),
+		Queues:               make([]observabilityQueueView, 0),
+		ConnectorPools:       make([]connectorPoolView, 0, 2),
+		ActiveLeases:         make([]connectorLeaseView, 0),
+		RecentLeases:         make([]connectorLeaseHistoryView, 0, 10),
+		AIProcessingHistory:  make([]aiProcessingHistoryView, 0, aiPageSize),
+		AIProcessingPage:     aiPage,
+		AIProcessingPageSize: aiPageSize,
+		Streams:              make([]jetStreamView, 0, len(observabilityConsumers)),
 	}
 	view.Summary.GroupsByPlatform = make([]observabilityLabelCount, 0)
 	view.Summary.MessagesByKind = make([]observabilityLabelCount, 0)
@@ -381,26 +393,43 @@ func (a *app) collectObservability(r *http.Request) (adminObservabilityView, err
 	}
 	rows.Close()
 
+	if err := a.db.QueryRow(ctx, `SELECT COUNT(*) FROM ai_jobs aj JOIN messages m ON m.id=aj.message_id`).Scan(&view.AIProcessingTotal); err != nil {
+		return view, err
+	}
+	view.AIProcessingTotalPages = 0
+	if view.AIProcessingTotal > 0 {
+		view.AIProcessingTotalPages = (view.AIProcessingTotal + aiPageSize - 1) / aiPageSize
+		if aiPage > view.AIProcessingTotalPages {
+			aiPage = view.AIProcessingTotalPages
+			view.AIProcessingPage = aiPage
+		}
+	}
+	aiOffset := (aiPage - 1) * aiPageSize
 	rows, err = a.db.Query(ctx, `
 		SELECT aj.id::text, aj.message_id::text, COALESCE(m.kind,'unknown'), aj.status, aj.attempts,
 		       COALESCE(a.model,''), COALESCE(g.subject,''), aj.created_at, aj.updated_at,
-		       GREATEST(0, EXTRACT(EPOCH FROM ((CASE WHEN aj.status IN ('completed','failed') THEN aj.updated_at ELSE NOW() END)-aj.created_at))::bigint),
+		       CASE
+		         WHEN aj.status='processing' AND aj.processing_started_at IS NOT NULL
+		           THEN aj.processing_duration_ms + GREATEST(0, EXTRACT(EPOCH FROM (NOW()-aj.processing_started_at))*1000)::bigint
+		         ELSE aj.processing_duration_ms
+		       END,
 		       COALESCE(aj.error,'')
 		FROM ai_jobs aj
 		JOIN messages m ON m.id=aj.message_id
 		LEFT JOIN message_analyses a ON a.message_id=aj.message_id
 		LEFT JOIN wa_groups g ON g.id=m.group_id
 		ORDER BY aj.updated_at DESC, aj.created_at DESC
-		LIMIT 20`)
+		LIMIT $1 OFFSET $2`, aiPageSize, aiOffset)
 	if err != nil {
 		return view, err
 	}
 	for rows.Next() {
 		var item aiProcessingHistoryView
-		if err := rows.Scan(&item.ID, &item.MessageID, &item.MediaType, &item.Status, &item.Attempts, &item.Model, &item.GroupSubject, &item.CreatedAt, &item.UpdatedAt, &item.DurationSeconds, &item.Error); err != nil {
+		if err := rows.Scan(&item.ID, &item.MessageID, &item.MediaType, &item.Status, &item.Attempts, &item.Model, &item.GroupSubject, &item.CreatedAt, &item.UpdatedAt, &item.DurationMilliseconds, &item.Error); err != nil {
 			rows.Close()
 			return view, err
 		}
+		item.DurationSeconds = item.DurationMilliseconds / 1000
 		view.AIProcessingHistory = append(view.AIProcessingHistory, item)
 	}
 	rows.Close()

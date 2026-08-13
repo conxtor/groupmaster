@@ -13,7 +13,9 @@ NATS_URL = os.getenv("NATS_URL", "nats://nats:4222")
 STREAMS = [
     StreamConfig(
         name="WAGI_EVENTS",
-        subjects=["wa.>", "media.>", "ai.>", "connector.>", "replay.>"],
+        # Keep reassessment traffic out of the live event stream. The narrow
+        # AI subjects also prevent overlap with WAGI_REASSESSMENT.
+        subjects=["wa.>", "media.>", "ai.messages.>", "ai.feedback.>", "connector.>", "replay.>"],
         storage=StorageType.FILE,
         retention=RetentionPolicy.LIMITS,
         max_msgs=-1,
@@ -28,6 +30,15 @@ STREAMS = [
         max_msgs=-1,
         max_age=int(os.getenv("NATS_DLQ_MAX_AGE_DAYS", "90")) * 24 * 60 * 60,
     ),
+    StreamConfig(
+        name="WAGI_REASSESSMENT",
+        subjects=["ai.reassessment.>"],
+        storage=StorageType.FILE,
+        retention=RetentionPolicy.LIMITS,
+        max_msgs=-1,
+        max_age=int(os.getenv("NATS_REASSESSMENT_MAX_AGE_DAYS", "30")) * 24 * 60 * 60,
+        duplicate_window=10 * 60,
+    ),
 ]
 
 CONSUMERS = [
@@ -38,6 +49,7 @@ CONSUMERS = [
     ("WAGI_EVENTS", "WAGI_AI_REPLAY", "replay.requested"),
     ("WAGI_EVENTS", "WAGI_MEDIA_OBJECTS", "media.objects.requested"),
     ("WAGI_EVENTS", "WAGI_MEDIA_AUDIO", "media.audio.requested"),
+    ("WAGI_REASSESSMENT", "WAGI_AI_REASSESSMENT", "ai.reassessment.requested"),
 ]
 
 
@@ -54,12 +66,15 @@ async def provision(js):
             else:
                 raise
     for stream, durable, subject in CONSUMERS:
+        ack_wait = 5 * 60
+        if durable == "WAGI_AI_REASSESSMENT":
+            ack_wait = int(os.getenv("NATS_REASSESSMENT_ACK_WAIT_SECONDS", "86400"))
         config = ConsumerConfig(
             durable_name=durable,
             filter_subject=subject,
             deliver_subject=f"_INBOX.wagi.{durable.lower()}",
             ack_policy=AckPolicy.EXPLICIT,
-            ack_wait=5 * 60,
+            ack_wait=ack_wait,
             max_deliver=int(os.getenv("NATS_MAX_DELIVERIES", "5")),
         )
         try:

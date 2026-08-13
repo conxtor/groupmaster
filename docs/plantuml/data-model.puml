@@ -184,6 +184,8 @@ entity ai_jobs {
   status : text
   attempts : int
   error : text
+  processing_started_at : timestamptz
+  processing_duration_ms : bigint
 }
 
 entity message_analyses {
@@ -296,6 +298,30 @@ entity replay_jobs {
   processed_count : int
 }
 
+entity ai_reassessment_jobs {
+  * id : uuid <<PK>>
+  --
+  requested_by : uuid <<FK>>
+  status : queued | running | completed | failed
+  total_count : int
+  processed_count : int
+  failed_count : int
+  skipped_count : int
+  created_at/updated_at : timestamptz
+}
+
+entity ai_learning_term_history {
+  * id : uuid <<PK>>
+  --
+  term_id : uuid <<FK>>
+  group_id : text <<FK>>
+  language/category : text
+  term : text
+  event_type : created | feedback | inferred | admin_update | deleted
+  weight_delta : numeric
+  occurred_at : timestamptz
+}
+
 app_users ||--o{ user_sessions
 app_users ||--o{ auth_email_tokens
 app_users ||--o{ user_roles
@@ -328,6 +354,9 @@ knowledge_items ||--o{ knowledge_items : parent/detail
 messages ||--o{ ai_feedback
 app_users ||--o{ ai_feedback
 app_users ||--o{ replay_jobs
+app_users ||--o{ ai_reassessment_jobs
+ai_learning_terms ||--o{ ai_learning_term_history
+wa_groups ||--o{ ai_learning_term_history
 
 note "PostGIS aktiviert in PostgreSQL für Ortsdaten.\npgvector wird primär für knowledge_items.embedding verwendet.\nNATS JetStream und MinIO sind Laufzeitdienste, keine relationalen Tabellen." as N1
 N1 .. wa_groups

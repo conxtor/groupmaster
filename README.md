@@ -414,6 +414,19 @@ Wortgewichte für Relevanz, Events und Orte. Die gruppenspezifischen Gewichte
 werden zusammen mit den globalen Werten geladen und beeinflussen dadurch nur
 die jeweilige Gruppe stärker. Administratoren verwalten diese Begriffe,
 Ausschlusswörter und Knowledge-Schlüsselwörter unter `/admin/ai-learning`.
+Die Seite bietet eine serverseitige Volltextsuche über Begriff, Thema, Gruppe,
+Plattform, Quelle und Kategorie sowie eine kompakte Seitenteilung. Jede Zeile
+zeigt zusätzlich Gruppenkontext, Plattform, Chat-Typ, Lernquelle, Feedbackzähler
+und Änderungsdatum.
+Die Übersichtsseite zeigt außerdem die Anzahl je Kategorie, Metriken für 24
+Stunden, 7 Tage und 1 Monat sowie eine einfache Zeitgrafik. Relevanz, Events,
+Orte, Knowledge-Schlüsselwörter und Ausschlusswörter haben jeweils eigene
+Unterseiten mit den für die Kategorie relevanten Eingabefeldern. Dort können
+mehrere Begriffe markiert und gemeinsam aktiviert, deaktiviert oder gelöscht
+werden.
+Die Zeitgrafik ist als gestapeltes Balkendiagramm ausgeführt. Über die Auswahl
+„Letzte 24 Stunden“, „Letzte 7 Tage“ oder „Letzter Monat“ kann der Zeitraum
+gewechselt werden; die Farblegende ordnet die Segmente den fünf Kategorien zu.
 Die Migration `infra/migrations/014_relevance_learning.sql` legt das Modell und
 die initialen, aus der bisherigen Heuristik übernommenen Begriffe an.
 `infra/migrations/015_more_exclusion_words.sql` ergänzt die globalen
@@ -621,11 +634,22 @@ Bootstrap-Administrator wird beim ersten erfolgreichen API-Start angelegt.
 - `GET/POST /api/v1/connectors/accounts` für eigene persistente Connector-Konten
 - `GET /api/v1/admin/users` und `PATCH /api/v1/admin/users/{id}` für Administratoren
 - `GET/POST/PATCH/DELETE /api/v1/admin/ai-learning[...]` für die sprach- und gruppenbezogene Lernmodellverwaltung
+- `GET /api/v1/admin/ai-learning?language=de&search=...&category=...&groupId=...&page=1&pageSize=25` für Suche und Paginierung
+- `GET /api/v1/admin/ai-learning/summary?language=de` für Kategorieanzahl und Lernmetriken
+- `POST /api/v1/admin/ai-learning/bulk` mit `{ "ids": ["..."], "action": "enable|disable|delete" }` für Mehrfachaktionen
+- `GET/POST /api/v1/admin/ai-learning/reassessment` für Status und Start der vollständigen Neubewertung
 - Admin-Betriebsübersicht unter `/admin`; die Benutzerverwaltung liegt separat unter `/admin/users`, das Lernmodell unter `/admin/ai-learning`.
+- `GET /api/v1/admin/observability?aiPage=1&aiPageSize=20` liefert die paginierte KI-Verarbeitungshistorie. Die dort angezeigte Dauer ist ausschließlich aktive Worker-Zeit; Warteschlange, Retry-Backoff und Neustartwartezeit werden nicht eingerechnet.
 - `GET /healthz` und `GET /readyz`
 - `GET /api/v1/groups`
 - `PUT /api/v1/groups/{groupId}/select` mit `{ "selected": true|false }`
 - Die Gruppenverwaltung erfolgt ausschließlich nutzerbezogen unter `/groups`; Administratoren verwalten dort keine Gruppenrechte mehr.
+
+Das KI-Lernmodell lernt auch bei der laufenden Verarbeitung neuer Nachrichten
+weiter. Automatisch erkannte neue Begriffe werden gruppen- und sprachbezogen
+mit kleinen Gewichten gespeichert. Bereits bekannte Begriffe derselben
+Nachricht wirken als konservativ gedeckelte, gewichtete Anker; Benutzerfeedback
+bleibt stärker. Ausschlusswörter werden nicht automatisch gelernt.
 - `GET /api/v1/messages?limit=100` (alle Nachrichten) oder mit
   `&relevant=true` (nur relevante Nachrichten)
 - `GET /api/v1/knowledge` oder `GET /api/v1/knowledge?groupId=<selected-group>`
@@ -641,10 +665,20 @@ bereits gespeicherte Medien werden erneut in die Analyse-/Medienpipeline
 eingereiht; `to` ist der exklusive Endzeitpunkt. Der Fortschritt ist über
 `GET /api/v1/replays` und die Seite „Replay / Backfill“ sichtbar.
 
+Die Funktion „Alle Nachrichten neu bewerten“ erstellt einen Job für alle
+gespeicherten Nachrichten. Der Job liest ausschließlich bereits gespeicherte
+Nachrichtentexte, Transkripte, OCR-Texte und Metadaten. Connectoren,
+Medien-Downloads und whisper.cpp werden dabei nicht aufgerufen. Die Anfrage
+läuft im separaten JetStream-Stream `WAGI_REASSESSMENT` mit dem Durable
+Consumer `WAGI_AI_REASSESSMENT`; dadurch bleibt der Live-Stream
+`WAGI_EVENTS` für neue Nachrichten und Medien getrennt. Ein konfigurierbarer
+Abstand zwischen den Nachrichten verhindert zusätzlich, dass die laufende
+Analyse unnötig verdrängt wird.
+
 ### Verarbeitung, Wiederanlauf und Dokumente
 
 Der NATS-Provisioner legt den persistenten JetStream-Stream `WAGI_EVENTS`, den
-separaten `WAGI_DLQ`-Stream sowie die expliziten Durable Consumer für Nachrichten,
+separaten `WAGI_REASSESSMENT`- und `WAGI_DLQ`-Stream sowie die expliziten Durable Consumer für Nachrichten,
 Audio, Bilder, Dokumente und Replay an. Die Consumer verwenden explizite ACKs,
 konfigurierbare maximale Zustellungen und exponentielles Backoff. Nach dem
 letzten Versuch wird das Ereignis in `event_failures` protokolliert, in `dlq.*`
@@ -653,9 +687,16 @@ Pipeline nicht blockiert.
 
 Die Worker schreiben vor der Verarbeitung einen Inbox-Eintrag in
 `event_inbox`. Dadurch werden doppelte JetStream-Zustellungen sicher erkannt.
+Die Migration `017_ai_learning_history.sql` speichert zusätzlich jede
+administrative, inferierte und Feedback-basierte Lernaktion in
+`ai_learning_term_history`, damit die Kategorien im Zeitverlauf ausgewertet
+werden können.
 Audio- und KI-Jobs werden in `audio_jobs` bzw. `ai_jobs` mit Status, Versuchen,
 Fehler und nächstem Versuch gespeichert. Nach einem Neustart werden verwaiste
 `processing`-Jobs zurückgesetzt und automatisch erneut eingereiht.
+`infra/migrations/018_ai_processing_duration.sql` ergänzt für `ai_jobs` eine
+separate kumulierte aktive Verarbeitungszeit. Dadurch bleibt Wartezeit in der
+Queue und Retry-Backoff aus der Laufzeitmetrik der Admin-Seite heraus.
 
 PDF-, DOCX-, TXT-, Markdown-, CSV-, JSON-, XML- und HTML-Dateien werden lokal
 analysiert. PDF-Text wird mit `pdftotext` extrahiert; wenn kein Text vorhanden

@@ -59,6 +59,13 @@ AI_EVENT_WINDOW_HOURS = max(2.0, float(os.getenv("AI_EVENT_WINDOW_HOURS", "36"))
 AI_EVENT_MIN_CONFIDENCE = min(0.99, max(0.4, float(os.getenv("AI_EVENT_MIN_CONFIDENCE", "0.7"))))
 AI_DOCUMENT_ANALYSIS_MAX_CHARS = max(2000, int(os.getenv("AI_DOCUMENT_ANALYSIS_MAX_CHARS", "12000")))
 AI_NATS_PAYLOAD_LIMIT_BYTES = max(64 * 1024, min(900000, int(os.getenv("AI_NATS_PAYLOAD_LIMIT_BYTES", "900000"))))
+# Automatic learning stays deliberately weaker than explicit user feedback.
+# A message can add a small baseline signal, while already-known terms in the
+# same group/language provide only a capped, weighted context bonus.
+AI_LEARNING_INFERENCE_BASE_DELTA = max(0.0005, min(0.02, float(os.getenv("AI_LEARNING_INFERENCE_BASE_DELTA", "0.003"))))
+AI_LEARNING_CONTEXT_BONUS = max(0.0, min(0.02, float(os.getenv("AI_LEARNING_CONTEXT_BONUS", "0.009"))))
+AI_LEARNING_MAX_DELTA = max(AI_LEARNING_INFERENCE_BASE_DELTA, min(0.03, float(os.getenv("AI_LEARNING_MAX_DELTA", "0.015"))))
+AI_LEARNING_MAX_TERMS_PER_SIGNAL = max(1, min(16, int(os.getenv("AI_LEARNING_MAX_TERMS_PER_SIGNAL", "8"))))
 
 LANGUAGE_MARKERS = {
     # Keep language detection anchored to content-bearing terms. Function
@@ -856,6 +863,54 @@ def learning_weight(learning: dict | None, category: str, text: str, fallback: t
     return float(term_hits(text, fallback))
 
 
+def learning_context_evidence(learning: dict | None, category: str, text: str, topic_key: str | None = None) -> float:
+    """Return conservative evidence from already-known terms in this text.
+
+    Relevance weights use a smaller normalization range because the seeded
+    terms are around 0.12 and explicit feedback is around 0.30. Event/place
+    weights use 1.0 as the strong system-term reference. Keyword evidence is
+    intentionally based on the number of matching terms, not raw weights,
+    because keyword terms are scoped to a topic.
+    """
+    if not learning:
+        return 0.0
+    if category == "keyword":
+        topic = (learning.get("keyword") or {}).get(topic_key or "", {})
+        known = [*topic.get("keywords", []), *topic.get("detail", [])]
+        hits = term_hits(text, tuple(str(term) for term in known))
+        return min(1.0, hits * 0.45)
+
+    values = learning.get(category) or {}
+    if not isinstance(values, dict):
+        return 0.0
+    matches = [float(weight) for term, weight in values.items() if has_term(text, str(term))]
+    if not matches:
+        return 0.0
+    positive = sum(max(weight, 0.0) for weight in matches)
+    negative = sum(max(-weight, 0.0) for weight in matches)
+    if category == "relevance":
+        evidence = min(1.0, positive / 0.24)
+        # Negative feedback suppresses inheritance without making one
+        # negative term erase all independent evidence.
+        evidence *= max(0.0, 1.0 - min(1.0, negative / 0.30) * 0.75)
+        return evidence
+    return min(1.0, positive)
+
+
+def learning_known_terms(learning: dict | None, category: str, topic_key: str | None = None) -> set[str]:
+    if not learning:
+        return set()
+    if category == "keyword":
+        topic = (learning.get("keyword") or {}).get(topic_key or "", {})
+        return {str(term).casefold() for term in [*topic.get("keywords", []), *topic.get("detail", [])]}
+    values = learning.get(category) or {}
+    if isinstance(values, dict):
+        return {str(term).casefold() for term in values}
+    if isinstance(values, (list, tuple, set)):
+        return {str(term).casefold() for term in values}
+    return set()
+
+
 def is_informative_text(text: str, stopwords: set[str] | None = None) -> bool:
     words = re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", text.casefold())
     content_words = [word for word in words if len(word) >= 3 and word not in (stopwords or set())]
@@ -1468,39 +1523,73 @@ def inferred_learning_tokens(text: str, stopwords: set[str]) -> list[str]:
 async def record_inferred_learning(db, group_id: str | None, language: str, text: str, analysis: Analysis, learning: dict):
     """Persist weak, explainable signals from detected results.
 
-    Explicit user feedback is stronger and is written by the API. Inferred
-    rows are deliberately small so a single heuristic result cannot dominate
-    a group profile.
+    Explicit user feedback is stronger and is written by the API. New
+    messages still create group-local terms, but the inferred delta is small.
+    Existing terms in the same message act as conservative anchors: their
+    current category weight determines a capped context bonus for *new* terms.
+    This prevents one high-signal message from making every word important.
     """
     if not group_id:
         return
     stopwords = set(learning_terms_for(learning, "exclusion"))
     tokens = inferred_learning_tokens(text, stopwords)
-    signals: list[tuple[str, float]] = []
+
+    # One signal is kept per category/topic. If several detected items point
+    # to the same scope, only the strongest conservative delta is applied.
+    signals: dict[tuple[str, str | None], float] = {}
+
+    def add_signal(category: str, base_delta: float, topic_key: str | None = None):
+        evidence = learning_context_evidence(learning, category, text, topic_key)
+        delta = min(AI_LEARNING_MAX_DELTA, base_delta + AI_LEARNING_CONTEXT_BONUS * evidence)
+        key = (category, topic_key)
+        signals[key] = max(signals.get(key, 0.0), delta)
+
     if analysis.relevanceLevel == "high":
-        signals.append(("relevance", 0.025))
+        add_signal("relevance", AI_LEARNING_INFERENCE_BASE_DELTA * 1.5)
     elif analysis.relevanceLevel == "medium":
-        signals.append(("relevance", 0.012))
+        add_signal("relevance", AI_LEARNING_INFERENCE_BASE_DELTA)
     if analysis.events:
-        signals.append(("event", 0.025))
+        add_signal("event", AI_LEARNING_INFERENCE_BASE_DELTA)
     if analysis.places:
-        signals.append(("place", 0.025))
-    for category, delta in signals:
-        for term in tokens:
+        add_signal("place", AI_LEARNING_INFERENCE_BASE_DELTA)
+    for item in analysis.knowledge:
+        topic_key = str(item.topicKey or "").strip()
+        if topic_key and item.confidence >= 0.72:
+            add_signal("keyword", AI_LEARNING_INFERENCE_BASE_DELTA * 0.75, topic_key)
+
+    for (category, topic_key), delta in signals.items():
+        # Do not repeatedly increase an already-known term merely because it
+        # was seen again. The existing term is the anchor; only unseen terms
+        # can be inferred from it in this pass.
+        known = learning_known_terms(learning, category, topic_key)
+        candidates = [term for term in tokens if term not in known]
+        for term in candidates[:AI_LEARNING_MAX_TERMS_PER_SIGNAL]:
+            topic_value = topic_key or ""
             row = await db.fetchrow(
-                """INSERT INTO ai_learning_terms (group_id, language, category, term, weight, source, positive_count)
-                   VALUES ($1,$2,$3,$4,$5,'inferred',1)
+                """INSERT INTO ai_learning_terms
+                          (group_id, language, category, topic_key, term, weight, source, positive_count)
+                   VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,'inferred',1)
                    ON CONFLICT DO NOTHING RETURNING id""",
-                group_id, language, category, term, delta,
+                group_id, language, category, topic_value, term, delta,
             )
-            if row:
-                continue
+            if not row:
+                await db.execute(
+                    """UPDATE ai_learning_terms
+                       SET weight=GREATEST(-10, LEAST(10, weight+$6)), positive_count=positive_count+1, updated_at=NOW()
+                       WHERE group_id=$1 AND language=$2 AND category=$3
+                         AND topic_key IS NOT DISTINCT FROM NULLIF($4,'')
+                         AND lower(term)=lower($5) AND source <> 'admin'""",
+                    group_id, language, category, topic_value, term, delta,
+                )
             await db.execute(
-                """UPDATE ai_learning_terms
-                   SET weight=GREATEST(-10, LEAST(10, weight+$5)), positive_count=positive_count+1, updated_at=NOW()
-                   WHERE group_id=$1 AND language=$2 AND category=$3 AND lower(term)=lower($4)
-                     AND source <> 'admin'""",
-                group_id, language, category, term, delta,
+                """INSERT INTO ai_learning_term_history
+                       (term_id, group_id, language, category, term, event_type, weight_delta, source)
+                   SELECT id, group_id, language, category, term, 'inferred', $6, 'inferred'
+                   FROM ai_learning_terms
+                   WHERE group_id=$1 AND language=$2 AND category=$3
+                     AND topic_key IS NOT DISTINCT FROM NULLIF($4,'')
+                     AND lower(term)=lower($5)""",
+                group_id, language, category, topic_value, term, delta,
             )
 
 
@@ -1544,6 +1633,7 @@ async def mark_knowledge_rebuild_complete(db):
 
 AI_MAX_RETRIES = max(1, int(os.getenv("AI_MAX_RETRIES", "5")))
 AI_STALE_PROCESSING_SECONDS = max(60, int(os.getenv("AI_STALE_PROCESSING_SECONDS", "900")))
+AI_REASSESSMENT_DELAY_SECONDS = max(0.0, float(os.getenv("AI_REASSESSMENT_DELAY_MS", "100")) / 1000)
 
 
 async def claim_ai_job(db, message_id: str, force: bool = False) -> bool:
@@ -1553,13 +1643,15 @@ async def claim_ai_job(db, message_id: str, force: bool = False) -> bool:
            ON CONFLICT (message_id) DO UPDATE SET
              status=CASE WHEN $2 AND ai_jobs.status <> 'processing' THEN 'queued' ELSE ai_jobs.status END,
              next_attempt_at=CASE WHEN $2 AND ai_jobs.status <> 'processing' THEN NOW() ELSE ai_jobs.next_attempt_at END,
+             processing_started_at=CASE WHEN $2 AND ai_jobs.status <> 'processing' THEN NULL ELSE ai_jobs.processing_started_at END,
+             processing_duration_ms=CASE WHEN $2 AND ai_jobs.status <> 'processing' THEN 0 ELSE ai_jobs.processing_duration_ms END,
              error=CASE WHEN $2 THEN NULL ELSE ai_jobs.error END,
              updated_at=NOW()""",
         message_id, force,
     )
     row = await db.fetchrow(
         """UPDATE ai_jobs SET status='processing', attempts=attempts+1,
-                 next_attempt_at=NULL, updated_at=NOW()
+                 next_attempt_at=NULL, processing_started_at=NOW(), updated_at=NOW()
            WHERE message_id=$1 AND status='queued'
              AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
            RETURNING id""",
@@ -1570,7 +1662,14 @@ async def claim_ai_job(db, message_id: str, force: bool = False) -> bool:
 
 async def complete_ai_job(db, message_id: str):
     await db.execute(
-        "UPDATE ai_jobs SET status='completed', error=NULL, next_attempt_at=NULL, updated_at=NOW() WHERE message_id=$1",
+        """UPDATE ai_jobs
+           SET status='completed', error=NULL, next_attempt_at=NULL,
+               processing_duration_ms=processing_duration_ms + CASE
+                 WHEN processing_started_at IS NULL THEN 0
+                 ELSE GREATEST(0, EXTRACT(EPOCH FROM (NOW()-processing_started_at))*1000)::bigint
+               END,
+               processing_started_at=NULL, updated_at=NOW()
+           WHERE message_id=$1""",
         message_id,
     )
 
@@ -1581,6 +1680,11 @@ async def fail_ai_job(db, message_id: str, error: Exception):
            SET status=CASE WHEN attempts < $2 THEN 'queued' ELSE 'failed' END,
                error=$3,
                next_attempt_at=CASE WHEN attempts < $2 THEN NOW() + INTERVAL '30 seconds' ELSE NULL END,
+               processing_duration_ms=processing_duration_ms + CASE
+                 WHEN processing_started_at IS NULL THEN 0
+                 ELSE GREATEST(0, EXTRACT(EPOCH FROM (NOW()-processing_started_at))*1000)::bigint
+               END,
+               processing_started_at=NULL,
                updated_at=NOW()
            WHERE message_id=$1""",
         message_id, AI_MAX_RETRIES, str(error)[:4000],
@@ -1654,9 +1758,16 @@ async def main():
         await js.stream_info("WAGI_EVENTS")
     except Exception:
         try:
-            await js.add_stream(name="WAGI_EVENTS", subjects=["wa.>", "media.>", "ai.>", "connector.>", "replay.>"])
+            await js.add_stream(name="WAGI_EVENTS", subjects=["wa.>", "media.>", "ai.messages.>", "ai.feedback.>", "connector.>", "replay.>"])
         except Exception:
             await js.stream_info("WAGI_EVENTS")
+    try:
+        await js.stream_info("WAGI_REASSESSMENT")
+    except Exception:
+        try:
+            await js.add_stream(name="WAGI_REASSESSMENT", subjects=["ai.reassessment.>"])
+        except Exception:
+            await js.stream_info("WAGI_REASSESSMENT")
 
     async def analyze_message(payload: dict):
         data = payload.get("data", payload)
@@ -1710,7 +1821,8 @@ async def main():
         analysis.knowledge = await verify_knowledge_items(hermes_reviewer, text, group_language, analysis.knowledge)
         feedback = await load_ai_feedback(db, group_id, message_id)
         analysis, rejected_knowledge = apply_feedback_overrides(analysis, feedback, group_language)
-        await record_inferred_learning(db, group_id, group_language, text, analysis, learning)
+        if not data.get("skipLearning"):
+            await record_inferred_learning(db, group_id, group_language, text, analysis, learning)
         await remove_rejected_knowledge(db, group_id, rejected_knowledge)
         if analysis.knowledge and hermes_reviewer.enabled:
             analysis.provenance.append(Provenance(field="knowledge", sourceMessageIds=[message_id], confidence=max(item.confidence for item in analysis.knowledge)))
@@ -1884,6 +1996,99 @@ async def main():
                 await db.execute("UPDATE replay_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", replay_id, str(error)[:4000])
             await retry_or_dead_letter(db, js, message, payload, "ai.replays", error)
 
+    async def on_reassessment(message):
+        """Re-score persisted messages without touching connector/media queues."""
+        payload = {}
+        job_id = None
+        try:
+            payload = json.loads(message.data)
+            data = payload.get("data", payload)
+            job_id = str(data.get("reassessmentId") or "")
+            event_id = payload_id(payload, message.data)
+            if not job_id:
+                raise ValueError("reassessmentId missing")
+            if not await claim_event(db, "ai.reassessment", event_id, message.subject, payload):
+                await message.ack()
+                return
+            await db.execute(
+                """UPDATE ai_reassessment_jobs
+                   SET status='running', started_at=COALESCE(started_at,NOW()), updated_at=NOW(), error=NULL
+                   WHERE id=$1::uuid AND status IN ('queued','running')""",
+                job_id,
+            )
+            rows = await db.fetch(
+                """SELECT m.id::text AS "messageId", m.group_id AS "groupId",
+                          COALESCE(m.text,'') AS text,
+                          COALESCE(aj.transcript,'') AS transcript,
+                          COALESCE(mo.ocr_text,'') AS "ocrText"
+                   FROM messages m
+                   JOIN wa_groups g ON g.id=m.group_id
+                   LEFT JOIN LATERAL (
+                     SELECT transcript FROM audio_jobs
+                     WHERE message_id=m.id AND transcript IS NOT NULL AND btrim(transcript) <> ''
+                     ORDER BY updated_at DESC LIMIT 1
+                   ) aj ON TRUE
+                   LEFT JOIN LATERAL (
+                     SELECT string_agg(ocr_text, E'\\n' ORDER BY updated_at DESC) AS ocr_text
+                     FROM media_objects
+                     WHERE message_id=m.id AND ocr_text IS NOT NULL AND btrim(ocr_text) <> ''
+                   ) mo ON TRUE
+                   WHERE TRUE
+                   ORDER BY m.received_at ASC""",
+            )
+            await db.execute("UPDATE ai_reassessment_jobs SET total_count=$2, updated_at=NOW() WHERE id=$1::uuid", job_id, len(rows))
+            processed = 0
+            failed = 0
+            skipped = 0
+            for row in rows:
+                message_id = str(row["messageId"])
+                base_text = str(row["text"] or "").strip()
+                transcript = str(row["transcript"] or "").strip()
+                ocr_text = str(row["ocrText"] or "").strip()
+                parts = [base_text]
+                if transcript and transcript not in base_text:
+                    parts.append("[Transkript]\n" + transcript)
+                if ocr_text and ocr_text not in base_text:
+                    parts.append("[Gespeicherter Medieninhalt]\n" + ocr_text)
+                reassessment_text = "\n".join(part for part in parts if part).strip()
+                try:
+                    did_process = await process_analysis(
+                        db,
+                        analyze_message,
+                        {"data": {"messageId": message_id, "groupId": row["groupId"], "text": reassessment_text, "force": True, "skipLearning": True}},
+                        "reassessment",
+                        force=True,
+                    )
+                    if did_process:
+                        processed += 1
+                    else:
+                        skipped += 1
+                except Exception:
+                    failed += 1
+                    log.exception("reassessment item failed: %s", message_id)
+                await db.execute(
+                    """UPDATE ai_reassessment_jobs SET processed_count=$2, failed_count=$3, skipped_count=$4, updated_at=NOW()
+                       WHERE id=$1::uuid""",
+                    job_id, processed, failed, skipped,
+                )
+                if AI_REASSESSMENT_DELAY_SECONDS:
+                    await asyncio.sleep(AI_REASSESSMENT_DELAY_SECONDS)
+            await db.execute(
+                """UPDATE ai_reassessment_jobs
+                   SET status=CASE WHEN failed_count > 0 AND processed_count=0 THEN 'failed' ELSE 'completed' END,
+                       completed_at=NOW(), updated_at=NOW()
+                   WHERE id=$1::uuid""",
+                job_id,
+            )
+            await mark_processed(db, "ai.reassessment", event_id)
+            await message.ack()
+            log.info("AI reassessment %s completed: processed=%d failed=%d skipped=%d", job_id, processed, failed, skipped)
+        except Exception as error:
+            log.exception("AI reassessment failed")
+            if job_id:
+                await db.execute("UPDATE ai_reassessment_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", job_id, str(error)[:4000])
+            await retry_or_dead_letter(db, js, message, payload, "ai.reassessment", error)
+
     async def backfill_existing_knowledge(force: bool = False):
         if force:
             rows = await db.fetch(
@@ -1915,6 +2120,11 @@ async def main():
                        SET status=CASE WHEN attempts < $1 THEN 'queued' ELSE 'failed' END,
                            error=COALESCE(error, 'AI worker restarted while processing'),
                            next_attempt_at=CASE WHEN attempts < $1 THEN NOW() ELSE NULL END,
+                           processing_duration_ms=processing_duration_ms + CASE
+                             WHEN processing_started_at IS NULL THEN 0
+                             ELSE LEAST($2 * 1000, GREATEST(0, EXTRACT(EPOCH FROM (NOW()-processing_started_at))*1000))::bigint
+                           END,
+                           processing_started_at=NULL,
                            updated_at=NOW()
                        WHERE status='processing' AND updated_at < NOW() - ($2 * INTERVAL '1 second')""",
                     AI_MAX_RETRIES, AI_STALE_PROCESSING_SECONDS,
@@ -1944,6 +2154,7 @@ async def main():
     await js.subscribe("media.image.analyzed", durable="WAGI_AI_IMAGES", stream="WAGI_EVENTS", cb=on_image)
     await js.subscribe("media.document.analyzed", durable="WAGI_AI_DOCUMENTS", stream="WAGI_EVENTS", cb=on_document)
     await js.subscribe("replay.requested", durable="WAGI_AI_REPLAY", stream="WAGI_EVENTS", cb=on_replay)
+    await js.subscribe("ai.reassessment.requested", durable="WAGI_AI_REASSESSMENT", stream="WAGI_REASSESSMENT", cb=on_reassessment)
 
     async def run_knowledge_startup():
         """Refresh/rebuild the knowledge base without blocking live ingestion."""
@@ -1958,7 +2169,7 @@ async def main():
 
     asyncio.create_task(run_knowledge_startup())
     asyncio.create_task(recover_ai_jobs())
-    log.info("AI worker listening with durable consumers for messages, audio, images, documents, replay and feedback (provider=%s, prompt=%s)", AI_PROVIDER, PROMPT_VERSION)
+    log.info("AI worker listening with durable consumers for messages, audio, images, documents, replay, feedback and isolated reassessment (provider=%s, prompt=%s)", AI_PROVIDER, PROMPT_VERSION)
     await asyncio.Event().wait()
 
 

@@ -63,9 +63,25 @@ else (nein)
 endif
 
 :JSON-Schema, Provenance und\nKonfidenzen validieren;
-:message_analyses, ai_jobs,\nKnowledge-Hierarchie und Graph speichern;
+:message_analyses, ai_jobs, Knowledge-Hierarchie\nund Graph sowie aktive Verarbeitungsdauer speichern;
+:Queue-/Retry-Zeit getrennt von der\naktiven Worker-Zeit beobachten;
 :Relevanz-, Event-, Orts- und\nKnowledge-Feedback in ai_learning_terms lernen;
 :ai.messages.analyzed publizieren;
+
+fork
+  :Administrator startet Neubewertung;
+  :ai.reassessment.requested in
+  WAGI_REASSESSMENT lesen;
+  :Gespeicherte Texte, Transkripte,
+  OCR und Metadaten laden;
+  :Kaskade mit aktuellen Lernbegriffen
+  erneut ausführen;
+  :message_analyses und Knowledge
+  aktualisieren, keine Medienjobs;
+fork again
+  :Live-Nachrichten werden über
+  WAGI_EVENTS unabhängig verarbeitet;
+end fork;
 
 fork
   :Web/API liest Dashboard, Events\nund Knowledge Base aus PostgreSQL;

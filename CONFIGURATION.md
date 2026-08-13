@@ -145,6 +145,8 @@ DMARC in Mailcow bzw. DNS einrichten.
 | `NATS_URL` | `nats://nats:4222` | NATS-/JetStream-Verbindung. |
 | `NATS_EVENT_MAX_AGE_DAYS` | 30 | Event-Aufbewahrung. |
 | `NATS_DLQ_MAX_AGE_DAYS` | 90 | DLQ-Aufbewahrung. |
+| `NATS_REASSESSMENT_MAX_AGE_DAYS` | 30 | Aufbewahrung des separaten Neubewertungs-Streams. |
+| `NATS_REASSESSMENT_ACK_WAIT_SECONDS` | 86400 | Ack-Zeitfenster für lange Neubewertungsjobs. |
 | `NATS_MAX_DELIVERIES` | 5 | Zustellversuche vor DLQ. |
 | `NATS_RETRY_BASE_SECONDS` | 5 | Basis-Backoff. |
 | `NATS_RETRY_MAX_SECONDS` | 300 | Backoff-Obergrenze. |
@@ -258,8 +260,29 @@ keine Bereinigung aus.
 | `AI_HERMES_FAILURE_COOLDOWN_SECONDS` | 60 | Pause nach Fehlern. |
 | `AI_HERMES_REVIEW_ALL`, `AI_HERMES_MIN_CONFIDENCE` | false / 0.78 | Prüfumfang und Konfidenz. |
 | `AI_MAX_RETRIES`, `AI_STALE_PROCESSING_SECONDS` | 5 / 900 | KI-Retry und Recovery. |
+| `AI_REASSESSMENT_DELAY_MS` | 100 | Pause zwischen Neubewertungsnachrichten, damit Live-Verarbeitung Vorrang behält. |
 | `AI_DOCUMENT_ANALYSIS_MAX_CHARS` | 12000 | Dokumentkontext. |
 | `AI_NATS_PAYLOAD_LIMIT_BYTES` | 900000 | Analyse-Payload. |
+| `AI_LEARNING_INFERENCE_BASE_DELTA` | 0.003 | Kleine Grundverstärkung für neue, automatisch erkannte Begriffe. |
+| `AI_LEARNING_CONTEXT_BONUS` | 0.009 | Maximaler Zusatz durch bereits bekannte, gewichtete Begriffe derselben Nachricht. |
+| `AI_LEARNING_MAX_DELTA` | 0.015 | Obergrenze einer automatischen Verstärkung; Benutzerfeedback bleibt deutlich stärker. |
+| `AI_LEARNING_MAX_TERMS_PER_SIGNAL` | 8 | Maximale Anzahl neuer Begriffe je Kategorie bzw. Knowledge-Thema und Nachricht. |
+
+Die automatische Lernschleife läuft für neue Nachrichten weiter. Sie arbeitet
+gruppen- und sprachgebunden: Bereits vorhandene aktive Begriffe in derselben
+Gruppe liefern einen konservativ gedeckelten Kontextbonus. Relevanzgewichte
+werden dabei auf die vorhandene Skala normiert; negative Relevanzbegriffe
+reduzieren den Bonus. Neue Begriffe werden nur für erkannte Relevanz-, Event-,
+Ort- oder Knowledge-Signale angelegt. Ausschlusswörter werden nicht automatisch
+erzeugt. Explizites Nutzerfeedback bleibt stärker als diese automatische
+Inferenz.
+
+Die Seite `/admin/ai-learning` zeigt die Kategorien Relevanz, Events, Orte,
+Knowledge-Schlüsselwort und Ausschlusswort mit ihren aktuellen und zeitlichen
+Lernmetriken. Jede Kategorie besitzt eine eigene Unterseite für Suche,
+Paginierung, Bearbeitung und Mehrfachaktionen. Die Zeitmetriken werden aus der
+Tabelle `ai_learning_term_history` berechnet und benötigen keine zusätzliche
+Konfiguration.
 | `WHISPER_ENABLED` | true | whisper.cpp aktivieren. |
 | `WHISPER_MODEL` | medium | Modellgröße. |
 | `WHISPER_LANGUAGE` | auto | Automatische oder feste Sprache. |

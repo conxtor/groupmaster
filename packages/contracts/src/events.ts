@@ -10,6 +10,7 @@ export const subjects = {
   connectorStatus: "connector.status.changed",
   groupSelectionChanged: "connector.group.selection.changed",
   replayRequested: "replay.requested",
+  aiReassessmentRequested: "ai.reassessment.requested",
 } as const;
 
 export type EventSubject = (typeof subjects)[keyof typeof subjects];
@@ -124,6 +125,11 @@ export interface ReplayRequested {
   fromAt: string;
   toAt: string;
   includeMedia: boolean;
+}
+
+export interface AIReassessmentRequested {
+  reassessmentId: string;
+  totalCount?: number;
 }
 
 export interface MessageAnalysis {

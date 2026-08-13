@@ -218,21 +218,31 @@ func envBool(key string, fallback bool) bool {
 }
 
 func ensureEventStream(js nats.JetStreamContext) error {
-	if _, err := js.StreamInfo("WAGI_EVENTS"); err == nil {
-		return nil
+	streams := []*nats.StreamConfig{
+		{
+			Name:     "WAGI_EVENTS",
+			Subjects: []string{"wa.>", "media.>", "ai.messages.>", "ai.feedback.>", "connector.>", "replay.>"},
+			Storage:  nats.FileStorage,
+			MaxMsgs:  -1,
+		},
+		{
+			Name:     "WAGI_REASSESSMENT",
+			Subjects: []string{"ai.reassessment.>"},
+			Storage:  nats.FileStorage,
+			MaxMsgs:  -1,
+		},
 	}
-	_, err := js.AddStream(&nats.StreamConfig{
-		Name:     "WAGI_EVENTS",
-		Subjects: []string{"wa.>", "media.>", "ai.>", "connector.>", "replay.>"},
-		Storage:  nats.FileStorage,
-		MaxMsgs:  -1,
-	})
-	if err != nil {
-		if _, infoErr := js.StreamInfo("WAGI_EVENTS"); infoErr == nil {
-			return nil
+	for _, config := range streams {
+		if _, err := js.StreamInfo(config.Name); err == nil {
+			continue
+		}
+		if _, err := js.AddStream(config); err != nil {
+			if _, infoErr := js.StreamInfo(config.Name); infoErr != nil {
+				return err
+			}
 		}
 	}
-	return err
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
