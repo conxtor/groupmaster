@@ -52,6 +52,21 @@ func (a *app) collectMinIOObservability(parent context.Context) minioObservabili
 		}
 		seen[bucket] = struct{}{}
 		bucketView := minioBucketObservabilityView{Bucket: bucket}
+		exists, err := a.minioBucketExists(ctx, bucket)
+		if err != nil {
+			bucketView.Error = err.Error()
+			if view.Error == "" {
+				view.Error = bucketView.Error
+			}
+			view.Buckets = append(view.Buckets, bucketView)
+			continue
+		}
+		if !exists {
+			// A configured bucket may not have been created yet. It is not a
+			// media bucket from the administrator's point of view and must not
+			// appear as a misleading 404 entry in the UI.
+			continue
+		}
 		continuationToken := ""
 		for page := 0; page < 101; page++ {
 			result, err := a.listMinIOObjects(ctx, bucket, continuationToken)
