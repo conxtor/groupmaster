@@ -42,6 +42,7 @@ export interface GroupSelectionChanged {
   groupId: string;
   selected: boolean;
   platform?: "whatsapp" | "telegram";
+  userId?: string;
 }
 
 export interface WhatsAppMessageReceived {
@@ -92,7 +93,7 @@ export interface DocumentAnalyzed {
   mime?: string;
 }
 
-export type ConnectorLifecycleStatus = "starting" | "pairing" | "connecting" | "syncing" | "ready" | "degraded" | "error" | "reauth_required" | "stopped";
+export type ConnectorLifecycleStatus = "starting" | "pairing" | "connecting" | "syncing" | "ready" | "waiting" | "degraded" | "error" | "reauth_required" | "stopped";
 
 export interface ConnectorStatus {
   connector: string;

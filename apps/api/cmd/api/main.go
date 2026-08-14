@@ -940,6 +940,7 @@ func (a *app) selectGroup(w http.ResponseWriter, r *http.Request) {
 			"groupId":  item.ID,
 			"selected": item.IsSelected,
 			"platform": item.Platform,
+			"userId":   user.ID,
 		},
 	})
 	if err := a.nc.Publish("connector.group.selection.changed", payload); err != nil {

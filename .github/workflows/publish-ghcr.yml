@@ -45,7 +45,7 @@ jobs:
             dockerfile: apps/wa-connector/Dockerfile
           - image: wagi-tg-connector
             context: .
-            dockerfile: apps/tg-connector/Dockerfile
+            dockerfile: apps/tg-connector-go/Dockerfile
           - image: wagi-nats-provisioner
             context: ./infra/nats-provisioner
             dockerfile: Dockerfile

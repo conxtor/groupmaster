@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { buildGroupHierarchy, type GroupHierarchyNode } from "../group-hierarchy";
 import {
   detectBrowserLocale,
   isSupportedLocale,
@@ -17,7 +18,7 @@ import { AuthGate, apiFetch } from "../auth";
 import { AudioPlayer, VideoPlayer } from "../media-player";
 import { LinkifiedText } from "../linkified-text";
 
-type Group = { id: string; subject: string; isSelected: boolean; platform?: string; chatType?: string; language?: "de" | "es" | "ca" | "en" | "fr" };
+type Group = { id: string; subject: string; participantCount?: number; isSelected: boolean; platform?: "whatsapp" | "telegram"; chatType?: "group" | "supergroup" | "channel" | "topic"; parentGroupId?: string; language?: "de" | "es" | "ca" | "en" | "fr" };
 type KnowledgeSourceMessage = {
   id: string;
   groupId: string;
@@ -235,6 +236,29 @@ function KnowledgeTopicBranch({ topic, locale, t, nested = false }: { topic: Kno
   </section>;
 }
 
+function groupTypeLabel(group: Group, t: Translator) {
+  if (group.chatType === "topic") return t("topic");
+  if (group.chatType === "channel") return t("channel");
+  if (group.chatType === "supergroup") return t("supergroup");
+  return t("group");
+}
+
+function groupSubjectLabel(group: Group, t: Translator) {
+  return group.platform === "whatsapp" && group.subject === group.id ? t("whatsappGroup") : group.subject;
+}
+
+function KnowledgeGroupBranch({ node, selectedGroup, onSelect, t, depth = 0 }: { node: GroupHierarchyNode<Group>; selectedGroup: string; onSelect: (groupId: string) => void; t: Translator; depth?: number }) {
+  const selectable = node.group.isSelected;
+  const subject = groupSubjectLabel(node.group, t);
+  return <div className={`dashboardGroupBranch ${depth > 0 ? "nestedGroupBranch" : ""}`}>
+    <button className={`groupRow ${selectedGroup === node.group.id ? "active" : ""} ${depth > 0 ? "topicRow" : ""} ${!selectable ? "groupContext" : ""}`} disabled={!selectable} onClick={() => onSelect(node.group.id)}>
+      <span className={`avatar ${depth === 0 ? "supergroupAvatar" : ""}`}>{subject.slice(0, 1).toUpperCase()}</span>
+      <span><strong>{subject}</strong><small>{node.group.platform === "telegram" ? "Telegram" : "WhatsApp"} · {groupTypeLabel(node.group, t)} · {t("members", { count: node.group.participantCount ?? 0 })}</small></span>
+    </button>
+    {node.children.length > 0 && <div className="groupChildren">{node.children.map((child) => <KnowledgeGroupBranch key={child.group.id} node={child} selectedGroup={selectedGroup} onSelect={onSelect} t={t} depth={depth + 1} />)}</div>}
+  </div>;
+}
+
 export default function KnowledgePage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [topics, setTopics] = useState<KnowledgeTopic[]>([]);
@@ -265,7 +289,7 @@ export default function KnowledgePage() {
           apiFetch("/api/v1/knowledge"),
         ]);
         if (!groupsResponse.ok || !knowledgeResponse.ok) throw new Error(t("connectorError"));
-        const nextGroups = (await groupsResponse.json() as Group[]).filter((group) => group.isSelected);
+        const nextGroups = await groupsResponse.json() as Group[];
         const nextTopics = await knowledgeResponse.json() as KnowledgeTopic[];
         if (active) {
           setGroups(nextGroups);
@@ -288,6 +312,21 @@ export default function KnowledgePage() {
     return [...filtered].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
   }, [topics, selectedGroup]);
 
+  const selectedGroups = useMemo(() => groups.filter((group) => group.isSelected), [groups]);
+  const visibleGroupIds = useMemo(() => {
+    const byId = new Map(groups.map((group) => [group.id, group]));
+    const visible = new Set(selectedGroups.map((group) => group.id));
+    for (const group of selectedGroups) {
+      let parentId = group.parentGroupId;
+      while (parentId) {
+        visible.add(parentId);
+        parentId = byId.get(parentId)?.parentGroupId;
+      }
+    }
+    return visible;
+  }, [groups, selectedGroups]);
+  const groupHierarchy = useMemo(() => buildGroupHierarchy(groups, visibleGroupIds), [groups, visibleGroupIds]);
+
   function selectLocale(value: string) {
     if (!isSupportedLocale(value)) return;
     setLocale(value);
@@ -299,14 +338,17 @@ export default function KnowledgePage() {
       <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("knowledgeBaseTitle")}</h1></div>
       <div className="topbarTools"><nav className="pageNav"><Link href="/">{t("dashboard")}</Link><Link href="/knowledge" className="pageNavActive">{t("knowledge")}</Link><Link href="/connectors">{t("connectors")}</Link><Link href="/groups">{t("manageGroups")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
     </header>
-    <section className="selectionIntro"><div><p className="eyebrow">{t("knowledge")}</p><p className="selectionLead">{t("knowledgeBaseHint")}</p></div><label className="knowledgeSourcePicker"><span>{t("selectedGroupsOnly")}</span><select value={selectedGroup} onChange={(event) => setSelectedGroup(event.target.value)}><option value="all">{t("allSelected")}</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.subject}</option>)}</select></label></section>
+    <section className="selectionIntro"><div><p className="eyebrow">{t("knowledge")}</p><p className="selectionLead">{t("knowledgeBaseHint")}</p></div><div className="selectionSummary"><strong>{selectedGroup === "all" ? visibleTopics.length : visibleTopics.length}</strong><span>{t("knowledge")}</span></div></section>
     {error && <div className="notice">{error}</div>}
-    {!visibleTopics.length ? <section className="panel emptyState knowledgeEmpty">{t("knowledgeBaseEmpty")}</section> : <section className="knowledgeGrid">{visibleTopics.map((topic) => {
-      return <article className="panel knowledgeCard" key={topic.id}>
-        <KnowledgeTopicBranch topic={topic} locale={locale} t={t} />
-        {!!topic.subtopics?.length && <div className="knowledgeSubtopics">{topic.subtopics.map((subtopic) => <KnowledgeTopicBranch key={subtopic.id} topic={subtopic} locale={locale} t={t} nested />)}</div>}
-      </article>;
-    })}</section>}
+    <div className="dashboardGrid knowledgeLayout">
+      <aside className="panel groupsPanel knowledgeGroupsPanel"><div className="panelHead"><div><h2>{t("selectedGroupsOnly")}</h2><p className="muted groupSelectionHint">{t("groupSelectionHint")}</p></div><span className="count">{selectedGroups.length}</span></div><Link className="manageGroupsLink" href="/groups">{t("manageGroups")}</Link><button className={`groupRow ${selectedGroup === "all" ? "active" : ""}`} type="button" onClick={() => setSelectedGroup("all")}><span className="avatar all">✦</span><span><strong>{t("allSelected")}</strong><small>{t("knowledge")}</small></span></button>{groupHierarchy.map((node) => <KnowledgeGroupBranch key={node.group.id} node={node} selectedGroup={selectedGroup} onSelect={setSelectedGroup} t={t} />)}</aside>
+      <section className="knowledgeContent">{!visibleTopics.length ? <section className="panel emptyState knowledgeEmpty">{t("knowledgeBaseEmpty")}</section> : <section className="knowledgeGrid">{visibleTopics.map((topic) => {
+        return <article className="panel knowledgeCard" key={topic.id}>
+          <KnowledgeTopicBranch topic={topic} locale={locale} t={t} />
+          {!!topic.subtopics?.length && <div className="knowledgeSubtopics">{topic.subtopics.map((subtopic) => <KnowledgeTopicBranch key={subtopic.id} topic={subtopic} locale={locale} t={t} nested />)}</div>}
+        </article>;
+      })}</section>}</section>
+    </div>
     <footer><span>{t("footer")}</span><Link href="/">{t("openDashboard")}</Link></footer>
   </main></AuthGate>;
 }

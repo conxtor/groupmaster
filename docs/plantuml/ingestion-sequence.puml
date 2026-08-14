@@ -10,10 +10,9 @@ database "PostgreSQL" as DB
 queue "NATS JetStream" as NATS
 participant "WA Onboarding\nBaileys" as WAO
 participant "WA Processing\nBaileys" as WAP
-participant "TG Onboarding\nGramJS" as TGO
-participant "TG Processing\nGramJS" as TGP
+participant "TG Onboarding\ngotd/td" as TGO
+participant "TG Processing\ngotd/td" as TGP
 participant "Telegram Account\nMTProto" as Telegram
-participant "Telegram Bot API\noptional" as Bot
 participant "media-worker" as Media
 
 == Auth und Email ==
@@ -53,13 +52,13 @@ alt WhatsApp QR
   WAO -> DB: Baileys Auth-State als Session-Snapshot speichern
 else Telegram QR
   TGO -> DB: Lease für onboarding-Slot holen
-  TGO -> TGO: GramJS QR-Login starten
+  TGO -> TGO: gotd QR-Login starten
   TGO -> DB: QR-Status + Ablaufzeit speichern
   Web -> API: GET QR-Status (Polling)
   API -> DB: QR-Session lesen
   API --> Web: QR-Payload oder Warteposition
   User -> Web: Telegram QR scannen
-  TGO -> DB: MTProto StringSession persistent speichern
+  TGO -> DB: gotd Session persistent speichern
 end
 
 WAO -> DB: Gruppen / Dialoge entdecken
@@ -74,18 +73,19 @@ User -> Web: Gruppen/Topics auswählen
 Web -> API: PATCH /api/v1/groups/{id}/select
 API -> DB: user_group_access.is_selected aktualisieren
 API -> NATS: connector.group.selection.changed
-NATS -> WAO: Auswahländerung (wenn Account aktiv)
-NATS -> TGO: Auswahländerung (wenn Account aktiv)
-WAO -> DB: Cursor und Auswahl prüfen
-TGO -> DB: Cursor und Auswahl prüfen
+NATS -> WAO: Auswahländerung mit userId
+NATS -> TGO: Auswahländerung mit userId
+TGO -> DB: Auswahl je Nutzer speichern
+TGO -> DB: next_sync_at für Auswahl auf NOW setzen
+TGO -> DB: Cursor und Auswahl im nächsten Pool-Lauf prüfen
 
 == Rotierender Processing-Pool ==
 loop nächster fälliger Account
   WAP -> DB: connector_leases atomar erwerben
   TGP -> DB: connector_leases atomar erwerben
   alt kein freier Slot
-    WAP -> DB: degraded + Queueposition speichern
-    TGP -> DB: degraded + Queueposition speichern
+    WAP -> DB: waiting + Queueposition speichern
+    TGP -> DB: waiting + Queueposition speichern
   else Lease vorhanden
     WAP -> DB: Session laden / Lease erneuern
     TGP -> DB: Session laden / Lease erneuern
@@ -101,11 +101,8 @@ alt WhatsApp Live/History
   WAO -> WAP: messages.upsert / History-Sync
   WAP -> DB: Nachricht idempotent upserten
 else Telegram Direct Live/Backfill
-  TGO -> TGP: NewMessage / iterMessages
+  TGO -> TGP: UpdateDispatcher / messages.getHistory
   TGP -> DB: Nachricht idempotent upserten
-else optional Telegram Bot API
-  Bot -> TGO: getUpdates / channel_post
-  TGO -> DB: Nachricht idempotent upserten
 end
 
 DB -> DB: Revisions, content_hash, Reihenfolge,\nReplies, gelöschte/geänderte Nachrichten

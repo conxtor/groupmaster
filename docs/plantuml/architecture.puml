@@ -10,7 +10,6 @@ actor "Administrator" as Admin
 package "Externe Messaging-Dienste" {
   cloud "WhatsApp Consumer Account" as WhatsApp
   cloud "Telegram Account\nMTProto" as Telegram
-  cloud "Telegram Bot API\noptionaler Fallback" as TelegramBot
 }
 
 cloud "Mailcow / SMTP-Provider\nVerifizierungs- und Reset-Mails" as Mail
@@ -26,7 +25,7 @@ package "Connector-Pools" {
   component "WhatsApp Connector\nNode.js + Baileys" as WAConnector
   component "WhatsApp Processing Worker\nrotierende Leases" as WAWorker
   component "WhatsApp Onboarding Slot\nQR-Pairing" as WAOnboarding
-  component "Telegram Connector\nNode.js + GramJS/MTProto" as TGConnector
+  component "Telegram Connector\nGo + gotd/td / MTProto" as TGConnector
   component "Telegram Processing Worker\nrotierende Leases" as TGWorker
   component "Telegram Onboarding Slot\nQR-Login" as TGOnboarding
 }
@@ -68,10 +67,9 @@ WAConnector --> WAWorker : account lease / rotation
 WAWorker --> WhatsApp : selected groups\nBackfill + live receive
 
 Telegram --> TGOnboarding : QR / MTProto Login
-TGOnboarding --> TGConnector : GramJS session
+TGOnboarding --> TGConnector : gotd session snapshot
 TGConnector --> TGWorker : account lease / rotation
 TGWorker --> Telegram : selected groups,\nSupergroups + Topics
-TelegramBot ..> TGConnector : optional Bot API fallback
 
 API --> DB : Auth, groups, accounts,\nselection, cursors, queries
 API --> NATS : control events, audio jobs,\nfeedback, replay
@@ -126,8 +124,11 @@ note right of WAConnector
 end note
 
 note right of TGConnector
-  Direkte Telegram-Verbindung ist Standard,
-  Bot API bleibt als Fallback vorhanden.
+  Direkte Telegram-Verbindung mit gotd/td
+  ist der einzige gestartete Telegram-Pfad.
+  Session-Snapshots und Cursor liegen in
+  PostgreSQL; QR-Payloads werden niemals
+  geloggt.
   Nur ausgewählte Gruppen/Channels/Topics
   werden verarbeitet; Backfill nutzt Cursor
   und konfigurierbare Drosselung.

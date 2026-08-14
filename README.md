@@ -152,9 +152,9 @@ Die Connector-Seite ruft die lokalen Connectoren automatisch ab. Danach gilt:
 
 Für Telegram müssen zusätzlich `TG_API_ID` und `TG_API_HASH` gesetzt sein.
 Wenn Telegram eine Zwei-Faktor-Anmeldung verlangt, wird das Passwort nicht
-über das Web-UI übertragen; die einmalige Anmeldung erfolgt sicher im lokalen
-Terminal über `npm run auth --workspace=@wagi/tg-connector`. Danach kann die
-gespeicherte Session vom Connector weiterverwendet werden.
+über das Web-UI übertragen. In diesem Fall meldet die Oberfläche den Account
+als `reauth_required`; der QR-Flow ist für Accounts ohne zusätzliche
+Passwortabfrage vorgesehen.
 
 Ein QR-Code kann ein Konto autorisieren und darf deshalb nicht geteilt oder in
 Logs veröffentlicht werden.
@@ -237,119 +237,57 @@ auch [Bekannte Risiken und Sicherheitsgrenzen](#bekannte-risiken-und-sicherheits
 
 ### Telegram-Konnektor
 
-Der Telegram-Konnektor verwendet bevorzugt eine direkte persönliche Telegram-
-Verbindung über MTProto. Dadurch kann der verbundene Nutzer seine eigenen
-Gruppen und Channels lesen und die Historie der letzten sieben Tage zum ersten
-Aktivierungszeitpunkt nachladen. Der Zeitraum ist über `TG_BACKFILL_DAYS`
-konfigurierbar. Die direkte Verbindung wird aktiviert, sobald
-`TG_API_ID` und `TG_API_HASH` gesetzt sind:
+Der produktive Telegram-Konnektor ist jetzt eine direkte Go-MTProto-Verbindung
+mit [`gotd/td`](https://github.com/gotd/td). Die bisherige GramJS-Implementierung
+bleibt als Quellcode-Rückfalloption erhalten, wird aber weder lokal noch im
+Dockge-Compose gestartet. Ein Bot-Token ist für die neue Implementierung nicht
+erforderlich.
 
 ```dotenv
 TG_API_ID=123456
 TG_API_HASH=replace-with-api-hash
-TG_PHONE=+491701234567
-TG_SESSION=
-TG_GROUP_ALLOWLIST=
-TG_STATE_DIR=./data/tg-state
 TG_BACKFILL_DAYS=7
 TG_BACKFILL_THROTTLE_MS=500
 TG_BACKFILL_GROUP_DELAY_MS=2000
-TG_CONNECTION_RETRIES=12
-TG_REQUEST_RETRIES=8
-TG_DOWNLOAD_RETRIES=8
-TG_RETRY_DELAY_MS=2000
-TG_MEDIA_RETRY_ATTEMPTS=4
+TG_CONNECTOR_POOL_SIZE=5
+TG_ONBOARDING_SLOTS=1
+GROUP_REFRESH_INTERVAL_MS=60000
 ```
 
 API-ID und API-Hash werden unter [my.telegram.org/apps](https://my.telegram.org/apps)
-erstellt. Die persönliche Session wird einmalig interaktiv erzeugt:
+erstellt. Der Nutzer startet auf `/connectors` **Telegram-QR starten** und
+scannt den angezeigten Code in Telegram unter **Einstellungen** → **Geräte**.
+Die gotd-Session wird als verschlüsselungsfähiger Session-Snapshot in
+`connector_accounts.session_data` gespeichert; der letzte Nachrichten-Cursor
+liegt je Nutzer und Gruppe in `connector_cursors`. Kein QR-Payload wird in
+Docker-Logs ausgegeben.
 
-```bash
-npm run auth --workspace=@wagi/tg-connector
-```
+Nach der Verbindung entdeckt gotd die Dialoge des angemeldeten Kontos. Gruppen,
+Supergroups, Channels und Forum-Topics werden hierarchisch in PostgreSQL
+gespeichert; keine Quelle wird automatisch ausgewählt. Auswahl, Entfernen,
+periodische Dialog-Snapshots, Medien-Downloads, Backfill und die NATS-Events
+verwenden dieselben Verträge wie der bisherige Connector.
+Gruppenauswahl-Events enthalten die Nutzerbindung; der zugehörige Telegram-
+Account wird dadurch auch ohne aktive Lease für den nächsten Processing-Lauf
+fällig gesetzt.
 
-Der Befehl fragt den Telegram-Bestätigungscode und bei aktivierter 2FA das
-Passwort ausschließlich im lokalen Terminal ab. Die Session wird als
-`direct-session.txt` im persistenten `TG_STATE_DIR` gespeichert und danach vom
-Docker-Konnektor automatisch wiederverwendet. Nach der Verbindung werden alle
-erreichbaren Telegram-Gruppen, Supergroups und Channels als auswählbare Liste
-entdeckt; keine Gruppe wird automatisch aktiviert. Die Liste wird nach dem
-Verbindungsaufbau und anschließend regelmäßig mit
-`GROUP_REFRESH_INTERVAL_MS` (Standard: 60 Sekunden, mindestens 30 Sekunden)
-aktualisiert. Supergroup-Topics werden bei der Synchronisierung als
-Untergruppen geführt. Beim Aktivieren eines Eintrags und bei jedem Neustart
-lädt der Connector höchstens die letzten `TG_BACKFILL_DAYS` (Standard:
-sieben) Tage nach und empfängt anschließend neue Nachrichten über MTProto-
-Events. Der Neustart-Backfill pausiert standardmäßig 500 ms zwischen
-Nachrichten und 2 Sekunden zwischen Gruppen; die Werte lassen sich über
-`TG_BACKFILL_THROTTLE_MS` und `TG_BACKFILL_GROUP_DELAY_MS` anpassen. Das gilt
-auch für später neu entdeckte Gruppen und Channels.
+Bei jedem Processing-Lauf werden maximal die letzten `TG_BACKFILL_DAYS` Tage
+gedrosselt gelesen. Die gespeicherten Cursor verhindern, dass der gesamte
+Backlog bei jedem Poolwechsel erneut verarbeitet wird. Nach dem Erreichen des
+aktuellen Nachrichtenstands gibt der Worker die Account-Lease automatisch
+frei. Die Liste wird durch jeden vollständigen Dialog-Snapshot aktualisiert;
+verlassene Gruppen und Topics werden aus der Auswahl entfernt und bei
+vollständiger Verwaisung inklusive abhängiger Daten und Medien bereinigt.
 
-Wenn ein Nutzer eine Gruppe, einen Channel oder ein Topic verlässt, wird der
-Eintrag nach einem erfolgreichen Telegram-Snapshot aus der Auswahl und dem
-Dashboard entfernt. Die Löschkette entfernt die gruppenbezogenen Daten aus
-PostgreSQL und löscht die dazugehörigen Medienobjekte in MinIO. Ein nicht
-vollständig gelungener Snapshot löst aus Sicherheitsgründen keine Bereinigung
-aus. Im optionalen Bot-Modus wird die Entfernung über Telegrams
-`my_chat_member`-Ereignis erkannt; die Bot API kann keine vollständige Liste
-aller Dialoge des Bots liefern.
+Wenn ein Account bereits auf dem aktuellen Stand ist, wartet der Processing-Worker
+bis zu `next_sync_at`. Dieser normale Leerlauf wird als Connector-Status
+`waiting` angezeigt und nicht als Fehler (`degraded`) gewertet. Ein neuer Lauf
+beginnt automatisch, sobald das nächste Sync-Fenster erreicht ist.
 
-Bei vollständig verwaisten Chats werden außerdem die zugehörigen
-`event_inbox`- und `event_failures`-Einträge entfernt. Nachrichtenanalysen,
-Events in `message_analyses`, die Knowledge-Base-Hierarchie, AI-Jobs und
-Qualitätsdaten folgen der Datenbank-Kaskade. Bei gemeinsam genutzten Chats
-wird nur der Zugriff und Cursor des verlassenden Nutzers gelöscht; Daten für
-andere Nutzer bleiben erhalten.
-
-Im Direktmodus kann die Anmeldung bevorzugt direkt im Dashboard erfolgen: Im
-Telegram-Connector-Panel **Telegram-QR starten** auswählen und den QR-Code in
-der Telegram-App unter **Einstellungen** → **Geräte** scannen. Der QR-Login ist
-für die normale Anmeldung ohne zusätzliches Passwort gedacht. Bei aktivierter
-Telegram-2FA ist der lokale `npm run auth --workspace=@wagi/tg-connector`-Weg
-erforderlich; ein 2FA-Passwort wird aus Sicherheitsgründen nicht über das Web-
-UI angenommen.
-
-Wenn keine direkten Zugangsdaten gesetzt sind, bleibt die bisherige Bot-API-
-Integration als optionaler Fallback verfügbar. Dafür wird ein Bot-Token
-benötigt:
-
-```dotenv
-TG_BOT_TOKEN=123456789:replace-with-token-from-botfather
-TG_GROUP_ALLOWLIST=
-TG_STATE_DIR=./data/tg-state
-TG_POLL_TIMEOUT=25
-TG_BACKFILL_DAYS=7
-TG_CONNECTION_RETRIES=12
-TG_REQUEST_RETRIES=8
-TG_DOWNLOAD_RETRIES=8
-TG_RETRY_DELAY_MS=2000
-TG_MEDIA_RETRY_ATTEMPTS=4
-```
-
-Einrichtung des optionalen Bot-Fallbacks:
-
-1. Mit [@BotFather](https://core.telegram.org/bots#how-do-i-create-a-bot) einen Bot anlegen und den Token in `TG_BOT_TOKEN` eintragen.
-2. Den Bot zu den gewünschten Gruppen, Supergroups oder Channels hinzufügen.
-3. In Gruppen den Bot als Administrator setzen oder beim BotFather mit `/setprivacy` den Privacy Mode deaktivieren, damit normale Gruppennachrichten zugestellt werden.
-4. In Channels den Bot als Mitglied hinzufügen; für administrative Bot-Aktionen sind passende Rechte erforderlich.
-5. Den Konnektor starten: `docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build tg-connector`.
-6. Unter `http://localhost:3000/connectors` den Telegram-Status prüfen. Die
-technischen Connector-Endpunkte bleiben intern im Compose-Netz verfügbar.
-
-Mit `TG_GROUP_ALLOWLIST` kann die Verarbeitung begrenzt werden. Unterstützt
-werden die numerische Chat-ID, die Form `tg:<chat-id>` oder ein öffentlicher
-Username:
-
-```dotenv
-TG_GROUP_ALLOWLIST=-1001234567890,tg:-1009876543210,@meine_gruppe
-```
-
-Eine leere Allowlist aktiviert keine Gruppe automatisch; sie dient nur dazu,
-Einträge per Konfiguration vorzuselektieren. Private Chats werden nicht
-importiert. Der Offset des Bot-Fallbacks wird in `TG_STATE_DIR` gespeichert; der
-Compose-Speicher `tg_state` sollte für stabile Fortsetzung nach Neustarts
-erhalten bleiben. Die Bot API stellt keine rückwirkende Gruppenhistorie bereit
-und ist deshalb für den konfigurierten Backfill nur eingeschränkt geeignet.
+Bei aktivierter Telegram-2FA kann der QR-Login eine erneute Anmeldung verlangen.
+Das 2FA-Passwort wird bewusst nicht über das Web-UI übertragen. Der Account
+bleibt dann mit `reauth_required` sichtbar, bis ein dafür vorgesehener sicherer
+Enrollment-Flow ergänzt wird.
 
 ### KI- und Audio-Konnektoren
 
@@ -608,7 +546,7 @@ Die Compose-Umgebung startet standardmäßig im `WA_MOCK_MODE=true`, damit die v
 | Bereich | MVP-Implementierung |
 | --- | --- |
 | WhatsApp | Node.js/TypeScript, Baileys, persistenter Multi-File-Auth-State |
-| Telegram | Node.js/TypeScript, direkte MTProto-Session mit historischem Backfill; optionaler Bot-API-Fallback |
+| Telegram | Go + `gotd/td`, direkte MTProto-Session, QR-Login, Dialog-/Topic-Snapshot und historischer Backfill |
 | Eventing | NATS mit JetStream-fähigem Server, Subjects `wa.*`, `media.*`, `ai.*` |
 | Persistenz | PostgreSQL mit PostGIS und pgvector, vollständige Initialmigration `infra/migrations/001_init.sql` |
 | Medien | MinIO/S3-Konvention, Audio-Job-Pipeline |

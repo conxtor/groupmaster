@@ -231,19 +231,12 @@ offizielle WhatsApp-Business-API.
 | `TG_CONNECTOR_POOL_SIZE` | 5 | Telegram-Arbeitsplätze. |
 | `TG_ONBOARDING_SLOTS` | 1 | Freie QR-Onboarding-Plätze. |
 | `TG_API_ID` / `TG_API_HASH` | leer | Zugangsdaten von my.telegram.org/apps. |
-| `TG_PHONE` | leer | Telefonnummer für interaktive Erst-Anmeldung. |
-| `TG_SESSION` | leer | Optional vorhandene Session. |
-| `TG_STATE_DIR` | `./data/tg-state` | Persistenter GramJS-Zustand. |
-| `TG_BOT_TOKEN` | leer | Optionaler Bot-Modus. |
 | `TG_CONNECTOR_ACCOUNT_ID` | leer | Optionales Konto für gezielte Einzeltests. |
-| `TG_GROUP_ALLOWLIST` | leer | Dialog-/Topic-IDs; leer bedeutet entdecken. |
 | `TG_BACKFILL_DAYS` | 7 | Neustart-/Aktivierungszeitfenster. |
 | `TG_BACKFILL_THROTTLE_MS` / `TG_BACKFILL_GROUP_DELAY_MS` | 500 / 2000 | Backfill-Pausen. |
-| `TG_CONNECTION_RETRIES` / `TG_REQUEST_RETRIES` | 12 / 8 | Verbindungs-/Request-Wiederholungen. |
-| `TG_DOWNLOAD_RETRIES` / `TG_MEDIA_RETRY_ATTEMPTS` | 8 / 4 | Download-/Medienwiederholungen. |
-| `TG_RETRY_DELAY_MS` | 2000 | Basisabstand. |
-| `TG_POLL_TIMEOUT` | 25 | Update-Timeout. |
 | `TG_PORT` | 3002 | Interner Status-/QR-Port. |
+| `TG_STATE_DIR` | `/data/tg-state` | Kompatibilitätsvolume; Sessiondaten werden primär in PostgreSQL gespeichert. |
+| `CONNECTOR_ROLE` | `processing` | `onboarding` für den dedizierten QR-Slot, `processing` für Backfill/Updates. |
 
 Bei jedem erfolgreichen Direct-Snapshot werden die Dialoge, Supergroups,
 Channels und Topics des Nutzers mit der Datenbank abgeglichen. Verlassene
@@ -254,6 +247,13 @@ vollständig verwaiste Chats löscht der Connector zusätzlich
 Nachrichten-, Analyse-, Event-, Knowledge-Base- und Jobdaten werden über die
 PostgreSQL-Kaskade entfernt. Eine unvollständige Snapshot-Aktualisierung löst
 keine Bereinigung aus.
+
+Das Compose-Image wird aus `apps/tg-connector-go/Dockerfile` gebaut. Es nutzt
+Go 1.25, `gotd/td` und ein minimales Alpine-Laufzeitimage; der Build erzwingt
+`linux/amd64` für die GHCR-Produktionsimages. `TG_BOT_TOKEN`, `TG_PHONE` und
+`TG_SESSION` werden vom neuen Go-Connector nicht verwendet. Der frühere
+Node/GramJS-Code bleibt nur als bewusst nicht gestartete Rückfallquelle im
+Repository.
 
 ## KI und Medien
 

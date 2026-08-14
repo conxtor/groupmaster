@@ -5,7 +5,7 @@
 Der aktuelle Stand ist ein lauffähiger vertikaler MVP für WhatsApp- und Telegram-Gruppen:
 
 - WhatsApp-Connector mit Baileys, QR-/Linked-Device-Skelett und Mock-Daten
-- Telegram-Direkt-Connector über MTProto mit QR-Login im Dashboard und optionalem Bot-API-Fallback
+- Telegram-Direkt-Connector über Go/`gotd/td` mit QR-Login im Dashboard und PostgreSQL-persistenten Sessions
 - PostgreSQL mit PostGIS und pgvector, NATS JetStream und MinIO-Grundgerüst
 - Audio-Job-Pipeline mit lokalem whisper.cpp und Medium-Modell
 - Heuristische Analyse für Relevanz, Facts, Entities, Events, Places und Zusammenfassungen
@@ -23,8 +23,8 @@ Ziel: Ein einzelner vertrauenswürdiger Nutzer kann reale Gruppen sicher verbind
 - [x] WhatsApp-Reconnect, Session-Recovery, History-Sync und kontrollierter Sieben-Tage-Erst-Backfill
 - [x] Behandlung von Edits, Löschungen, Duplikaten und Nachrichten-Reihenfolge im Connector-Kern
 - [x] Connector-Status für QR-Pairing, Session, Fehler und erneute Anmeldung über die Status-Endpunkte
-- [x] Telegram-Dateien über `getFile` abrufen und an die MinIO-Medienpipeline übergeben
-- [x] Gemeinsamer Connector-SDK-Vertrag mit Lifecycle-Status und Fehlervertrag; produktive Connector-Implementierung wird weiter vereinheitlicht
+- [x] Telegram-Dateien über gotd/MTProto herunterladen und an die MinIO-Medienpipeline übergeben
+- [x] Gemeinsamer Connector-Lifecycle mit einheitlichem Event-/Fehlervertrag; der Telegram-Pool nutzt dafür Go/`gotd/td` und PostgreSQL-Leases
 - [x] Benutzergebundene QR-Routen für WhatsApp und Telegram mit persistenten Kontositzungen und dediziertem Onboarding-Slot
 - [x] Gruppenentdeckung und Gruppenauswahl pro Nutzerkonto; nicht mehr erreichbare Gruppen werden automatisch aus Auswahl und Datenbestand bereinigt
 
@@ -54,7 +54,7 @@ Ziel: Ein einzelner vertrauenswürdiger Nutzer kann reale Gruppen sicher verbind
 - [x] Event-Detailansicht mit allen Quellnachrichten
 - [x] Suche und Filter nach Gruppe, Zeitraum, Relevanz, Ort, Event und Medientyp
 - [x] Transkript prüfen und korrigieren; vollständige Transkripte werden im Dashboard und in den Knowledge-Base-Quellnachrichten als Nachrichtentext angezeigt
-- [x] Gruppen- und Connector-Setup als verständlicher lokaler QR-Onboarding-Prozess im Dashboard; Telegram-2FA bleibt als lokaler Terminal-Fallback
+- [x] Gruppen- und Connector-Setup als verständlicher lokaler QR-Onboarding-Prozess im Dashboard; Telegram-2FA wird als `reauth_required` transparent angezeigt
 - [x] Fehler-, Job- und Verbindungsstatus sichtbar machen
 
 ## Phase 2 – Produktionsreife

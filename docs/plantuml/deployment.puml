@@ -12,9 +12,9 @@ node "Lokaler Docker-Compose-Stack" as Local {
   component "web:3000\nNext.js standalone" as LocalWeb
   component "api:8080\nGo" as LocalAPI
   component "wa-connector:3001\nOnboarding + Pool" as LocalWA
-  component "tg-connector:3002\nOnboarding + Pool" as LocalTG
+  component "tg-connector:3002\nGo/gotd Onboarding" as LocalTG
   component "wa-connector-worker\ninterner Pool-Worker" as LocalWAW
-  component "tg-connector-worker\ninterner Pool-Worker" as LocalTGW
+  component "tg-connector-worker\nGo/gotd Processing" as LocalTGW
   component "ai-worker\nPython 3.12-slim" as LocalAI
   component "media-worker\nPython 3.12-slim + whisper.cpp" as LocalMedia
   component "migrate\npostgres:15-alpine\nversionierte SQL-Migrationen" as LocalMigrate
@@ -31,7 +31,7 @@ node "Dockge / Produktionsserver" as Production {
   component "web:3000\nöffentlich geroutet" as ProdWeb
   component "api:8080\ntraefik.enable=false" as ProdAPI
   component "wa-connector + worker\nkein Host-Port" as ProdWA
-  component "tg-connector + worker\nkein Host-Port" as ProdTG
+  component "tg-connector + worker\nGo/gotd, kein Host-Port" as ProdTG
   component "ai-worker" as ProdAI
   component "media-worker" as ProdMedia
   component "migrate + nats-provisioner\nEinmalige Jobs" as ProdInit
