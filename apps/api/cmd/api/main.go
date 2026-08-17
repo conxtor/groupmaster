@@ -750,7 +750,7 @@ func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
 			_, _ = a.db.Exec(r.Context(), `UPDATE message_analyses SET relevance_level=$2, relevance_score=$3, relevant=($2 <> 'low'), updated_at=NOW() WHERE message_id=$1::uuid`, request.MessageID, level, levelScore)
 		}
 	}
-	if err := a.recordAILearningFeedback(r.Context(), groupID, request.MessageID, request.TargetType, request.Decision, request.Correction); err != nil {
+	if err := a.recordAILearningFeedback(r.Context(), groupID, request.MessageID, request.TargetType, request.TargetKey, request.Decision, request.Correction); err != nil {
 		log.Printf("AI learning feedback could not be recorded: %v", err)
 	}
 	if request.TargetType == "knowledge" {

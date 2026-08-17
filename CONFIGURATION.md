@@ -261,7 +261,7 @@ Repository.
 |---|---:|---|
 | `AI_MODEL`, `AI_PROVIDER` | heuristic-mvp / hybrid | Analyseprofil und Provider. |
 | `AI_ENDPOINT`, `AI_API_KEY` | leer | Optionaler AI-Adapter. |
-| `AI_PROMPT_VERSION`, `AI_KNOWLEDGE_VERSION` | cascade-v4 | Prompt-/Schema-Versionen. |
+| `AI_PROMPT_VERSION`, `AI_KNOWLEDGE_VERSION` | cascade-v5-places | Prompt-/Schema-Versionen. |
 | `AI_CONTEXT_MAX_MESSAGES` | 80 | Kontextfenster. |
 | `AI_EVENT_WINDOW_HOURS` / `AI_EVENT_MIN_CONFIDENCE` | 36 / 0.70 | Event-Fenster und Mindestkonfidenz. |
 | `AI_EMBEDDINGS_ENABLED` | true | Embeddings aktivieren. |
@@ -271,6 +271,15 @@ Repository.
 | `HF_HUB_DISABLE_TELEMETRY` | `1` | Optionale Hugging-Face-Telemetrie deaktivieren. |
 | `HF_HUB_ETAG_TIMEOUT` | `10` | Timeout für Hugging-Face-Metadatenabfragen. |
 | `AI_SEMANTIC_DISCOVERY_THRESHOLD` / `AI_SEMANTIC_MERGE_THRESHOLD` | 0.84 / 0.18 | Themenerkennung und Zusammenführung. |
+| `AI_PLACE_NER_ENABLED`, `AI_PLACE_NER_MODEL` | true / leer | NER-lite bzw. optionales spaCy-Modell für Ortskandidaten. |
+| `AI_PLACE_MIN_CONFIDENCE` | 0.70 | Mindestkonfidenz für akzeptierte Text-Orte. GPS-Orte umgehen diese Schwelle. |
+| `AI_PLACE_HERMES_ENABLED`, `AI_PLACE_HERMES_MIN_CONFIDENCE` | true / 0.78 | Hermes-Prüfung unsicherer Ortskandidaten. Sie greift nur bei aktivierter Hermes-Verbindung. |
+| `AI_PLACE_LEARNING_MIN_CONFIDENCE` | 0.82 | Mindestkonfidenz, ab der ein akzeptierter Ortsname automatisch gruppenspezifisch lernen darf. |
+| `AI_PLACE_GEOCODER_ENABLED` | false | Externe geografische Validierung aktivieren. Standardmäßig aus Datenschutzgründen deaktiviert. |
+| `AI_PLACE_GEOCODER_URL` | Nominatim-Suchendpunkt | Geocoder-Endpunkt; kann durch einen internen oder selbst betriebenen Dienst ersetzt werden. |
+| `AI_PLACE_GEOCODER_USER_AGENT` | wagi-place-resolver/1.0 | Kennung für Geocoder-Anfragen. |
+| `AI_PLACE_GEOCODER_TIMEOUT_MS`, `AI_PLACE_GEOCODER_THROTTLE_MS` | 5000 / 1100 | Timeout und Mindestabstand zwischen Geocoder-Anfragen. |
+| `AI_PLACE_REQUIRE_GEOCODER` | false | Wenn true, werden nicht auflösbare Textkandidaten verworfen. |
 | `AI_HERMES_ENABLED` | false | Hermes-Agent-Prüfung/Fallback. |
 | `AI_HERMES_URL`, `AI_HERMES_API_KEY`, `AI_HERMES_MODEL` | leer / leer / hermes-agent | Hermes-Verbindung. |
 | `AI_HERMES_TIMEOUT_MS`, `AI_HERMES_CONNECT_TIMEOUT_MS` | 60000 / 10000 | Hermes-Timeouts. |

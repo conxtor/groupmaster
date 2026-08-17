@@ -23,11 +23,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgres://wagi_app:app@localhost:5432
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
 MODEL = os.getenv("AI_MODEL", "heuristic-mvp")
 AI_PROVIDER = os.getenv("AI_PROVIDER", "hybrid").lower()
-PROMPT_VERSION = os.getenv("AI_PROMPT_VERSION", "cascade-v4")
-SCHEMA_VERSION = "1.2"
+PROMPT_VERSION = os.getenv("AI_PROMPT_VERSION", "cascade-v5-places")
+SCHEMA_VERSION = "1.3"
 SUPPORTED_GROUP_LANGUAGES = ("de", "es", "ca", "en", "fr")
 _HERMES_CONFIGURED = os.getenv("AI_HERMES_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-_CONFIGURED_KNOWLEDGE_VERSION = os.getenv("AI_KNOWLEDGE_VERSION", "cascade-v4")
+_CONFIGURED_KNOWLEDGE_VERSION = os.getenv("AI_KNOWLEDGE_VERSION", "cascade-v5-places")
 KNOWLEDGE_REBUILD_VERSION = _CONFIGURED_KNOWLEDGE_VERSION + ("-hermes" if _HERMES_CONFIGURED and not _CONFIGURED_KNOWLEDGE_VERSION.endswith("-hermes") else "")
 KNOWLEDGE_STATE_CONNECTOR = "ai-worker-knowledge"
 EMBEDDING_DIMENSIONS = 384
@@ -66,6 +66,21 @@ AI_LEARNING_INFERENCE_BASE_DELTA = max(0.0005, min(0.02, float(os.getenv("AI_LEA
 AI_LEARNING_CONTEXT_BONUS = max(0.0, min(0.02, float(os.getenv("AI_LEARNING_CONTEXT_BONUS", "0.009"))))
 AI_LEARNING_MAX_DELTA = max(AI_LEARNING_INFERENCE_BASE_DELTA, min(0.03, float(os.getenv("AI_LEARNING_MAX_DELTA", "0.015"))))
 AI_LEARNING_MAX_TERMS_PER_SIGNAL = max(1, min(16, int(os.getenv("AI_LEARNING_MAX_TERMS_PER_SIGNAL", "8"))))
+# Places use a precision-first cascade. The lightweight detector is always
+# available; optional spaCy NER, geocoding and Hermes adjudication are added
+# only when explicitly configured.
+AI_PLACE_NER_ENABLED = os.getenv("AI_PLACE_NER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+AI_PLACE_NER_MODEL = os.getenv("AI_PLACE_NER_MODEL", "").strip()
+AI_PLACE_MIN_CONFIDENCE = min(0.98, max(0.45, float(os.getenv("AI_PLACE_MIN_CONFIDENCE", "0.70"))))
+AI_PLACE_HERMES_ENABLED = os.getenv("AI_PLACE_HERMES_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+AI_PLACE_HERMES_MIN_CONFIDENCE = min(0.98, max(AI_PLACE_MIN_CONFIDENCE, float(os.getenv("AI_PLACE_HERMES_MIN_CONFIDENCE", "0.78"))))
+AI_PLACE_LEARNING_MIN_CONFIDENCE = min(0.99, max(AI_PLACE_MIN_CONFIDENCE, float(os.getenv("AI_PLACE_LEARNING_MIN_CONFIDENCE", "0.82"))))
+AI_PLACE_GEOCODER_ENABLED = os.getenv("AI_PLACE_GEOCODER_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+AI_PLACE_GEOCODER_URL = os.getenv("AI_PLACE_GEOCODER_URL", "https://nominatim.openstreetmap.org/search").strip()
+AI_PLACE_GEOCODER_USER_AGENT = os.getenv("AI_PLACE_GEOCODER_USER_AGENT", "wagi-place-resolver/1.0").strip()
+AI_PLACE_GEOCODER_TIMEOUT_SECONDS = max(2.0, float(os.getenv("AI_PLACE_GEOCODER_TIMEOUT_MS", "5000")) / 1000)
+AI_PLACE_GEOCODER_THROTTLE_SECONDS = max(0.0, float(os.getenv("AI_PLACE_GEOCODER_THROTTLE_MS", "1100")) / 1000)
+AI_PLACE_REQUIRE_GEOCODER = os.getenv("AI_PLACE_REQUIRE_GEOCODER", "false").lower() in {"1", "true", "yes", "on"}
 
 LANGUAGE_MARKERS = {
     # Keep language detection anchored to content-bearing terms. Function
@@ -170,6 +185,13 @@ class HermesEventDecision(BaseModel):
     decision: Literal["accept", "reject", "review"]
     event: Event | None = None
     confidence: float = Field(ge=0, le=1)
+    reason: str = ""
+
+
+class HermesPlaceDecision(BaseModel):
+    decision: Literal["accept", "reject", "review"]
+    confidence: float = Field(ge=0, le=1)
+    canonicalName: str | None = None
     reason: str = ""
 
 
@@ -399,6 +421,69 @@ class HermesReviewer:
             log.debug("Hermes knowledge verification traceback", exc_info=True)
             return None
 
+    async def review_place(self, candidate: dict, message_text: str, language: str) -> HermesPlaceDecision | None:
+        """Adjudicate only uncertain text places; explicit coordinates bypass Hermes."""
+        if not self.enabled or not AI_PLACE_HERMES_ENABLED:
+            return None
+        if time.monotonic() < self._failure_cooldown_until:
+            return None
+        system = (
+            "You are a strict multilingual geographic entity verifier. "
+            "Accept only a concrete real-world place, address, venue, city, region or country that is explicitly "
+            "supported by the message. Reject generic nouns such as place, location, office, home, group or station "
+            "without a named place. Never infer a place from an event or a person's name. Return JSON only."
+        )
+        user = {
+            "language": language,
+            "candidate": {
+                "name": candidate.get("name"),
+                "evidence": candidate.get("evidence", []),
+                "source": candidate.get("source"),
+            },
+            "message": message_text[:2000],
+            "responseSchema": {
+                "decision": "accept|reject|review",
+                "confidence": "number 0..1",
+                "canonicalName": "string or null",
+                "reason": "short explanation",
+            },
+        }
+        headers = {"content-type": "application/json"}
+        if HERMES_API_KEY:
+            headers["authorization"] = f"Bearer {HERMES_API_KEY}"
+        try:
+            timeout = httpx.Timeout(HERMES_TIMEOUT_SECONDS, connect=HERMES_CONNECT_TIMEOUT_SECONDS)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                request_body = {
+                    "model": HERMES_MODEL,
+                    "temperature": 0,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+                    ],
+                    "response_format": {"type": "json_object"},
+                }
+                response = await self._post_with_retry(client, headers, request_body)
+                if response.status_code == 400:
+                    request_body.pop("response_format", None)
+                    response = await self._post_with_retry(client, headers, request_body)
+                response.raise_for_status()
+                payload = response.json()
+            content = payload["choices"][0]["message"]["content"]
+            decision = HermesPlaceDecision.model_validate(self._extract_json(content))
+            self._failure_cooldown_until = 0.0
+            return decision
+        except Exception as error:
+            self._failure_cooldown_until = time.monotonic() + HERMES_FAILURE_COOLDOWN_SECONDS
+            log.warning(
+                "Hermes place verification failed after up to %d attempts; keeping deterministic result: %s: %s",
+                HERMES_RETRY_ATTEMPTS,
+                type(error).__name__,
+                str(error)[:500],
+            )
+            log.debug("Hermes place verification traceback", exc_info=True)
+            return None
+
 
 def as_object(value) -> dict:
     if isinstance(value, dict):
@@ -427,6 +512,10 @@ def location_details(item: dict) -> dict | None:
                 "name": label,
                 "latitude": latitude,
                 "longitude": longitude,
+                "source": "shared_location",
+                "status": "accepted",
+                "confidence": 0.99,
+                "learningEligible": True,
             }
     if not location:
         return None
@@ -438,7 +527,298 @@ def location_details(item: dict) -> dict | None:
         "name": name or label,
         "latitude": location.get("degreesLatitude"),
         "longitude": location.get("degreesLongitude"),
+        "source": "shared_location",
+        "status": "accepted",
+        "confidence": 0.99,
+        "learningEligible": True,
     }
+
+
+PLACE_CONTEXT_RE = re.compile(
+    r"\b(?:in|im|am|an\s+der|auf|bei|zum|zur|nach|en|al|del|a\s+la|a\s+les|a|per|prop\s+de|des\s+de|dans|à|au|aux|chez|near|at|by|to)\s+([^,.;!?()\n]{2,96})",
+    flags=re.IGNORECASE,
+)
+PLACE_ADDRESS_RE = re.compile(
+    r"\b\d{4,5}\s+[A-Za-zÀ-ÿÄÖÜäöüß][^,.;!?()\n]{2,72}",
+    flags=re.IGNORECASE,
+)
+PLACE_PROPER_SPAN_RE = re.compile(
+    r"(?<!\w)(?:[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’.-]{2,})(?:\s+(?:[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’.-]{2,})){0,4}"
+)
+PLACE_GENERIC_TERMS = {
+    "ort", "location", "place", "lugar", "lloc", "lieu", "standort", "ubicación", "ubicacio",
+    "adresse", "address", "dirección", "adreça", "stadt", "city", "ville", "ciudad", "ciutat",
+    "hause", "haus", "home", "casa", "office", "bureau", "oficina", "restaurant", "hotel",
+    "bahnhof", "station", "estación", "estacio", "gare", "gruppe", "group", "grupo", "groupe",
+    "telegram", "whatsapp", "wagi", "chat", "community", "comunidad", "communauté", "nachricht", "message",
+}
+PLACE_TRAILING_TERMS = {
+    "morgen", "heute", "mañana", "hoy", "demà", "avui", "tomorrow", "today", "demain", "aujourd",
+    "samstag", "sonntag", "sábado", "domingo", "dissabte", "diumenge", "saturday", "sunday", "samedi", "dimanche",
+    "um", "uhr", "a", "a las", "a la", "a les", "at", "às", "à", "gegen", "around", "vers",
+}
+PLACE_ARTICLES = {
+    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "einem", "im", "am",
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "al", "del",
+    "els", "les", "un", "una", "uns", "unes", "le", "les", "des", "un", "une", "du", "au", "aux",
+    "the", "a", "an",
+}
+
+
+def _clean_place_candidate(value: str, stopwords: set[str]) -> str:
+    words = re.findall(r"[\wÀ-ÿÄÖÜäöüß'’.-]+", value.strip())
+    cleaned: list[str] = []
+    for word in words[:6]:
+        normalized = word.casefold().strip(".-")
+        if not normalized or normalized in PLACE_TRAILING_TERMS:
+            break
+        if not cleaned and normalized in PLACE_ARTICLES:
+            continue
+        if normalized in stopwords and len(words) > 1:
+            continue
+        cleaned.append(word.strip(".-"))
+    return " ".join(cleaned).strip()
+
+
+def _place_candidate_is_generic(name: str, stopwords: set[str]) -> bool:
+    words = [word.casefold() for word in re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", name)]
+    return not words or all(word in PLACE_GENERIC_TERMS or word in stopwords for word in words)
+
+
+class PlaceNER:
+    """Optional multilingual NER with a dependency-free precision fallback."""
+
+    def __init__(self):
+        self._model = None
+        self._attempted = False
+
+    def _load(self):
+        if self._attempted or not AI_PLACE_NER_ENABLED or not AI_PLACE_NER_MODEL:
+            return
+        self._attempted = True
+        try:
+            import spacy
+
+            self._model = spacy.load(AI_PLACE_NER_MODEL)
+            log.info("place NER model loaded: %s", AI_PLACE_NER_MODEL)
+        except Exception as error:
+            log.warning("place NER model unavailable (%s); using conservative NER-lite fallback", str(error)[:240])
+
+    def extract(self, text: str) -> list[tuple[str, str]]:
+        self._load()
+        if self._model is not None:
+            return [
+                (entity.text.strip(), f"NER:{entity.label_}")
+                for entity in self._model(text).ents
+                if entity.label_.upper() in {"GPE", "LOC", "FAC", "ORG"}
+            ]
+        return [(match.group(0).strip(), "NER-lite:proper-noun") for match in PLACE_PROPER_SPAN_RE.finditer(text)]
+
+
+PLACE_NER = PlaceNER()
+
+
+def text_place_candidates(text: str, language: str, learning: dict | None = None) -> list[dict]:
+    """Generate small, evidence-backed candidates; never use the whole message as a place."""
+    normalized = " ".join(text.split()).strip()
+    if not normalized:
+        return []
+    stopwords = set(learning_terms_for(learning, "exclusion"))
+    learned_place_terms = set(learning_terms_for(learning, "place"))
+    topic_place_terms = set(
+        str(term).casefold()
+        for term in [
+            *(learning or {}).get("keyword", {}).get("places", {}).get("keywords", []),
+            *(learning or {}).get("keyword", {}).get("places", {}).get("detail", []),
+        ]
+    )
+    place_terms = learned_place_terms | topic_place_terms
+    candidates: dict[str, dict] = {}
+
+    def add(value: str, evidence: list[str], source: str):
+        name = _clean_place_candidate(value, stopwords)
+        if len(name) < 3 or _place_candidate_is_generic(name, stopwords):
+            return
+        key = re.sub(r"\W+", " ", name.casefold()).strip()
+        if not key:
+            return
+        item = candidates.setdefault(key, {"name": name, "evidence": [], "source": source})
+        item["evidence"] = list(dict.fromkeys([*item["evidence"], *evidence]))
+        if source not in item["source"]:
+            item["source"] = f"{item['source']}+{source}"
+
+    for match in PLACE_CONTEXT_RE.finditer(normalized):
+        value = match.group(1)
+        add(value, ["location-context"], "text-context")
+    for match in PLACE_ADDRESS_RE.finditer(normalized):
+        add(match.group(0), ["postal-address"], "address")
+    for value, evidence in PLACE_NER.extract(normalized):
+        add(value, [evidence], "ner")
+
+    result: list[dict] = []
+    for item in candidates.values():
+        name = item["name"]
+        words = re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", name)
+        proper = any(word[:1].isupper() for word in words)
+        place_type = any(has_term(name, term) for term in place_terms if term)
+        has_context = "location-context" in item["evidence"]
+        has_address = "postal-address" in item["evidence"]
+        has_ner = any(value.startswith("NER") for value in item["evidence"])
+        has_model_ner = any(value.startswith("NER:") for value in item["evidence"])
+        confidence = 0.34
+        confidence += 0.22 if has_context else 0
+        confidence += 0.18 if has_ner else 0
+        confidence += 0.26 if has_address else 0
+        confidence += 0.10 if proper else 0
+        confidence += 0.08 if place_type else 0
+        # NER-lite alone is intentionally insufficient: sentence-initial
+        # words and names of people are common false positives. A model-backed
+        # NER result can proceed to geocoder/Hermes validation on its own.
+        if not (has_context or has_address or has_model_ner):
+            continue
+        item["confidence"] = round(min(0.96, confidence), 4)
+        result.append(item)
+    return result
+
+
+class PlaceResolver:
+    """Optional geocoder with database caching and a polite request throttle."""
+
+    def __init__(self):
+        self.enabled = AI_PLACE_GEOCODER_ENABLED and bool(AI_PLACE_GEOCODER_URL)
+        self._lock = asyncio.Lock()
+        self._last_request = 0.0
+        if self.enabled:
+            log.info("place geocoder enabled at %s", AI_PLACE_GEOCODER_URL)
+
+    async def resolve(self, db, name: str, language: str) -> dict | None:
+        normalized = " ".join(name.casefold().split())
+        if not normalized:
+            return None
+        try:
+            cached = await db.fetchrow(
+                """SELECT resolved, display_name, latitude, longitude, confidence
+                   FROM ai_place_resolution_cache WHERE language=$1 AND normalized_name=$2""",
+                language, normalized,
+            )
+            if cached:
+                if not cached["resolved"]:
+                    return None
+                return {
+                    "displayName": cached["display_name"],
+                    "latitude": float(cached["latitude"]),
+                    "longitude": float(cached["longitude"]),
+                    "confidence": float(cached["confidence"]),
+                }
+        except Exception:
+            # Keep the detector usable during rolling migrations.
+            pass
+        if not self.enabled:
+            return None
+        async with self._lock:
+            wait_for = AI_PLACE_GEOCODER_THROTTLE_SECONDS - (time.monotonic() - self._last_request)
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+            self._last_request = time.monotonic()
+            try:
+                headers = {"user-agent": AI_PLACE_GEOCODER_USER_AGENT}
+                params = {"q": name, "format": "jsonv2", "limit": "1", "accept-language": language}
+                timeout = httpx.Timeout(AI_PLACE_GEOCODER_TIMEOUT_SECONDS)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.get(AI_PLACE_GEOCODER_URL, params=params, headers=headers)
+                    response.raise_for_status()
+                    values = response.json()
+                result = values[0] if isinstance(values, list) and values else None
+                if not isinstance(result, dict):
+                    await self._cache(db, normalized, language, None)
+                    return None
+                latitude = float(result["lat"])
+                longitude = float(result["lon"])
+                display_name = str(result.get("display_name") or name).strip()[:240]
+                importance = float(result.get("importance") or 0.0)
+                confidence = round(min(0.96, max(0.72, 0.76 + importance * 0.20)), 4)
+                await self._cache(db, normalized, language, {
+                    "displayName": display_name,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "confidence": confidence,
+                })
+                return {
+                    "displayName": display_name,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "confidence": confidence,
+                }
+            except Exception as error:
+                log.warning("place geocoding failed for %r: %s", name, str(error)[:240])
+                return None
+
+    async def _cache(self, db, normalized_name: str, language: str, result: dict | None):
+        try:
+            await db.execute(
+                """INSERT INTO ai_place_resolution_cache
+                       (language, normalized_name, display_name, latitude, longitude, confidence, resolved)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7)
+                   ON CONFLICT (language, normalized_name) DO UPDATE SET
+                     display_name=EXCLUDED.display_name, latitude=EXCLUDED.latitude,
+                     longitude=EXCLUDED.longitude, confidence=EXCLUDED.confidence,
+                     resolved=EXCLUDED.resolved, updated_at=NOW()""",
+                language, normalized_name,
+                result.get("displayName") if result else None,
+                result.get("latitude") if result else None,
+                result.get("longitude") if result else None,
+                result.get("confidence") if result else 0,
+                bool(result),
+            )
+        except Exception:
+            pass
+
+
+async def enrich_text_places(db, reviewer: HermesReviewer | None, text: str, language: str, learning: dict | None, resolver: PlaceResolver) -> list[dict]:
+    candidates = text_place_candidates(text, language, learning)
+    if not candidates:
+        return []
+    places: list[dict] = []
+    for candidate in candidates[:6]:
+        candidate["status"] = "candidate"
+        resolved = await resolver.resolve(db, candidate["name"], language)
+        if resolved:
+            candidate.update({
+                "name": resolved["displayName"],
+                "label": resolved["displayName"],
+                "latitude": resolved["latitude"],
+                "longitude": resolved["longitude"],
+                "confidence": max(float(candidate["confidence"]), float(resolved["confidence"])),
+                "source": f"{candidate['source']}+geocoder",
+            })
+        elif AI_PLACE_REQUIRE_GEOCODER:
+            continue
+
+        confidence = float(candidate["confidence"])
+        if reviewer and reviewer.enabled and confidence < AI_PLACE_HERMES_MIN_CONFIDENCE:
+            decision = await reviewer.review_place(candidate, text, language)
+            if decision and decision.decision == "reject":
+                continue
+            if decision and decision.decision == "accept":
+                confidence = max(confidence, float(decision.confidence))
+                if decision.canonicalName:
+                    candidate["name"] = decision.canonicalName.strip()[:160]
+                    candidate["label"] = candidate["name"]
+                candidate["source"] = f"{candidate['source']}+hermes"
+            elif decision is not None and decision.decision == "review" and confidence < AI_PLACE_MIN_CONFIDENCE:
+                continue
+        if confidence < AI_PLACE_MIN_CONFIDENCE:
+            continue
+        candidate["confidence"] = round(min(0.99, confidence), 4)
+        candidate["status"] = "accepted"
+        candidate["learningEligible"] = candidate["confidence"] >= AI_PLACE_LEARNING_MIN_CONFIDENCE
+        places.append(candidate)
+    unique: dict[str, dict] = {}
+    for place in places:
+        key = re.sub(r"\W+", " ", str(place.get("name") or "").casefold()).strip()
+        if key and (key not in unique or place["confidence"] > unique[key]["confidence"]):
+            unique[key] = place
+    return list(unique.values())
 
 
 def reply_target(item: dict) -> str | None:
@@ -624,7 +1004,11 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
     normalized = text.strip()
     keywords = ("morgen", "heute", "treffen", "termin", "event", "wichtig", "ort", "straße", "bahnhof", "meeting", "samstag", "sonntag", "costa", "montserrat", "mañana", "hoy", "reunión", "estación", "lugar", "demà", "avui", "trobem", "estació", "lloc", "tomorrow", "today", "saturday", "sunday", "station", "place", "rendez-vous", "demain", "aujourd", "gare", "lieu")
     learned_relevance = learning_weight(learning, "relevance", normalized, keywords)
-    score = min(0.18 + (learned_relevance if (learning or {}).get("relevance") else learned_relevance * 0.12), 0.98)
+    raw_score = 0.18 + (learned_relevance if (learning or {}).get("relevance") else learned_relevance * 0.12)
+    # Negative group-specific learning is valid, but the public analysis
+    # contract only permits scores in [0, 1]. A single negative term must
+    # lower relevance without making Pydantic reject the whole backfill.
+    score = max(0.0, min(0.98, raw_score))
     events = multi_message_events(message_id, context, learning)
     if events:
         score = max(score, 0.78)
@@ -648,9 +1032,17 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
     location = location_details(current)
     place = {}
     if location:
-        place = {"name": location["name"], "latitude": location["latitude"], "longitude": location["longitude"], "confidence": 0.9}
-    elif any(has_term(normalized, word) for word in learning_terms_for(learning, "place", ("ort", "bahnhof", "straße", "lugar", "estación", "lloc", "estació", "place", "station", "lieu", "gare", "restaurant", "office", "oficina", "bureau"))):
-        place = {"name": normalized[:80], "confidence": 0.45}
+        place = {
+            "name": location["name"],
+            "label": location.get("label"),
+            "latitude": location["latitude"],
+            "longitude": location["longitude"],
+            "confidence": location.get("confidence", 0.99),
+            "source": location.get("source", "shared_location"),
+            "status": location.get("status", "accepted"),
+            "learningEligible": location.get("learningEligible", True),
+            "evidence": ["shared-location"],
+        }
     provenance = [Provenance(field="summary", sourceMessageIds=[message_id], confidence=0.64)]
     if events:
         provenance.append(Provenance(field="events", sourceMessageIds=list(dict.fromkeys(source for event in events for source in event.sourceMessageIds)), confidence=max(event.confidence for event in events)))
@@ -1260,14 +1652,41 @@ class AIAdapter:
 
 
 class HeuristicAdapter(AIAdapter):
+    def __init__(self, db=None, reviewer: HermesReviewer | None = None):
+        self.db = db
+        self.reviewer = reviewer
+        self.place_resolver = PlaceResolver()
+
     async def analyze(self, message_id: str, text: str, context: list[dict], language: str = "de", learning: dict | None = None) -> Analysis:
-        return heuristic_analysis(message_id, text, context, language, learning)
+        analysis = heuristic_analysis(message_id, text, context, language, learning)
+        current = next((item for item in context if str(item.get("id")) == str(message_id)), {})
+        explicit_location = location_details(current)
+        if explicit_location:
+            # The deterministic analysis already contains the high-confidence
+            # shared location. Text candidates are deliberately not mixed with
+            # it because a caption may contain unrelated words.
+            places = analysis.places
+        else:
+            places = await enrich_text_places(self.db, self.reviewer, text, language, learning, self.place_resolver)
+        analysis.places = places
+        # Knowledge topic matching runs after place validation so an ordinary
+        # sentence containing “place” cannot create a Places KB entry.
+        analysis.knowledge = knowledge_items_for_message(
+            message_id, text, context, analysis.entities, analysis.places, language, learning,
+        )
+        if places:
+            analysis.provenance.append(Provenance(
+                field="places",
+                sourceMessageIds=[message_id],
+                confidence=max(float(place.get("confidence") or 0) for place in places),
+            ))
+        return analysis
 
 
-def build_adapter() -> AIAdapter:
+def build_adapter(db=None, reviewer: HermesReviewer | None = None) -> AIAdapter:
     if AI_PROVIDER not in {"heuristic", "hybrid"}:
         log.warning("AI_PROVIDER=%s ist in dieser Beta lokal nicht aktiviert; benutze HeuristicAdapter", AI_PROVIDER)
-    return HeuristicAdapter()
+    return HeuristicAdapter(db, reviewer)
 
 
 async def publish(js, subject: str, event_type: str, data: dict):
@@ -1665,6 +2084,7 @@ async def record_inferred_learning(db, group_id: str | None, language: str, text
         return
     stopwords = set(learning_terms_for(learning, "exclusion"))
     tokens = inferred_learning_tokens(text, stopwords)
+    signal_terms: dict[tuple[str, str | None], list[str]] = {}
 
     # One signal is kept per category/topic. If several detected items point
     # to the same scope, only the strongest conservative delta is applied.
@@ -1682,8 +2102,18 @@ async def record_inferred_learning(db, group_id: str | None, language: str, text
         add_signal("relevance", AI_LEARNING_INFERENCE_BASE_DELTA)
     if analysis.events:
         add_signal("event", AI_LEARNING_INFERENCE_BASE_DELTA)
-    if analysis.places:
+    place_items = [
+        place for place in analysis.places
+        if str(place.get("status") or "accepted") == "accepted" and place.get("learningEligible")
+    ]
+    if place_items:
         add_signal("place", AI_LEARNING_INFERENCE_BASE_DELTA)
+        signal_terms[("place", None)] = list(dict.fromkeys(
+            token
+            for place in place_items
+            for token in inferred_learning_tokens(str(place.get("name") or ""), stopwords)
+            if token not in PLACE_GENERIC_TERMS and not token.startswith("telegram-ort")
+        ))
     for item in analysis.knowledge:
         topic_key = str(item.topicKey or "").strip()
         if topic_key and item.confidence >= 0.72:
@@ -1694,7 +2124,8 @@ async def record_inferred_learning(db, group_id: str | None, language: str, text
         # was seen again. The existing term is the anchor; only unseen terms
         # can be inferred from it in this pass.
         known = learning_known_terms(learning, category, topic_key)
-        candidates = [term for term in tokens if term not in known]
+        scoped_tokens = signal_terms.get((category, topic_key), tokens)
+        candidates = [term for term in scoped_tokens if term not in known]
         for term in candidates[:AI_LEARNING_MAX_TERMS_PER_SIGNAL]:
             topic_value = topic_key or ""
             row = await db.fetchrow(
@@ -1892,9 +2323,9 @@ async def main():
     db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=4)
     nc = await nats.connect(NATS_URL)
     js = nc.jetstream()
-    adapter = build_adapter()
     encoder = EmbeddingProvider()
     hermes_reviewer = HermesReviewer()
+    adapter = build_adapter(db, hermes_reviewer)
     try:
         await js.stream_info("WAGI_EVENTS")
     except Exception:

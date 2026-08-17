@@ -366,6 +366,18 @@ entity ai_learning_term_history {
   occurred_at : timestamptz
 }
 
+entity ai_place_resolution_cache {
+  * id : uuid <<PK>>
+  --
+  language : de | es | ca | en | fr
+  normalized_name : text
+  display_name : text
+  latitude / longitude : double
+  confidence : numeric
+  resolved : bool
+  updated_at : timestamptz
+}
+
 app_users ||--o{ user_sessions
 app_users ||--o{ auth_email_tokens
 app_users ||--o{ user_roles
@@ -407,6 +419,7 @@ app_users ||--o{ replay_jobs
 app_users ||--o{ ai_reassessment_jobs
 ai_learning_terms ||--o{ ai_learning_term_history
 wa_groups ||--o{ ai_learning_term_history
+wa_groups ..> ai_place_resolution_cache : language-scoped cache
 
 note "PostGIS aktiviert in PostgreSQL für Ortsdaten.\npgvector wird primär für knowledge_items.embedding verwendet.\nNATS JetStream und MinIO sind Laufzeitdienste, keine relationalen Tabellen." as N1
 N1 .. wa_groups

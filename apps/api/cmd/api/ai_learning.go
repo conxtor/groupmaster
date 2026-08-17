@@ -711,7 +711,7 @@ func feedbackLearningDelta(targetType, decision, level string) float64 {
 	return 0
 }
 
-func (a *app) recordAILearningFeedback(ctx context.Context, groupID, messageID, targetType, decision string, correction map[string]any) error {
+func (a *app) recordAILearningFeedback(ctx context.Context, groupID, messageID, targetType, targetKey, decision string, correction map[string]any) error {
 	if targetType != "relevance" && targetType != "event" && targetType != "place" {
 		return nil
 	}
@@ -736,7 +736,14 @@ func (a *app) recordAILearningFeedback(ctx context.Context, groupID, messageID, 
 	if delta == 0 {
 		return nil
 	}
-	for _, term := range learningTokens(text, stopwords) {
+	terms := learningTokens(text, stopwords)
+	if targetType == "place" {
+		// A place correction must teach the place, not every word in the
+		// surrounding sentence. This prevents feedback such as “Treffen in
+		// Barcelona am Samstag” from learning all four words as places.
+		terms = learningTokens(targetKey, stopwords)
+	}
+	for _, term := range terms {
 		positive, negative := 0, 0
 		if delta > 0 {
 			positive = 1

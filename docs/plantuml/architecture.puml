@@ -35,7 +35,7 @@ package "Event- und Verarbeitungsplattform" {
   queue "NATS JetStream\nWAGI_REASSESSMENT" as ReassessmentNATS
   queue "NATS JetStream\nWAGI_KB_REBUILD" as KnowledgeRebuildNATS
   component "media-worker\nMinIO + OCR + whisper.cpp medium" as Media
-  component "ai-worker\nHeuristik + Embeddings\noptional Hermes-Agent" as AI
+  component "ai-worker\nHeuristik + NER-lite/spaCy\nGeocoder-Cache + Embeddings\noptional Hermes-Agent" as AI
   component "NATS Provisioner\nStreams + Durable Consumer" as Provisioner
 }
 

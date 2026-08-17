@@ -6,3 +6,4 @@ dependencies = ["asyncpg>=0.29.0", "nats-py>=2.9.0", "pydantic>=2.8.0", "fastemb
 
 [project.optional-dependencies]
 llm = ["httpx>=0.27.0"]
+place-ner = ["spacy>=3.7,<4"]

@@ -306,7 +306,7 @@ ist der Standard; ein optionaler externer Provider oder Hermes-Agent kann über
 Prompt-Versionen, Modellwahl, Retry und Cooldown sind konfigurierbar. Der
 Worker verbindet sich in Compose automatisch mit PostgreSQL und NATS.
 
-Die Knowledge-Base verwendet im MVP ein Hybridmodell `cascade-v4`: strenge
+Die Knowledge-Base verwendet im MVP ein Hybridmodell `cascade-v5-places`: strenge
 Evidenzregeln, mehrsprachige Embeddings mit pgvector und optional eine Prüfung
 über einen entfernten Hermes-Agent.
 Ein einzelnes kurzes Posting, eine reine Terminzeile, ein einzelner Karten-Pin
@@ -326,9 +326,9 @@ sprachabhängige Themen und die aktuelle Generation in
 `infra/migrations/019_knowledge_topics.sql` und
 `infra/migrations/020_knowledge_generations.sql`.
 
-Die aktuelle Qualitätskaskade (`cascade-v4`) arbeitet in drei lokalen Stufen:
+Die aktuelle Qualitätskaskade (`cascade-v5-places`) arbeitet in drei lokalen Stufen:
 
-1. evidenzbasierte Regeln für Relevanz und Event-Kandidaten sowie
+1. evidenzbasierte Regeln für Relevanz, Events und präzise Ortskandidaten sowie
    datenbankbasierte, sprachabhängige Topic-/Detailbegriffe;
 2. ein begrenztes mehrsprachiges Embedding-Fenster für semantische
    Zusammenführung, stabile Event-/Knowledge-Schlüssel und eine vorsichtige
@@ -421,8 +421,8 @@ Generation erneut.
 Für die Kaskade können Kontextfenster und Event-Schwelle angepasst werden:
 
 ```dotenv
-AI_PROMPT_VERSION=cascade-v4
-AI_KNOWLEDGE_VERSION=cascade-v4
+AI_PROMPT_VERSION=cascade-v5-places
+AI_KNOWLEDGE_VERSION=cascade-v5-places
 AI_CONTEXT_MAX_MESSAGES=80
 AI_EVENT_WINDOW_HOURS=36
 AI_EVENT_MIN_CONFIDENCE=0.70
@@ -496,6 +496,46 @@ einem endgültigen Ausfall pausiert der Verifier für
 keine Nachrichtenverarbeitung blockiert. Der Read-Timeout beträgt standardmäßig
 60 Sekunden; `AI_HERMES_CONNECT_TIMEOUT_MS` begrenzt den Verbindungsaufbau
 separat.
+
+### Präzise Ortsauswertung
+
+Die Ortsauswertung verwendet eine mehrstufige Präzisionskaskade. GPS- und
+Standortnachrichten von WhatsApp oder Telegram werden direkt mit hoher
+Konfidenz übernommen. Text-Orte werden dagegen nur aus einem kleinen
+Kandidatenausschnitt mit Ortskontext, Adresse oder NER-Evidenz gebildet; der
+komplette Nachrichtentext wird niemals mehr als Ortsname gespeichert.
+
+```dotenv
+AI_PLACE_NER_ENABLED=true
+AI_PLACE_NER_MODEL=
+AI_PLACE_MIN_CONFIDENCE=0.70
+AI_PLACE_HERMES_ENABLED=true
+AI_PLACE_HERMES_MIN_CONFIDENCE=0.78
+AI_PLACE_LEARNING_MIN_CONFIDENCE=0.82
+AI_PLACE_GEOCODER_ENABLED=false
+AI_PLACE_GEOCODER_URL=https://nominatim.openstreetmap.org/search
+AI_PLACE_GEOCODER_USER_AGENT=wagi-place-resolver/1.0
+AI_PLACE_GEOCODER_TIMEOUT_MS=5000
+AI_PLACE_GEOCODER_THROTTLE_MS=1100
+AI_PLACE_REQUIRE_GEOCODER=false
+```
+
+Der eingebaute NER-lite-Fallback arbeitet ohne zusätzliches Modell. Für ein
+installiertes mehrsprachiges spaCy-Modell kann `AI_PLACE_NER_MODEL` gesetzt
+werden; das optionale Paket ist als `place-ner`-Extra in
+`apps/ai-worker/pyproject.toml` definiert. Ein Geocoder ist standardmäßig
+deaktiviert, damit keine Ortsnamen ungefragt an einen externen Dienst
+übertragen werden. Wird er aktiviert, werden erfolgreiche und negative
+Auflösungen in `ai_place_resolution_cache` gecacht und die Anfragen gedrosselt.
+
+Hermes prüft nur unsichere Textkandidaten. Bei Hermes-, Geocoder- oder
+Modellfehlern bleibt die lokale Entscheidung aktiv; Kandidaten unterhalb der
+Mindestkonfidenz werden verworfen. Automatisches Lernen übernimmt ausschließlich
+akzeptierte Ortsnamen und nicht den umgebenden Nachrichtentext. Ortsfeedback
+lernt ebenfalls nur den bestätigten oder abgelehnten Ortsbegriff.
+Die zugehörige Cache-Tabelle und die Bereinigung alter, fälschlich als Orts-
+begriffe seedierter Zeit- und Füllwörter werden durch Migration
+`infra/migrations/023_place_precision_pipeline.sql` angelegt.
 
 Audiotranskriptionen laufen lokal mit `whisper.cpp` und dem multilingualen
 `medium`-Modell. Die relevanten Einstellungen sind:
