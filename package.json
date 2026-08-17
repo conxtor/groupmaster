@@ -7,7 +7,7 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "dev:web": "npm run dev --workspace=@wagi/web",
-    "dev:connector": "npm run dev --workspace=@wagi/wa-connector",
-    "dev:telegram": "npm run dev --workspace=@wagi/tg-connector"
+    "dev:connector": "cd apps/wa-connector-go && go run .",
+    "dev:telegram": "cd apps/tg-connector-go && go run ."
   }
 }

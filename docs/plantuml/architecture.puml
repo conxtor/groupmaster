@@ -22,9 +22,8 @@ package "Web-Zugriff" {
 }
 
 package "Connector-Pools" {
-  component "WhatsApp Connector\nNode.js + Baileys" as WAConnector
+  component "WhatsApp Connector\nGo + whatsmeow\nOnboarding + Leases" as WAConnector
   component "WhatsApp Processing Worker\nrotierende Leases" as WAWorker
-  component "WhatsApp Onboarding Slot\nQR-Pairing" as WAOnboarding
   component "Telegram Connector\nGo + gotd/td / MTProto" as TGConnector
   component "Telegram Processing Worker\nrotierende Leases" as TGWorker
   component "Telegram Onboarding Slot\nQR-Login" as TGOnboarding
@@ -41,6 +40,7 @@ package "Event- und Verarbeitungsplattform" {
 
 package "Persistenz" {
   database "PostgreSQL\nPostGIS + pgvector" as DB
+  database "PostgreSQL-Schema\nwa_whatsmeow\nverschlüsselte Device-/Signal-Keys" as WAMeowDB
   storage "MinIO\nwa-media-images\nwa-media-videos\nwa-media-audio\nwa-media-documents\nwa-media-other" as MinIO
   folder "Shared media_data\nIncoming-Dateien" as MediaVolume
 }
@@ -61,10 +61,10 @@ Admin --> Web : /admin/knowledge-topics\nThemen je Sprache + KB neu erstellen
 API --> Mail : SMTP STARTTLS/TLS\nsprachabhängige Auth-Mails
 Mail --> User : Verifizierungslink\nPasswort-Reset-Link
 
-WhatsApp --> WAOnboarding : Linked Device / QR
-WAOnboarding --> WAConnector : Baileys session
+WhatsApp --> WAConnector : Linked Device / QR
+WAConnector --> WAMeowDB : SQLStore\nmehrere Accounts
 WAConnector --> WAWorker : account lease / rotation
-WAWorker --> WhatsApp : selected groups\nBackfill + live receive
+WAWorker --> WhatsApp : selected groups\nHistory-Sync + receive
 
 Telegram --> TGOnboarding : QR / MTProto Login
 TGOnboarding --> TGConnector : gotd session snapshot
@@ -125,7 +125,8 @@ end note
 
 note right of TGConnector
   Direkte Telegram-Verbindung mit gotd/td
-  ist der einzige gestartete Telegram-Pfad.
+  ist der einzige Telegram-Pfad;
+  kein Bot-API- oder GramJS-Fallback.
   Session-Snapshots und Cursor liegen in
   PostgreSQL; QR-Payloads werden niemals
   geloggt.

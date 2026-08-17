@@ -121,49 +121,6 @@ services:
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 
-  wa-connector:
-    build:
-      context: ../..
-      dockerfile: apps/wa-connector/Dockerfile
-    environment:
-      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
-      NATS_URL: nats://nats:4222
-      PORT: 3001
-      WA_MOCK_MODE: ${WA_MOCK_MODE:-true}
-      WA_GROUP_ALLOWLIST: ${WA_GROUP_ALLOWLIST:-}
-      WA_AUTH_DIR: /data/wa-auth
-      WA_SYNC_HISTORY: ${WA_SYNC_HISTORY:-false}
-      WA_BACKFILL_DAYS: ${WA_BACKFILL_DAYS:-7}
-      WA_BACKFILL_THROTTLE_MS: ${WA_BACKFILL_THROTTLE_MS:-250}
-      WA_BACKFILL_GROUP_DELAY_MS: ${WA_BACKFILL_GROUP_DELAY_MS:-1500}
-      WA_HISTORY_PAGE_SIZE: ${WA_HISTORY_PAGE_SIZE:-50}
-      WA_HISTORY_MAX_PAGES: ${WA_HISTORY_MAX_PAGES:-20}
-      WA_HISTORY_WAIT_MS: ${WA_HISTORY_WAIT_MS:-20000}
-      WA_MEDIA_DOWNLOAD_TIMEOUT_MS: ${WA_MEDIA_DOWNLOAD_TIMEOUT_MS:-30000}
-      WA_MEDIA_DOWNLOAD_ATTEMPTS: ${WA_MEDIA_DOWNLOAD_ATTEMPTS:-3}
-      WA_MEDIA_RETRY_INTERVAL_MS: ${WA_MEDIA_RETRY_INTERVAL_MS:-60000}
-      GROUP_REFRESH_INTERVAL_MS: ${GROUP_REFRESH_INTERVAL_MS:-60000}
-      MEDIA_DIR: /data/media
-      MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
-      CONNECTOR_POOL_ENABLED: ${CONNECTOR_POOL_ENABLED:-true}
-      CONNECTOR_ROLE: onboarding
-      WA_CONNECTOR_POOL_SIZE: ${WA_CONNECTOR_POOL_SIZE:-5}
-      WA_ONBOARDING_SLOTS: ${WA_ONBOARDING_SLOTS:-1}
-      CONNECTOR_SYNC_INTERVAL_SECONDS: ${CONNECTOR_SYNC_INTERVAL_SECONDS:-300}
-      CONNECTOR_WORKER_ID: ${CONNECTOR_WORKER_ID:-}
-      CONNECTOR_ACCOUNT_ID: ${WA_CONNECTOR_ACCOUNT_ID:-}
-      CONNECTOR_LEASE_SECONDS: ${CONNECTOR_LEASE_SECONDS:-90}
-      CONNECTOR_ACCOUNT_SLOT_SECONDS: ${CONNECTOR_ACCOUNT_SLOT_SECONDS:-1800}
-      WAGI_BOOTSTRAP_ADMIN_EMAIL: ${WAGI_BOOTSTRAP_ADMIN_EMAIL:-volker@kerkhoff.es}
-    volumes:
-      - wa_auth:/data/wa-auth
-      - media_data:/data/media
-    depends_on:
-      db: {condition: service_healthy}
-      nats: {condition: service_healthy}
-      migrate: {condition: service_completed_successfully}
-      nats-provisioner: {condition: service_completed_successfully}
-
   tg-connector:
     build:
       context: ../..
@@ -200,33 +157,62 @@ services:
       migrate: {condition: service_completed_successfully}
       nats-provisioner: {condition: service_completed_successfully}
 
-  # Additional pool workers intentionally do not publish a host port. The
-  # first service above remains the local QR/status control endpoint; these
-  # replicas consume leased accounts from PostgreSQL.
-  wa-connector-worker:
-    # Keep pool workers internal. Classic docker-compose merges `ports` from
-    # `extends`, so define the worker service without inheriting host ports.
+  # WhatsApp uses the PostgreSQL-backed whatsmeow connector for onboarding and
+  # processing. The onboarding service exposes the internal QR/status endpoint;
+  # the worker service consumes processing leases.
+  wa-connector:
     build:
       context: ../..
-      dockerfile: apps/wa-connector/Dockerfile
+      dockerfile: apps/wa-connector-go/Dockerfile
     environment:
       DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
       NATS_URL: nats://nats:4222
-      PORT: 3001
-      WA_AUTH_DIR: /data/wa-auth
-      WA_MOCK_MODE: ${WA_MOCK_MODE:-false}
-      WA_SYNC_HISTORY: ${WA_SYNC_HISTORY:-false}
+      WA_PORT: 3001
       WA_BACKFILL_DAYS: ${WA_BACKFILL_DAYS:-7}
       WA_BACKFILL_THROTTLE_MS: ${WA_BACKFILL_THROTTLE_MS:-250}
       WA_BACKFILL_GROUP_DELAY_MS: ${WA_BACKFILL_GROUP_DELAY_MS:-1500}
       WA_HISTORY_PAGE_SIZE: ${WA_HISTORY_PAGE_SIZE:-50}
-      WA_HISTORY_MAX_PAGES: ${WA_HISTORY_MAX_PAGES:-20}
-      WA_HISTORY_WAIT_MS: ${WA_HISTORY_WAIT_MS:-20000}
-      WA_GROUP_ALLOWLIST: ${WA_GROUP_ALLOWLIST:-}
-      WA_MEDIA_DOWNLOAD_TIMEOUT_MS: ${WA_MEDIA_DOWNLOAD_TIMEOUT_MS:-30000}
+      WA_HISTORY_REQUEST_DELAY_MS: ${WA_HISTORY_REQUEST_DELAY_MS:-500}
       WA_MEDIA_DOWNLOAD_ATTEMPTS: ${WA_MEDIA_DOWNLOAD_ATTEMPTS:-3}
       WA_MEDIA_RETRY_INTERVAL_MS: ${WA_MEDIA_RETRY_INTERVAL_MS:-60000}
-      GROUP_REFRESH_INTERVAL_MS: ${GROUP_REFRESH_INTERVAL_MS:-60000}
+      WA_SYNC_GRACE_SECONDS: ${WA_SYNC_GRACE_SECONDS:-20}
+      WA_WHATSMEOW_SQL_SCHEMA: ${WA_WHATSMEOW_SQL_SCHEMA:-wa_whatsmeow}
+      MEDIA_DIR: /data/media
+      MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
+      CONNECTOR_POOL_ENABLED: ${CONNECTOR_POOL_ENABLED:-true}
+      CONNECTOR_ROLE: onboarding
+      WA_CONNECTOR_POOL_SIZE: ${WA_CONNECTOR_POOL_SIZE:-5}
+      WA_ONBOARDING_SLOTS: ${WA_ONBOARDING_SLOTS:-1}
+      CONNECTOR_SYNC_INTERVAL_SECONDS: ${CONNECTOR_SYNC_INTERVAL_SECONDS:-300}
+      CONNECTOR_WORKER_ID: ${CONNECTOR_WORKER_ID:-}
+      CONNECTOR_ACCOUNT_ID: ${WA_CONNECTOR_ACCOUNT_ID:-}
+      CONNECTOR_LEASE_SECONDS: ${CONNECTOR_LEASE_SECONDS:-90}
+      CONNECTOR_ACCOUNT_SLOT_SECONDS: ${CONNECTOR_ACCOUNT_SLOT_SECONDS:-1800}
+    volumes:
+      - media_data:/data/media
+    depends_on:
+      db: {condition: service_healthy}
+      nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      nats-provisioner: {condition: service_completed_successfully}
+
+  wa-connector-worker:
+    build:
+      context: ../..
+      dockerfile: apps/wa-connector-go/Dockerfile
+    environment:
+      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
+      NATS_URL: nats://nats:4222
+      WA_PORT: 3001
+      WA_BACKFILL_DAYS: ${WA_BACKFILL_DAYS:-7}
+      WA_BACKFILL_THROTTLE_MS: ${WA_BACKFILL_THROTTLE_MS:-250}
+      WA_BACKFILL_GROUP_DELAY_MS: ${WA_BACKFILL_GROUP_DELAY_MS:-1500}
+      WA_HISTORY_PAGE_SIZE: ${WA_HISTORY_PAGE_SIZE:-50}
+      WA_HISTORY_REQUEST_DELAY_MS: ${WA_HISTORY_REQUEST_DELAY_MS:-500}
+      WA_MEDIA_DOWNLOAD_ATTEMPTS: ${WA_MEDIA_DOWNLOAD_ATTEMPTS:-3}
+      WA_MEDIA_RETRY_INTERVAL_MS: ${WA_MEDIA_RETRY_INTERVAL_MS:-60000}
+      WA_SYNC_GRACE_SECONDS: ${WA_SYNC_GRACE_SECONDS:-20}
+      WA_WHATSMEOW_SQL_SCHEMA: ${WA_WHATSMEOW_SQL_SCHEMA:-wa_whatsmeow}
       MEDIA_DIR: /data/media
       MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
       CONNECTOR_POOL_ENABLED: ${CONNECTOR_POOL_ENABLED:-true}
@@ -240,9 +226,7 @@ services:
       CONNECTOR_ACCOUNT_SLOT_SECONDS: ${CONNECTOR_ACCOUNT_SLOT_SECONDS:-1800}
       CONNECTOR_START_DELAY_MS: ${CONNECTOR_START_DELAY_MS:-5000}
       CONNECTOR_POOL_RETRY_DELAY_MS: ${CONNECTOR_POOL_RETRY_DELAY_MS:-20000}
-      WAGI_BOOTSTRAP_ADMIN_EMAIL: ${WAGI_BOOTSTRAP_ADMIN_EMAIL:-volker@kerkhoff.es}
     volumes:
-      - wa_auth:/data/wa-auth
       - media_data:/data/media
     depends_on:
       db: {condition: service_healthy}
@@ -423,7 +407,6 @@ volumes:
   postgres_data:
   nats_data:
   minio_data:
-  wa_auth:
   tg_state:
   whisper_models:
   media_data:

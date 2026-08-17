@@ -7,7 +7,7 @@ Die lokale MVP-Umgebung wird mit `docker-compose --env-file .env -f infra/docker
 Für den produktionsnahen Betrieb gibt es die getrennte Datei `docker-compose-dockge.yaml` im Projektstamm. Sie verwendet ausschließlich die in GHCR veröffentlichten WAGI-Images; die lokale Compose-Datei bleibt unverändert.
 
 1. In der Organisation `conxtor` unter **Settings → Packages → Package Creation** öffentliche Pakete als Standard erlauben. Bereits erzeugte Pakete müssen auf ihrer GitHub-Paket-Seite unter **Package settings → Change visibility → Public** umgestellt werden.
-2. Den Workflow `.github/workflows/publish-ghcr.yml` in GitHub unter **Actions** manuell mit `workflow_dispatch` starten. Er veröffentlicht `wagi-api`, `wagi-web`, `wagi-ai-worker`, `wagi-media-worker`, `wagi-wa-connector`, `wagi-tg-connector`, `wagi-nats-provisioner` und `wagi-migrate` ausschließlich für `linux/amd64` (Intel/AMD x86_64).
+2. Den Workflow `.github/workflows/publish-ghcr.yml` in GitHub unter **Actions** manuell mit `workflow_dispatch` starten. Er veröffentlicht `wagi-api`, `wagi-web`, `wagi-ai-worker`, `wagi-media-worker`, `wagi-wa-connector-whatsmeow`, `wagi-tg-connector`, `wagi-nats-provisioner` und `wagi-migrate` ausschließlich für `linux/amd64` (Intel/AMD x86_64).
 3. GHCR-Zugriff für Dockge/Docker ist bei öffentlichen Images nicht erforderlich. Für private Images wäre `docker login ghcr.io` mit einem GitHub-Token mit `read:packages` nötig.
 4. `.env.example-dockge` nach `.env-dockge` kopieren und alle `REPLACE_ME`-Werte setzen. Dockge muss diese Datei als Environment-Datei des Stacks verwenden.
 5. Den Stack mit `docker-compose --env-file .env-dockge -f docker-compose-dockge.yaml up -d` starten.
@@ -34,4 +34,11 @@ Außerdem müssen `conxtor.com` (A und gegebenenfalls AAAA) auf den Server zeige
 
 Die Compose-Varianten enthalten keinen separaten Bucket-Initialisierungsdienst. Der `media-worker` prüft den jeweiligen typabhängigen Bucket (`MINIO_BUCKET_IMAGES`, `MINIO_BUCKET_VIDEOS`, `MINIO_BUCKET_AUDIO`, `MINIO_BUCKET_DOCUMENTS` oder `MINIO_BUCKET_OTHER`) vor Medienzugriffen und legt ihn bei Bedarf idempotent an. Die API führt bei aktiviertem `MEDIA_BUCKET_MIGRATION_ENABLED` beim Start einmalig die wiederaufnehmbare Migration aus dem Legacy-Bucket `MINIO_BUCKET` aus. Ein Neustart löscht weder Buckets noch vorhandene Objekte. Die Dockge-Variante verwendet eigene, benannte Volumes (`wagi_dockge_*`) für Datenbank, JetStream, MinIO, Medien, Connector-Sessions und Modelle. Dadurch werden lokale Testdaten nicht verwendet und ein Stack-Neustart löscht keine persistenten Daten.
 
-Der Telegram-Dienst wird in beiden Compose-Welten aus `apps/tg-connector-go/Dockerfile` gebaut beziehungsweise als `wagi-tg-connector` aus GHCR geladen. Die Implementierung nutzt Go 1.25 und `gotd/td` für direkte MTProto-Verbindungen. Sessions und Cursor bleiben in PostgreSQL; `TG_BOT_TOKEN`, `TG_PHONE` und `TG_SESSION` werden vom gestarteten Go-Connector nicht verwendet. Der alte Node/GramJS-Connector bleibt ausschließlich als nicht gestartete Rückfallquelle im Repository.
+Der Telegram-Dienst wird in beiden Compose-Welten aus `apps/tg-connector-go/Dockerfile` gebaut beziehungsweise als `wagi-tg-connector` aus GHCR geladen. Die Implementierung nutzt Go 1.25 und `gotd/td` für direkte MTProto-Verbindungen. Sessions und Cursor bleiben in PostgreSQL. Es gibt keinen Telegram-Bot- oder GramJS-Fallback; QR-Login und Nachrichtenabruf laufen ausschließlich über die persönliche MTProto-Session.
+
+Der Consumer-WhatsApp-Konnektor `wagi-wa-connector-whatsmeow` ist der einzige
+WhatsApp-Konnektor im Stack. Das Image wird lokal aus
+`apps/wa-connector-go/Dockerfile` gebaut oder aus GHCR geladen. Onboarding und
+Processing verwenden die Dienste `wa-connector` und `wa-connector-worker`; die
+whatsmeow-SQLStore verwendet die Migration `024_whatsmeow_storage.sql` und das
+PostgreSQL-Schema `wa_whatsmeow`. Es wird kein Auth-Dateivolume benötigt.

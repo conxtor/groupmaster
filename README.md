@@ -42,7 +42,7 @@ Alle Einstellungen werden über `.env` gesetzt. Die Ausgangswerte stehen in
 betroffenen Services neu erstellen:
 
 ```bash
-docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector tg-connector ai-worker media-worker
+docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector wa-connector-worker tg-connector ai-worker media-worker
 ```
 
 `.env` enthält Zugangsdaten und darf nicht committed werden. Innerhalb der
@@ -136,7 +136,7 @@ ausgewählten Untergruppe gespeichert.
 Anschließend die Konnektoren und das Web-Dashboard neu erstellen:
 
 ```bash
-docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build nginx wa-connector tg-connector
+docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build nginx wa-connector wa-connector-worker tg-connector
 ```
 
 Die Connector-Seite ruft die lokalen Connectoren automatisch ab. Danach gilt:
@@ -172,76 +172,61 @@ Browsersprache.
 
 ### WhatsApp-Konnektor
 
-Der WhatsApp-Konnektor verwendet für Consumer-Accounts ein Linked Device über
-Baileys. Für die Demo ist er zunächst im Mock-Modus aktiv:
+Der Consumer-WhatsApp-Konnektor verwendet ein Linked Device über den Go-
+Connector [whatsmeow](https://github.com/tulir/whatsmeow). Sitzungs-, Geräte- und
+Signal-Daten werden verschlüsselt in PostgreSQL im Schema `wa_whatsmeow`
+gespeichert. Es gibt keine parallele Legacy-Implementierung und kein
+Auth-Dateivolume.
 
 ```dotenv
-WA_MOCK_MODE=true
-WA_GROUP_ALLOWLIST=
-WA_AUTH_DIR=./data/wa-auth
-WA_SYNC_HISTORY=false
 WA_BACKFILL_DAYS=7
 WA_BACKFILL_THROTTLE_MS=250
 WA_BACKFILL_GROUP_DELAY_MS=1500
 WA_HISTORY_PAGE_SIZE=50
-WA_HISTORY_MAX_PAGES=20
-WA_HISTORY_WAIT_MS=20000
+WA_HISTORY_REQUEST_DELAY_MS=500
+WA_SYNC_GRACE_SECONDS=20
+WA_WHATSMEOW_SQL_SCHEMA=wa_whatsmeow
+WA_MEDIA_DOWNLOAD_ATTEMPTS=3
+WA_MEDIA_RETRY_INTERVAL_MS=60000
 ```
 
 Für ein echtes Konto:
 
-1. `WA_MOCK_MODE=false` in `.env` setzen.
-2. Den Konnektor starten: `docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector`.
-3. Die Connector-Seite öffnen und den angezeigten QR-Code in WhatsApp unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen. QR-Payloads werden aus Sicherheitsgründen nicht in Docker-Logs ausgegeben.
-4. Den persistenten Compose-Speicher `wa_auth` beibehalten. Dadurch muss das Gerät nach Neustarts nicht erneut gekoppelt werden.
-5. Gruppen im Dashboard auswählen oder bereits beim Einlesen mit `WA_GROUP_ALLOWLIST` begrenzen.
+1. Den Stack mit `docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector wa-connector-worker` starten.
+2. Die Connector-Seite öffnen und den angezeigten QR-Code in WhatsApp unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen. QR-Payloads werden nicht in Docker-Logs ausgegeben.
+3. Gruppen im Web-UI auswählen. Nach der Auswahl werden nur diese Gruppen synchronisiert; die Auswahl kann jederzeit geändert werden.
 
-`WA_GROUP_ALLOWLIST` ist eine kommagetrennte Liste exakter WhatsApp-Gruppen-
-JIDs, zum Beispiel `120363123456789@g.us`. Eine leere Liste entdeckt Gruppen
-für die Auswahl im Dashboard, aktiviert aber keine Gruppe automatisch. Die
-eigentliche Verarbeitung eingehender Nachrichten erfolgt nur für Gruppen, die
-in der Datenbank als ausgewählt markiert sind. Die Auswahl kann jederzeit im
-Dashboard geändert werden.
+Bei der ersten Aktivierung und bei jedem Systemneustart werden nur Nachrichten
+innerhalb des Zeitfensters `WA_BACKFILL_DAYS` verarbeitet. Die History-Abfragen
+werden mit `WA_HISTORY_PAGE_SIZE`, `WA_HISTORY_REQUEST_DELAY_MS`,
+`WA_BACKFILL_THROTTLE_MS` und `WA_BACKFILL_GROUP_DELAY_MS` gedrosselt. Nach dem
+Erreichen des aktuellen Nachrichtenstands gibt der Worker seine Lease an den
+Pool zurück.
 
-Bei der ersten Aktivierung und bei jedem Systemneustart eines WhatsApp-
-Konnektors werden nur Nachrichten innerhalb des Zeitfensters
-`WA_BACKFILL_DAYS` (Standard: sieben Tage) persistiert und an die Medien-/KI-
-Pipeline weitergegeben. Pro Gruppe werden History-Seiten mit maximal
-`WA_HISTORY_PAGE_SIZE` Nachrichten angefordert und vollständig abgewartet,
-bevor der Worker seinen Pool-Slot freigibt. `WA_HISTORY_MAX_PAGES` begrenzt die
-Anzahl der Seiten pro Gruppe; `WA_HISTORY_WAIT_MS` ist die maximale Wartezeit
-auf eine History-Antwort. `WA_BACKFILL_THROTTLE_MS` pausiert zwischen einzelnen
-Nachrichten, `WA_BACKFILL_GROUP_DELAY_MS` zwischen Gruppen.
+Die Gruppenliste wird nach jeder erfolgreichen Verbindung und regelmäßig über
+`GROUP_REFRESH_INTERVAL_MS` aktualisiert. Gruppen, die der Account nicht mehr
+besitzt, werden aus Auswahl und Dashboard entfernt; Nachrichten, Analysen,
+Events, Knowledge-Base-Daten, Audiojobs und Medienreferenzen werden mit den
+zugehörigen Objekten bereinigt. Bei einem fehlgeschlagenen Snapshot findet keine
+automatische Löschung statt.
 
-Die WhatsApp-Gruppenliste wird nach jeder erfolgreichen Verbindung und danach
-regelmäßig aktualisiert. Das Intervall wird über
-`GROUP_REFRESH_INTERVAL_MS` gesteuert und beträgt standardmäßig 60 Sekunden
-(mindestens 30 Sekunden). Gruppen, die in einem erfolgreichen Snapshot nicht
-mehr vorhanden sind, werden aus der Auswahl und dem Dashboard entfernt. Die
-zugehörigen Nachrichten, Analysen, Events, Knowledge-Base-Daten, Audiojobs und
-Medienreferenzen werden per Datenbank-Cascade gelöscht; die referenzierten
-Objekte in MinIO und lokale Mediendateien werden vorher ebenfalls entfernt.
-Bei einem fehlgeschlagenen Snapshot findet keine automatische Löschung statt.
+Status und Pairing-Informationen sind auf der Connector-Seite verfügbar. Der
+interne Endpunkt bleibt unter `wa-connector:3001` erreichbar, wird aber nicht
+auf einem Host-Port veröffentlicht. QR-Payloads werden ausschließlich über die
+authentifizierte API an das jeweilige Nutzerkonto ausgeliefert.
 
-Status und Pairing-Informationen sind auf der Connector-Seite verfügbar. Die
-technischen Connector-Endpunkte bleiben für interne Docker-Healthchecks unter
-`wa-connector:3001` und `tg-connector:3002` erreichbar, werden aber nicht auf
-Host-Ports veröffentlicht. QR-Payloads
-werden ausschließlich über die authentifizierte API an das jeweilige Nutzerkonto
-ausgeliefert und nicht in Connector-Logs geschrieben.
-
-Wichtig: Baileys ist keine offizielle WhatsApp-Business-API. Der Abschnitt
-setzt daher ein privates Testkonto, die Zustimmung der Gruppenmitglieder und
-die Akzeptanz möglicher Protokolländerungen oder Account-Sperren voraus. Siehe
-auch [Bekannte Risiken und Sicherheitsgrenzen](#bekannte-risiken-und-sicherheitsgrenzen).
+Wichtig: whatsmeow nutzt ein inoffizielles Consumer-WhatsApp-Protokoll und ist
+keine offizielle WhatsApp-Business-API. Protokolländerungen, Rate-Limits,
+Account-Sperren und Plattformbedingungen sind reale Betriebsrisiken. Siehe auch
+[Bekannte Risiken und Sicherheitsgrenzen](#bekannte-risiken-und-sicherheitsgrenzen).
 
 ### Telegram-Konnektor
 
 Der produktive Telegram-Konnektor ist jetzt eine direkte Go-MTProto-Verbindung
-mit [`gotd/td`](https://github.com/gotd/td). Die bisherige GramJS-Implementierung
-bleibt als Quellcode-Rückfalloption erhalten, wird aber weder lokal noch im
-Dockge-Compose gestartet. Ein Bot-Token ist für die neue Implementierung nicht
-erforderlich.
+mit [`gotd/td`](https://github.com/gotd/td). Dies ist der einzige Telegram-
+Connector im Projekt; es gibt keinen Telegram-Bot- oder GramJS-Fallback.
+Authentifizierung und Nachrichtenabruf erfolgen ausschließlich über die
+persönliche MTProto-Session des Nutzers.
 
 ```dotenv
 TG_API_ID=123456
@@ -579,16 +564,20 @@ die Zuordnung in `media_objects.bucket`, bevor Legacy-Objekte gelöscht werden.
 Die Bucket-Migration ist in `apps/api/cmd/api/media_buckets.go` isoliert und kann
 nach Abschluss über `MEDIA_BUCKET_MIGRATION_ENABLED=false` deaktiviert werden.
 
-Die Compose-Umgebung startet standardmäßig im `WA_MOCK_MODE=true`, damit die vertikale Kette ohne WhatsApp-Konto demonstrierbar ist. Sie erzeugt drei ausgewählte Gruppen mit jeweils zehn Nachrichten: Text, Antworten, Sprachnachrichten, Bilder und Orte. Die Mock-Dialoge enthalten außerdem zusammengehörige Event-Bausteine, zum Beispiel einen Termintext in einer Nachricht und den Treffpunkt in einer späteren Ortsnachricht. Der AI-Worker verknüpft solche Quellen über `sourceMessageIds`. Für die Konfiguration eines echten Linked Devices und die Gruppenauswahl siehe [WhatsApp-Konnektor](#whatsapp-konnektor).
+Die vertikale Kette kann mit den vorhandenen Demo-/Testdaten der Datenbank und
+den Worker-Pipelines geprüft werden. Für eine echte WhatsApp-Verbindung wird
+der whatsmeow-Connector über den QR-Flow gekoppelt; die Gruppen- und
+Nachrichtenauswahl erfolgt anschließend im Web-UI. Für die Konfiguration siehe
+[WhatsApp-Konnektor](#whatsapp-konnektor).
 
 ## Architektur
 
 | Bereich | MVP-Implementierung |
 | --- | --- |
-| WhatsApp | Node.js/TypeScript, Baileys, persistenter Multi-File-Auth-State |
+| WhatsApp | Go + `whatsmeow`, direkte Linked-Device-Verbindung mit PostgreSQL-SQL-Session-State |
 | Telegram | Go + `gotd/td`, direkte MTProto-Session, QR-Login, Dialog-/Topic-Snapshot und historischer Backfill |
 | Eventing | NATS mit JetStream-fähigem Server, Subjects `wa.*`, `media.*`, `ai.*` |
-| Persistenz | PostgreSQL mit PostGIS und pgvector, vollständige Initialmigration `infra/migrations/001_init.sql` |
+| Persistenz | PostgreSQL mit PostGIS und pgvector; whatsmeow-Gerätezustand zusätzlich im isolierten Schema `wa_whatsmeow` (Migration `024_whatsmeow_storage.sql`) |
 | Medien | MinIO/S3-Konvention, Audio-Job-Pipeline |
 | STT | lokales `whisper.cpp`, Modell `medium`, ffmpeg-Normalisierung, JSON-Ergebnis |
 | Karten | Leaflet mit OpenStreetMap-Tiles und sichtbarer OSM-Attribution |
@@ -607,7 +596,7 @@ Die Demo verwendet den öffentlichen OpenStreetMap-Tile-Dienst mit vorgeschriebe
 npm install
 npm run build --workspace=@wagi/contracts
 npm run build --workspace=@wagi/connector-sdk
-npm run dev --workspace=@wagi/wa-connector
+cd apps/wa-connector-go && go run .
 npm run dev --workspace=@wagi/web
 ```
 
@@ -746,16 +735,14 @@ Die Zahl der Konten kann kleiner oder größer als die Workerzahl sein. Freie
 Worker warten dann auf eine Lease. Nutzerkonten werden nach der Registrierung
 über `POST /api/v1/connectors/accounts` angelegt. Für einen
 bestimmten Worker kann `WA_CONNECTOR_ACCOUNT_ID` bzw. `TG_CONNECTOR_ACCOUNT_ID`
-gesetzt werden. Die Baileys-Auth-Dateien werden zusätzlich als Binärdaten in
-`connector_accounts.session_data` gespiegelt; der aktuelle MVP verwendet dafür
-noch keine KMS-Schlüssel und benötigt deshalb zusätzlichen Datenbank-/Volume-
-Schutz.
+gespeichert. Der aktuelle MVP verwendet dafür noch keine KMS-Schlüssel und
+benötigt deshalb zusätzlichen Datenbank-/Secret-Schutz.
 
 Die Worker speichern pro Connector-Konto und Gruppe `connector_cursors`. Beim
 Neustart wird weiterhin der Sieben-Tage-Zeitraum gedrosselt geprüft, bereits
 verarbeitete Telegram-Nachrichten werden aber ab dem gespeicherten Telegram-
 Message-ID-Cursor fortgesetzt. Bei WhatsApp dient der persistierte Cursor der
-Nachvollziehbarkeit und die Baileys-History-Abfrage zusätzlich der
+Nachvollziehbarkeit und die whatsmeow-History-Abfrage zusätzlich der
 Duplikatvermeidung. Gruppen werden automatisch dem Nutzerkonto zugeordnet;
 die Auswahl in `/groups` ist pro Nutzer getrennt gespeichert. Entfernte
 Gruppen werden aus dessen Auswahl und – falls kein anderer Nutzer mehr Zugriff
@@ -790,7 +777,7 @@ Der Fortschritt wird auf der Admin-Seite angezeigt.
 
 ## Bekannte Risiken und Sicherheitsgrenzen
 
-Baileys kommuniziert über das inoffizielle WhatsApp-Web-/Multi-Device-Protokoll und ist keine offizielle WhatsApp Business API. Änderungen am Protokoll, Rate-Limits, Account-Sperren und eine mögliche Unvereinbarkeit mit WhatsApp-Nutzungsbedingungen sind reale Betriebsrisiken. Der Connector muss deshalb als austauschbarer Adapter behandelt werden.
+whatsmeow kommuniziert über das inoffizielle WhatsApp-Web-/Multi-Device-Protokoll und ist keine offizielle WhatsApp Business API. Änderungen am Protokoll, Rate-Limits, Account-Sperren und eine mögliche Unvereinbarkeit mit WhatsApp-Nutzungsbedingungen sind reale Betriebsrisiken. Der Connector muss deshalb als austauschbarer Adapter behandelt werden.
 
 Der MVP verarbeitet ausschließlich Gruppen, die der verknüpfte Account selbst sehen kann. Trotzdem können private Inhalte, personenbezogene Daten, Audio und Standortdaten verarbeitet werden. Vor einem produktiven Einsatz braucht es Einwilligungs-/Hinweisprozesse, Löschfristen, Verschlüsselung, Zugriffskontrollen, Auditierung, Tenant-Isolation, Secret-Management sowie eine rechtliche Prüfung für Datenschutz und Plattformbedingungen.
 

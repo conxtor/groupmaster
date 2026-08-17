@@ -204,15 +204,12 @@ MinIO-Datenträger bleibt bei Neustarts erhalten.
 | `WA_CONNECTOR_POOL_SIZE` | 5 | WhatsApp-Arbeitsplätze. |
 | `WA_ONBOARDING_SLOTS` | 1 | Freie QR-Onboarding-Plätze. |
 | `WA_CONNECTOR_ACCOUNT_ID` | leer | Optionaler Account für Einzeltests. |
-| `WA_MOCK_MODE` | lokal true, Dockge false | Mock oder echte Baileys-Verbindung. |
-| `WA_AUTH_DIR` | `./data/wa-auth` | Persistenter Session-Speicher. |
-| `WA_GROUP_ALLOWLIST` | leer | Gruppen-JIDs; leer bedeutet entdecken, nicht automatisch aktivieren. |
-| `WA_SYNC_HISTORY` | false | Baileys-History-Sync-Option. |
 | `WA_BACKFILL_DAYS` | 7 | Neustart-/Aktivierungszeitfenster. |
 | `WA_BACKFILL_THROTTLE_MS` / `WA_BACKFILL_GROUP_DELAY_MS` | 250 / 1500 | Backfill-Pausen. |
-| `WA_HISTORY_PAGE_SIZE` / `WA_HISTORY_MAX_PAGES` | 50 / 20 | History-Grenzen. |
-| `WA_HISTORY_WAIT_MS` | 20000 | History-Antwort-Timeout. |
-| `WA_MEDIA_DOWNLOAD_TIMEOUT_MS` | 30000 | Mediendownload-Timeout. |
+| `WA_HISTORY_PAGE_SIZE` | 50 | Maximale Zahl von Nachrichten je History-Anfrage. |
+| `WA_HISTORY_REQUEST_DELAY_MS` | 500 | Pause zwischen angeforderten History-Seiten. |
+| `WA_SYNC_GRACE_SECONDS` | 20 | Nachlauf für History-Sync- und Live-Ereignisse nach der Verbindung. |
+| `WA_WHATSMEOW_SQL_SCHEMA` | `wa_whatsmeow` | PostgreSQL-Schema für verschlüsselten whatsmeow-Geräte- und Signal-State. |
 | `WA_MEDIA_DOWNLOAD_ATTEMPTS` | 3 | Medienwiederholungen. |
 | `WA_MEDIA_RETRY_INTERVAL_MS` | 60000 | Abstand zwischen Medienwiederholungen. |
 | `GROUP_REFRESH_INTERVAL_MS` | 60000 | Gruppen-/Topic-Aktualisierung, mindestens 30 Sekunden. |
@@ -221,8 +218,13 @@ MinIO-Datenträger bleibt bei Neustarts erhalten.
 | `CONNECTOR_SYNC_INTERVAL_SECONDS` | 300 | Turnusmäßige Verarbeitung. |
 | `CONNECTOR_POOL_SIZE`, `CONNECTOR_ONBOARDING_SLOTS`, `CONNECTOR_POOL_RETRY_DELAY_MS`, `CONNECTOR_START_DELAY_MS`, `CONNECTOR_ROLE`, `CONNECTOR_WORKER_ID` | dienstabhängig | Allgemeine Pool-/Prozessdefaults. |
 
-Echte WhatsApp-Sessions müssen persistent gespeichert werden. Baileys ist keine
-offizielle WhatsApp-Business-API.
+Echte WhatsApp-Sessions müssen persistent gespeichert werden. Der produktive
+Consumer-Connector verwendet [whatsmeow](https://github.com/tulir/whatsmeow)
+für die direkte Linked-Device-Verbindung. Die verschlüsselten Geräte- und
+Signal-Daten werden in PostgreSQL im eigenen Schema `wa_whatsmeow` gespeichert;
+ein Auth-Dateivolume ist nicht erforderlich. Der Connector ist nicht Teil der
+offiziellen WhatsApp-Business-API und bleibt deshalb einer austauschbaren
+Adaptergrenze unterstellt.
 
 ## Telegram Direct / MTProto
 
@@ -250,10 +252,9 @@ keine Bereinigung aus.
 
 Das Compose-Image wird aus `apps/tg-connector-go/Dockerfile` gebaut. Es nutzt
 Go 1.25, `gotd/td` und ein minimales Alpine-Laufzeitimage; der Build erzwingt
-`linux/amd64` für die GHCR-Produktionsimages. `TG_BOT_TOKEN`, `TG_PHONE` und
-`TG_SESSION` werden vom neuen Go-Connector nicht verwendet. Der frühere
-Node/GramJS-Code bleibt nur als bewusst nicht gestartete Rückfallquelle im
-Repository.
+`linux/amd64` für die GHCR-Produktionsimages. Der Connector verwendet
+ausschließlich persönliche MTProto-Sessions und bietet keinen Bot-API- oder
+GramJS-Fallback.
 
 ## KI und Medien
 

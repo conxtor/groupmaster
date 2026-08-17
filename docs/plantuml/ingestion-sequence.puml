@@ -8,10 +8,10 @@ participant "Go API" as API
 participant "Mailcow / SMTP" as Mail
 database "PostgreSQL" as DB
 queue "NATS JetStream" as NATS
-participant "WA Onboarding\nBaileys" as WAO
-participant "WA Processing\nBaileys" as WAP
-participant "TG Onboarding\ngotd/td" as TGO
-participant "TG Processing\ngotd/td" as TGP
+participant "WA Onboarding\nwhatsmeow" as WAO
+participant "WA Processing\nwhatsmeow" as WAP
+participant "TG Onboarding\ngotd/td MTProto" as TGO
+participant "TG Processing\ngotd/td MTProto" as TGP
 participant "Telegram Account\nMTProto" as Telegram
 participant "media-worker" as Media
 
@@ -43,13 +43,14 @@ API --> Web: status + Queueposition
 
 alt WhatsApp QR
   WAO -> DB: Lease für onboarding-Slot holen
-  WAO -> WAO: Baileys starten / QR erzeugen
+  WAO -> WAO: whatsmeow starten / QR erzeugen
   WAO -> DB: QR-Status + Ablaufzeit speichern
   Web -> API: GET QR-Status (Polling)
   API -> DB: QR-Session lesen
   API --> Web: QR-Payload oder Warteposition
   User -> Web: QR mit Telefon scannen
-  WAO -> DB: Baileys Auth-State als Session-Snapshot speichern
+  WAO -> DB: Device-/Signal-State verschlüsselt
+  im PostgreSQL-Schema wa_whatsmeow speichern
 else Telegram QR
   TGO -> DB: Lease für onboarding-Slot holen
   TGO -> TGO: gotd QR-Login starten
@@ -62,9 +63,11 @@ else Telegram QR
 end
 
 WAO -> DB: Gruppen / Dialoge entdecken
+WAO -> DB: Gruppen / Subgruppen entdecken
 TGO -> DB: Gruppen, Supergroups, Channels und Topics entdecken
 WAO -> DB: onboarding abgeschlossen, Account pausiert
 TGO -> DB: onboarding abgeschlossen, Account pausiert
+WAO -> DB: Lease freigeben
 WAO -> DB: Lease freigeben
 TGO -> DB: Lease freigeben
 
@@ -115,6 +118,7 @@ note over WAO,TGO
   Neue Accounts lesen im Onboarding nur Gruppen ein;
   Nachrichten- und Backfill-Verarbeitung erfolgt im
   rotierenden Processing-Pool.
+  Telegram verwendet keine Bot-API-Rückfallebene.
 end note
 
 == Telegram-Gruppen-Snapshot und Bereinigung ==

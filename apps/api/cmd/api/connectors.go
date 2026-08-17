@@ -125,7 +125,7 @@ func (a *app) logoutConnectorAccount(ctx context.Context, accountID, platform, o
 		return 0, err
 	}
 
-	// Stop an in-memory Baileys/GramJS client before deleting its lease and
+	// Stop an in-memory connector client before deleting its lease and
 	// session state. Every connector worker receives this internal event; only
 	// the worker owning this account responds.
 	a.requestConnectorLogout(platform, accountID)
@@ -476,7 +476,7 @@ func (a *app) connectorAccountQR(w http.ResponseWriter, r *http.Request, account
 		writeJSON(w, http.StatusOK, view)
 	case http.MethodPost:
 		// A second click must be able to recover a worker that is still marked
-		// as claimed after a stalled MTProto/Baileys login. Keep the old request
+		// as claimed after a stalled connector login. Keep the old request
 		// as a cancelled audit record and enqueue a fresh request for this user.
 		_, _ = a.db.Exec(r.Context(), `UPDATE connector_onboarding_requests
 			SET status='cancelled', worker_id=NULL, error='QR-Onboarding neu gestartet', updated_at=NOW()

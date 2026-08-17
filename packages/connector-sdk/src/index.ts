@@ -47,7 +47,7 @@ export type ConnectorAccountLeaseInfo = {
 /**
  * Shared control-plane implementation for connector workers. A lease is
  * deliberately account-scoped: at most one worker may operate a user's
- * MTProto/Baileys session at a time. Session bytes and per-group cursors stay
+ * messaging session at a time. Session bytes and per-group cursors stay
  * in PostgreSQL, so workers can be restarted or rotated without losing state.
  */
 export class ConnectorAccountLease {

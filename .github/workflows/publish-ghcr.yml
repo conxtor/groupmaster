@@ -40,9 +40,9 @@ jobs:
           - image: wagi-media-worker
             context: .
             dockerfile: apps/media-worker/Dockerfile
-          - image: wagi-wa-connector
+          - image: wagi-wa-connector-whatsmeow
             context: .
-            dockerfile: apps/wa-connector/Dockerfile
+            dockerfile: apps/wa-connector-go/Dockerfile
           - image: wagi-tg-connector
             context: .
             dockerfile: apps/tg-connector-go/Dockerfile

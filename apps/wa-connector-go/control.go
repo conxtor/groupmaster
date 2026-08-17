@@ -12,11 +12,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/gotd/td/session"
-	"github.com/gotd/td/telegram"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 )
 
 const (
@@ -29,7 +30,8 @@ const (
 	subjectCleanup         = "internal.groups.cleanup.requested"
 	subjectLogout          = "internal.connector.logout.requested"
 
-	telegramConnector = "telegram"
+	whatsappConnector = "whatsapp"
+	sessionMarker     = "whatsmeow-sqlstore-v1"
 )
 
 type accountInfo struct {
@@ -107,28 +109,27 @@ WHERE id=$1::uuid`, l.account.ID, status, lastError)
 	return err
 }
 
-func (l *connectorLease) saveSession(ctx context.Context, value []byte) error {
-	_, err := l.db.Exec(ctx, `UPDATE connector_accounts SET session_data=$2,session_version=session_version+1,updated_at=NOW(),last_error=NULL WHERE id=$1::uuid`, l.account.ID, value)
+func (l *connectorLease) markSession(ctx context.Context, jid types.JID) error {
+	_, err := l.db.Exec(ctx, `UPDATE connector_accounts
+SET session_data=$2,external_account_id=$3,session_version=session_version+1,updated_at=NOW(),last_error=NULL
+WHERE id=$1::uuid`, l.account.ID, []byte(sessionMarker), jid.String())
 	return err
 }
 
-func (l *connectorLease) loadSession(ctx context.Context) ([]byte, error) {
-	var value []byte
-	err := l.db.QueryRow(ctx, "SELECT session_data FROM connector_accounts WHERE id=$1::uuid", l.account.ID).Scan(&value)
-	if errors.Is(err, pgx.ErrNoRows) || len(value) == 0 {
-		return nil, session.ErrNotFound
+func (l *connectorLease) clearSession(ctx context.Context) error {
+	_, err := l.db.Exec(ctx, `UPDATE connector_accounts SET session_data=NULL,external_account_id=NULL,session_version=session_version+1,updated_at=NOW() WHERE id=$1::uuid`, l.account.ID)
+	return err
+}
+
+func (l *connectorLease) loadJID(ctx context.Context) (types.JID, error) {
+	var external string
+	if err := l.db.QueryRow(ctx, "SELECT COALESCE(external_account_id,'') FROM connector_accounts WHERE id=$1::uuid", l.account.ID).Scan(&external); err != nil {
+		return types.JID{}, err
 	}
-	// gotd stores a versioned JSON session. Invalid or incompatible persisted
-	// data is treated as an absent session so QR onboarding can recover the
-	// account.
-	var persisted struct {
-		Version int          `json:"Version"`
-		Data    session.Data `json:"Data"`
+	if external == "" {
+		return types.JID{}, nil
 	}
-	if json.Unmarshal(value, &persisted) != nil || persisted.Version != 1 {
-		return nil, session.ErrNotFound
-	}
-	return value, err
+	return types.ParseJID(external)
 }
 
 func (l *connectorLease) saveCursor(ctx context.Context, groupID, externalID string, receivedAt time.Time, sequence int) error {
@@ -141,13 +142,20 @@ last_sequence_no=GREATEST(COALESCE(EXCLUDED.last_sequence_no,0),COALESCE(connect
 	return err
 }
 
-func (l *connectorLease) loadCursor(ctx context.Context, groupID string) (int, error) {
-	var value *int
-	err := l.db.QueryRow(ctx, "SELECT last_sequence_no FROM connector_cursors WHERE account_id=$1::uuid AND group_id=$2", l.account.ID, groupID).Scan(&value)
-	if errors.Is(err, pgx.ErrNoRows) || value == nil {
-		return 0, nil
+func (l *connectorLease) loadCursor(ctx context.Context, groupID string) (string, time.Time, error) {
+	var external string
+	var received *time.Time
+	err := l.db.QueryRow(ctx, `SELECT COALESCE(last_external_message_id,''),last_received_at FROM connector_cursors WHERE account_id=$1::uuid AND group_id=$2`, l.account.ID, groupID).Scan(&external, &received)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", time.Time{}, nil
 	}
-	return *value, err
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if received == nil {
+		return external, time.Time{}, nil
+	}
+	return external, *received, nil
 }
 
 func (l *connectorLease) updateQR(ctx context.Context, status, payload string, expiresAt *time.Time, lastError *string) error {
@@ -182,36 +190,22 @@ func (l *connectorLease) completeAndRelease(ctx context.Context, nextSync time.T
 	return l.release(ctx, reason)
 }
 
-type postgresSession struct{ lease *connectorLease }
-
-func (s *postgresSession) LoadSession(ctx context.Context) ([]byte, error) {
-	return s.lease.loadSession(ctx)
-}
-
-func (s *postgresSession) StoreSession(ctx context.Context, data []byte) error {
-	return s.lease.saveSession(ctx, data)
-}
-
-var _ session.Storage = (*postgresSession)(nil)
-
 type app struct {
 	cfg config
 	db  *pgxpool.Pool
 	nc  *nats.Conn
 	js  nats.JetStreamContext
 
-	mu              sync.RWMutex
-	lease           *connectorLease
-	onboarding      *onboardingInfo
-	status          string
-	statusDetail    string
-	lastError       string
-	connectedAt     *time.Time
-	initialBackfill bool
-	cycleCancel     context.CancelFunc
-	client          *telegram.Client
-	entities        map[string]*telegramEntity
-	entitiesMu      sync.RWMutex
+	mu           sync.RWMutex
+	lease        *connectorLease
+	onboarding   *onboardingInfo
+	status       string
+	statusDetail string
+	lastError    string
+	connectedAt  *time.Time
+	cycleCancel  context.CancelFunc
+	client       *whatsmeow.Client
+	store        *sqlstore.Container
 }
 
 func randomID() string {
@@ -227,6 +221,11 @@ func nullIfEmpty(value string) any {
 		return nil
 	}
 	return value
+}
+
+func mustJSON(value any) []byte {
+	data, _ := json.Marshal(value)
+	return data
 }
 
 func (a *app) currentLease() *connectorLease {
@@ -273,12 +272,11 @@ func (a *app) setStatus(ctx context.Context, status, detail string, errValue err
 	a.mu.Unlock()
 	if previousStatus != status || previousDetail != detail || errValue != nil {
 		if errValue != nil {
-			log.Printf("telegram status=%s detail=%q error=%v", status, detail, errValue)
+			log.Printf("whatsapp status=%s detail=%q error=%v", status, detail, errValue)
 		} else {
-			log.Printf("telegram status=%s detail=%q", status, detail)
+			log.Printf("whatsapp status=%s detail=%q", status, detail)
 		}
 	}
-
 	var dbError *string
 	if lastError != "" {
 		dbError = &lastError
@@ -288,14 +286,14 @@ func (a *app) setStatus(ctx context.Context, status, detail string, errValue err
 	}
 	connectedValue := any(nil)
 	if connectedAt != nil {
-		connectedValue = *connectedAt
+		connectedValue = connectedAt.Format(time.RFC3339)
 	}
 	_, _ = a.db.Exec(ctx, `INSERT INTO connector_states (connector,status,detail,last_error,connected_at)
-VALUES ('telegram',$1,$2,$3,$4)
+VALUES ('whatsapp',$1,$2,$3,$4)
 ON CONFLICT (connector) DO UPDATE SET status=EXCLUDED.status,detail=EXCLUDED.detail,last_error=EXCLUDED.last_error,connected_at=EXCLUDED.connected_at,updated_at=NOW()`, status, detail, nullIfEmpty(lastError), connectedValue)
 	if a.js != nil {
 		_ = a.publish(subjectConnectorStatus, "connector.status.changed", map[string]any{
-			"connector": "telegram", "status": status, "detail": detail,
+			"connector": whatsappConnector, "status": status, "detail": detail,
 			"lastError": nullIfEmpty(lastError), "connectedAt": connectedValue,
 		})
 	}
@@ -306,7 +304,7 @@ func (a *app) publish(subject, eventType string, data any) error {
 		return nil
 	}
 	payload, err := json.Marshal(map[string]any{
-		"id": randomID(), "type": eventType, "occurredAt": time.Now().UTC().Format(time.RFC3339Nano), "source": "tg-connector", "data": data,
+		"id": randomID(), "type": eventType, "occurredAt": time.Now().UTC().Format(time.RFC3339Nano), "source": "wa-connector-whatsmeow", "data": data,
 	})
 	if err != nil {
 		return err
@@ -315,63 +313,49 @@ func (a *app) publish(subject, eventType string, data any) error {
 	return err
 }
 
-func (a *app) ensureStream(ctx context.Context) {
+func (a *app) ensureStream() {
 	if a.js == nil {
 		return
 	}
-	info, err := a.js.StreamInfo("WAGI_EVENTS")
-	if err != nil {
-		_, err = a.js.AddStream(&nats.StreamConfig{Name: "WAGI_EVENTS", Subjects: []string{"wa.>", "media.>", "ai.>", "connector.>", "internal.>"}, Storage: nats.FileStorage, Retention: nats.LimitsPolicy, MaxAge: 30 * 24 * time.Hour})
-		if err != nil {
-			log.Printf("JetStream stream provisioning deferred: %v", err)
+	if _, err := a.js.StreamInfo("WAGI_EVENTS"); err != nil {
+		if _, addErr := a.js.AddStream(&nats.StreamConfig{Name: "WAGI_EVENTS", Subjects: []string{"wa.>", "media.>", "ai.>", "connector.>", "internal.>"}, Storage: nats.FileStorage, Retention: nats.LimitsPolicy, MaxAge: 30 * 24 * time.Hour}); addErr != nil {
+			log.Printf("JetStream stream provisioning deferred: %v", addErr)
 		}
-		return
 	}
-	if info.Config.Name == "WAGI_EVENTS" {
-		return
-	}
-	_ = ctx
 }
 
 func (a *app) waitStatus(ctx context.Context) (string, string) {
 	var pending, active, accounts, eligible, reauth, stopped, disabled int
-	_ = a.db.QueryRow(ctx, "SELECT COUNT(*) FROM connector_onboarding_requests WHERE platform='telegram' AND status IN ('pending','claimed','connected')").Scan(&pending)
-	_ = a.db.QueryRow(ctx, "SELECT COUNT(*) FROM connector_leases l JOIN connector_accounts c ON c.id=l.account_id WHERE c.platform='telegram' AND l.lease_kind='processing' AND l.lease_until>NOW()").Scan(&active)
+	_ = a.db.QueryRow(ctx, "SELECT COUNT(*) FROM connector_onboarding_requests WHERE platform='whatsapp' AND status IN ('pending','claimed','connected')").Scan(&pending)
+	_ = a.db.QueryRow(ctx, "SELECT COUNT(*) FROM connector_leases l JOIN connector_accounts c ON c.id=l.account_id WHERE c.platform='whatsapp' AND l.lease_kind='processing' AND l.lease_until>NOW()").Scan(&active)
 	_ = a.db.QueryRow(ctx, `SELECT COUNT(*),
-COUNT(*) FILTER (WHERE status NOT IN ('disabled','stopped','reauth_required') AND session_data IS NOT NULL AND next_sync_at<=NOW()),
-COUNT(*) FILTER (WHERE status='reauth_required'),
-COUNT(*) FILTER (WHERE status='stopped'),
-		COUNT(*) FILTER (WHERE status='disabled')
-FROM connector_accounts WHERE platform='telegram'`).Scan(&accounts, &eligible, &reauth, &stopped, &disabled)
+COUNT(*) FILTER (WHERE status NOT IN ('disabled','stopped','reauth_required') AND session_data IS NOT NULL AND (next_sync_at IS NULL OR next_sync_at<=NOW())),
+COUNT(*) FILTER (WHERE status='reauth_required'),COUNT(*) FILTER (WHERE status='stopped'),COUNT(*) FILTER (WHERE status='disabled')
+FROM connector_accounts WHERE platform='whatsapp'`).Scan(&accounts, &eligible, &reauth, &stopped, &disabled)
 	if pending > 0 {
-		return "waiting", fmt.Sprintf("Telegram-Onboarding wartet; Warteschlange %d, aktive Processing-Leases %d", pending, active)
+		return "waiting", fmt.Sprintf("WhatsApp-Onboarding wartet; Warteschlange %d, aktive Processing-Leases %d", pending, active)
 	}
 	if accounts == 0 {
-		return "waiting", "Kein Telegram-Konto eingerichtet; zuerst eine direkte Telegram-Verbindung per QR starten"
+		return "waiting", "Kein WhatsApp-Konto eingerichtet; zuerst eine WhatsApp-Verbindung per QR starten"
 	}
 	if reauth > 0 && eligible == 0 {
-		return "reauth_required", fmt.Sprintf("Telegram-Konto benötigt eine erneute QR-Anmeldung; reauth_required %d, gestoppt %d", reauth, stopped)
+		return "reauth_required", fmt.Sprintf("WhatsApp-Konto benötigt eine erneute QR-Anmeldung; reauth_required %d, gestoppt %d", reauth, stopped)
 	}
 	if eligible == 0 && stopped > 0 {
-		return "stopped", fmt.Sprintf("Telegram-Konto ist gestoppt; QR-Anmeldung starten oder Konto reaktivieren; gestoppt %d, deaktiviert %d", stopped, disabled)
+		return "stopped", fmt.Sprintf("WhatsApp-Konto ist gestoppt; QR-Anmeldung starten oder Konto reaktivieren; gestoppt %d, deaktiviert %d", stopped, disabled)
 	}
 	if eligible == 0 {
-		return "waiting", fmt.Sprintf("Alle Telegram-Konten warten auf ihren nächsten Synchronisationszeitpunkt; Konten %d, aktive Processing-Leases %d", accounts, active)
+		return "waiting", fmt.Sprintf("Alle WhatsApp-Konten warten auf ihren nächsten Synchronisationszeitpunkt; Konten %d, aktive Processing-Leases %d", accounts, active)
 	}
-	return "waiting", fmt.Sprintf("Kein freier Telegram-Connector-Slot; Warteschlange %d, aktive Processing-Leases %d", pending, active)
-}
-
-func (a *app) waitDetail(ctx context.Context) string {
-	_, detail := a.waitStatus(ctx)
-	return detail
+	return "waiting", fmt.Sprintf("Kein freier WhatsApp-Connector-Slot; Warteschlange %d, aktive Processing-Leases %d", pending, active)
 }
 
 func (a *app) claimOnboarding(ctx context.Context) (*onboardingInfo, error) {
 	_, _ = a.db.Exec(ctx, `UPDATE connector_onboarding_requests r SET status='pending',worker_id=NULL,updated_at=NOW()
-WHERE r.platform='telegram' AND r.status='claimed' AND (NOT EXISTS (SELECT 1 FROM connector_leases l WHERE l.account_id=r.account_id AND l.lease_kind='onboarding' AND l.lease_until>NOW()) OR EXISTS (SELECT 1 FROM connector_qr_sessions q WHERE q.account_id=r.account_id AND (q.status IN ('expired','failed','cancelled') OR q.expires_at<=NOW())))`)
-	_, _ = a.db.Exec(ctx, `UPDATE connector_leases l SET lease_until=NOW(),updated_at=NOW() WHERE l.lease_kind='onboarding' AND EXISTS (SELECT 1 FROM connector_onboarding_requests p WHERE p.account_id=l.account_id AND p.platform='telegram' AND p.status='pending')`)
+WHERE r.platform='whatsapp' AND r.status='claimed' AND (NOT EXISTS (SELECT 1 FROM connector_leases l WHERE l.account_id=r.account_id AND l.lease_kind='onboarding' AND l.lease_until>NOW()) OR EXISTS (SELECT 1 FROM connector_qr_sessions q WHERE q.account_id=r.account_id AND (q.status IN ('expired','failed','cancelled') OR q.expires_at<=NOW())))`)
+	_, _ = a.db.Exec(ctx, `UPDATE connector_leases l SET lease_until=NOW(),updated_at=NOW() WHERE l.lease_kind='onboarding' AND EXISTS (SELECT 1 FROM connector_onboarding_requests p WHERE p.account_id=l.account_id AND p.platform='whatsapp' AND p.status='pending')`)
 	var result onboardingInfo
-	err := a.db.QueryRow(ctx, `WITH candidate AS (SELECT id FROM connector_onboarding_requests WHERE platform='telegram' AND status='pending' ORDER BY updated_at DESC,created_at DESC FOR UPDATE SKIP LOCKED LIMIT 1)
+	err := a.db.QueryRow(ctx, `WITH candidate AS (SELECT id FROM connector_onboarding_requests WHERE platform='whatsapp' AND status='pending' ORDER BY updated_at DESC,created_at DESC FOR UPDATE SKIP LOCKED LIMIT 1)
 UPDATE connector_onboarding_requests r SET status='claimed',worker_id=$1,updated_at=NOW() FROM candidate WHERE r.id=candidate.id
 RETURNING r.id::text,r.account_id::text,r.user_id::text,r.platform`, a.cfg.WorkerID).Scan(&result.ID, &result.AccountID, &result.UserID, &result.Platform)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -395,15 +379,15 @@ func (a *app) acquire(ctx context.Context, kind, preferred string) (*connectorLe
 	}
 	err := a.db.QueryRow(ctx, `WITH candidate AS (
 SELECT ca.id FROM connector_accounts ca LEFT JOIN connector_leases cl ON cl.account_id=ca.id
-WHERE ca.platform='telegram' AND ca.status NOT IN ('disabled','stopped')
+WHERE ca.platform='whatsapp' AND ca.status NOT IN ('disabled','stopped')
 AND ($4::text='onboarding' OR ca.status<>'reauth_required')
 AND (cl.account_id IS NULL OR cl.lease_until<=NOW() OR cl.worker_id=$1 OR ($4::text='onboarding' AND cl.lease_kind='processing' AND EXISTS (SELECT 1 FROM connector_onboarding_requests requested WHERE requested.account_id=ca.id AND requested.status IN ('pending','claimed','connected'))))
 AND ($2::uuid IS NULL OR ca.id=$2::uuid)
-AND ($4::text='onboarding' OR ca.next_sync_at<=NOW() OR ca.id=$2::uuid)
+AND ($4::text='onboarding' OR ca.next_sync_at IS NULL OR ca.next_sync_at<=NOW() OR ca.id=$2::uuid)
 AND ($4::text='onboarding' OR ca.session_data IS NOT NULL)
 AND ($4::text='onboarding' OR NOT EXISTS (SELECT 1 FROM connector_onboarding_requests pending WHERE pending.account_id=ca.id AND pending.status IN ('pending','claimed','connected')))
-AND (SELECT COUNT(*) FROM connector_leases active JOIN connector_accounts aa ON aa.id=active.account_id WHERE aa.platform='telegram' AND active.lease_kind=$4 AND active.lease_until>NOW() AND active.worker_id<>$1) < $5
-ORDER BY CASE WHEN $2::uuid IS NOT NULL AND ca.id=$2::uuid THEN 0 ELSE 1 END,ca.next_sync_at,ca.created_at
+AND (SELECT COUNT(*) FROM connector_leases active JOIN connector_accounts aa ON aa.id=active.account_id WHERE aa.platform='whatsapp' AND active.lease_kind=$4 AND active.lease_until>NOW() AND active.worker_id<>$1) < $5
+ORDER BY CASE WHEN $2::uuid IS NOT NULL AND ca.id=$2::uuid THEN 0 ELSE 1 END,ca.next_sync_at NULLS FIRST,ca.created_at
 FOR UPDATE OF ca SKIP LOCKED LIMIT 1)
 INSERT INTO connector_leases (account_id,worker_id,lease_until,lease_kind,updated_at)
 SELECT id,$1,NOW()+($3::int*INTERVAL '1 second'),$4,NOW() FROM candidate
@@ -430,37 +414,9 @@ func (a *app) cleanupGroups(ctx context.Context, groupIDs []string) {
 	if len(groupIDs) == 0 || a.cfg.MediaCleanupToken == "" {
 		return
 	}
-	_ = a.nc.PublishRequest(subjectCleanup, "", mustJSON(map[string]any{
-		"token": a.cfg.MediaCleanupToken, "platform": "telegram", "groupIds": groupIDs,
+	_ = a.nc.Publish(subjectCleanup, mustJSON(map[string]any{
+		"token": a.cfg.MediaCleanupToken, "platform": whatsappConnector, "groupIds": groupIDs,
 	}))
-}
-
-func mustJSON(value any) []byte {
-	data, _ := json.Marshal(value)
-	return data
-}
-
-func (a *app) handleLogout(ctx context.Context, accountID string) bool {
-	lease := a.currentLease()
-	if lease == nil || lease.account.ID != accountID {
-		return false
-	}
-	a.setStatus(ctx, "stopped", "Telegram-Sitzung wird abgemeldet", nil)
-	a.mu.RLock()
-	client := a.client
-	a.mu.RUnlock()
-	if client != nil {
-		// Remove this authorization from Telegram before the durable account row
-		// is deleted. Otherwise every reconnect can leave another device session
-		// visible in Telegram's active sessions list.
-		if _, err := client.API().AuthLogOut(ctx); err != nil {
-			log.Printf("Telegram server-side logout failed for %s: %v", accountID, err)
-		} else {
-			_ = lease.saveSession(ctx, nil)
-		}
-	}
-	a.cancelCycle()
-	return true
 }
 
 func (a *app) startSubscriptions(ctx context.Context) {
@@ -483,7 +439,7 @@ func (a *app) startSubscriptions(ctx context.Context) {
 						UserID   string `json:"userId"`
 					} `json:"data"`
 				}
-				if json.Unmarshal(message.Data, &envelope) == nil && envelope.Data.Platform != "whatsapp" {
+				if json.Unmarshal(message.Data, &envelope) == nil && envelope.Data.Platform == whatsappConnector {
 					go a.handleSelection(ctx, envelope.Data.GroupID, envelope.Data.Selected, envelope.Data.UserID)
 				}
 			}
@@ -505,11 +461,11 @@ func (a *app) startSubscriptions(ctx context.Context) {
 					Platform  string `json:"platform"`
 					AccountID string `json:"accountId"`
 				}
-				if json.Unmarshal(message.Data, &payload) != nil || payload.Token != a.cfg.MediaCleanupToken || payload.Platform != "telegram" || payload.AccountID == "" {
+				if json.Unmarshal(message.Data, &payload) != nil || payload.Token != a.cfg.MediaCleanupToken || payload.Platform != whatsappConnector || payload.AccountID == "" {
 					continue
 				}
 				if a.handleLogout(ctx, payload.AccountID) {
-					_ = message.Respond(mustJSON(map[string]any{"ok": true, "platform": "telegram", "accountId": payload.AccountID}))
+					_ = message.Respond(mustJSON(map[string]any{"ok": true, "platform": whatsappConnector, "accountId": payload.AccountID}))
 				}
 			}
 		}()
@@ -517,7 +473,7 @@ func (a *app) startSubscriptions(ctx context.Context) {
 }
 
 func (a *app) handleSelection(ctx context.Context, groupID string, selected bool, userID string) {
-	if groupID == "" || len(groupID) < 3 || groupID[:3] != "tg:" {
+	if groupID == "" || !stringsHasWhatsAppJID(groupID) {
 		return
 	}
 	if userID == "" {
@@ -526,39 +482,67 @@ func (a *app) handleSelection(ctx context.Context, groupID string, selected bool
 		}
 	}
 	if userID == "" {
-		log.Printf("telegram group selection ignored without user id group=%s", groupID)
 		return
 	}
 	if _, err := a.db.Exec(ctx, `INSERT INTO user_group_access (user_id,group_id,can_read,can_manage,is_selected) VALUES ($1::uuid,$2,TRUE,TRUE,$3)
 ON CONFLICT (user_id,group_id) DO UPDATE SET is_selected=EXCLUDED.is_selected`, userID, groupID, selected); err != nil {
-		log.Printf("telegram group selection persistence failed group=%s user=%s error=%v", groupID, userID, err)
+		log.Printf("whatsapp group selection persistence failed group=%s user=%s error=%v", groupID, userID, err)
 		return
 	}
 	if selected {
-		// The rotating pool deliberately releases its lease after every cycle.
-		// Make a newly selected group wake the next eligible processing cycle
-		// instead of waiting for the previous sync interval.
-		_, _ = a.db.Exec(ctx, `UPDATE connector_accounts
-SET next_sync_at=NOW(),updated_at=NOW()
-WHERE platform='telegram' AND user_id=$1::uuid AND status NOT IN ('disabled','stopped')`, userID)
+		_, _ = a.db.Exec(ctx, `UPDATE connector_accounts SET next_sync_at=NOW(),updated_at=NOW() WHERE platform='whatsapp' AND user_id=$1::uuid AND status NOT IN ('disabled','stopped')`, userID)
 	}
-	log.Printf("telegram group selection persisted group=%s selected=%t user=%s", groupID, selected, userID)
+	log.Printf("whatsapp group selection persisted group=%s selected=%t user=%s", groupID, selected, userID)
+}
+
+func stringsHasWhatsAppJID(value string) bool {
+	return len(value) > 5 && (value[len(value)-5:] == "@g.us" || value[:3] == "wa:")
+}
+
+func (a *app) handleLogout(ctx context.Context, accountID string) bool {
+	lease := a.currentLease()
+	if lease == nil || lease.account.ID != accountID {
+		return false
+	}
+	a.setStatus(ctx, "stopped", "WhatsApp-Sitzung wird abgemeldet", nil)
+	a.mu.RLock()
+	client, container := a.client, a.store
+	a.mu.RUnlock()
+	if client != nil {
+		if err := client.Logout(ctx); err != nil {
+			log.Printf("WhatsApp server-side logout failed for %s: %v", accountID, err)
+			if container != nil && client.Store != nil && client.Store.ID != nil {
+				if deleteErr := container.DeleteDevice(ctx, client.Store); deleteErr != nil {
+					log.Printf("WhatsApp local session deletion failed for %s: %v", accountID, deleteErr)
+				}
+			}
+		}
+	} else if container != nil {
+		if jid, err := lease.loadJID(ctx); err == nil && !jid.IsEmpty() {
+			if device, getErr := container.GetDevice(ctx, jid); getErr == nil && device != nil {
+				if deleteErr := container.DeleteDevice(ctx, device); deleteErr != nil {
+					log.Printf("WhatsApp local session deletion failed for %s: %v", accountID, deleteErr)
+				}
+			}
+		}
+	}
+	_ = lease.clearSession(ctx)
+	a.cancelCycle()
+	return true
 }
 
 func (a *app) statusSnapshot() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	connected := a.connectedAt
 	var connectedValue any
-	if connected != nil {
-		connectedValue = connected.Format(time.RFC3339)
+	if a.connectedAt != nil {
+		connectedValue = a.connectedAt.Format(time.RFC3339)
 	}
-	lease := a.lease
 	var account any
-	if lease != nil {
-		account = map[string]any{"id": lease.account.ID, "userId": lease.account.UserID, "label": lease.account.Label, "kind": lease.kind, "workerId": lease.workerID}
+	if a.lease != nil {
+		account = map[string]any{"id": a.lease.account.ID, "userId": a.lease.account.UserID, "label": a.lease.account.Label, "kind": a.lease.kind, "workerId": a.lease.workerID}
 	}
-	return map[string]any{"connector": "telegram", "status": a.status, "mode": "telegram-direct-gotd", "connected": connected != nil, "connectedAt": connectedValue, "lastError": nullIfEmpty(a.lastError), "account": account, "poolEnabled": a.cfg.PoolEnabled, "poolSize": a.cfg.PoolSize, "onboardingSlots": a.cfg.OnboardingSlots, "backfillDays": a.cfg.BackfillDays, "backfillThrottleMs": a.cfg.BackfillThrottle.Milliseconds()}
+	return map[string]any{"connector": whatsappConnector, "status": a.status, "mode": "whatsapp-whatsmeow", "connected": a.connectedAt != nil, "connectedAt": connectedValue, "lastError": nullIfEmpty(a.lastError), "account": account, "poolEnabled": a.cfg.PoolEnabled, "poolSize": a.cfg.PoolSize, "onboardingSlots": a.cfg.OnboardingSlots, "backfillDays": a.cfg.BackfillDays, "backfillThrottleMs": a.cfg.BackfillThrottle.Milliseconds()}
 }
 
 func healthHandler(a *app) http.Handler {
@@ -567,7 +551,7 @@ func healthHandler(a *app) http.Handler {
 		switch r.URL.Path {
 		case "/healthz":
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(mustJSON(map[string]any{"status": "ok", "service": "tg-connector", "implementation": "gotd/td"}))
+			_, _ = w.Write(mustJSON(map[string]any{"status": "ok", "service": "wa-connector-whatsmeow", "implementation": "whatsmeow"}))
 		case "/readyz":
 			a.mu.RLock()
 			ready := a.status == "ready" || a.status == "pairing" || a.status == "syncing"

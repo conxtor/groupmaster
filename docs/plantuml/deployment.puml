@@ -11,9 +11,9 @@ node "Lokaler Docker-Compose-Stack" as Local {
   }
   component "web:3000\nNext.js standalone" as LocalWeb
   component "api:8080\nGo" as LocalAPI
-  component "wa-connector:3001\nOnboarding + Pool" as LocalWA
-  component "tg-connector:3002\nGo/gotd Onboarding" as LocalTG
-  component "wa-connector-worker\ninterner Pool-Worker" as LocalWAW
+  component "wa-connector:3001\nGo/whatsmeow\nOnboarding + Pool" as LocalWA
+  component "tg-connector:3002\nGo/gotd MTProto Onboarding\nkein Bot-Fallback" as LocalTG
+  component "wa-connector-worker\nGo/whatsmeow Processing" as LocalWAW
   component "tg-connector-worker\nGo/gotd Processing" as LocalTGW
   component "ai-worker\nPython 3.12-slim" as LocalAI
   component "media-worker\nPython 3.12-slim + whisper.cpp" as LocalMedia
@@ -23,15 +23,16 @@ node "Lokaler Docker-Compose-Stack" as Local {
   queue "nats:4222\nJetStream /data/jetstream" as LocalNATS
   storage "minio:9000\nseparate media buckets" as LocalMinio
   component "SMTP-Konfiguration\n.env" as LocalSMTP
-  folder "Named Volumes\nAuth, TG-State, Medien,\nWhisper- und AI-Modelle" as LocalVolumes
+  folder "Named Volumes\nTG-State, Medien,\nWhisper- und AI-Modelle" as LocalVolumes
+  database "wa_whatsmeow\nPostgreSQL-Schema\nkeine Auth-Dateien" as LocalMeowDB
 }
 
 node "Dockge / Produktionsserver" as Production {
   component "Traefik\nTLS + conxtor.com" as ProdTraefik
   component "web:3000\nöffentlich geroutet" as ProdWeb
   component "api:8080\ntraefik.enable=false" as ProdAPI
-  component "wa-connector + worker\nkein Host-Port" as ProdWA
-  component "tg-connector + worker\nGo/gotd, kein Host-Port" as ProdTG
+  component "wa-connector + worker\nGo/whatsmeow, kein Host-Port" as ProdWA
+  component "tg-connector + worker\nGo/gotd MTProto, kein Bot-Fallback\nkein Host-Port" as ProdTG
   component "ai-worker" as ProdAI
   component "media-worker" as ProdMedia
   component "migrate + nats-provisioner\nEinmalige Jobs" as ProdInit
@@ -53,6 +54,9 @@ LocalMigrate --> LocalDB : schema migrations
 LocalProvisioner --> LocalNATS : streams + consumers
 LocalWA --> LocalDB
 LocalWAW --> LocalDB
+LocalWA --> LocalMeowDB : whatsmeow SQLStore
+LocalWA --> LocalDB : WAGI-Leases + Gruppen
+LocalWA --> LocalNATS
 LocalTG --> LocalDB
 LocalTGW --> LocalDB
 LocalWA --> LocalNATS
@@ -75,6 +79,8 @@ LocalVolumes .. LocalTG
 ProdInit --> ProdDB : migrations
 ProdInit --> ProdNATS : provisioning
 ProdWA --> ProdDB
+ProdWA --> ProdNATS
+ProdWA --> ProdDB : SQLStore + Leases
 ProdWA --> ProdNATS
 ProdTG --> ProdDB
 ProdTG --> ProdNATS
@@ -126,7 +132,7 @@ end note
 note bottom of LocalVolumes
   Lokale Volumes:
   postgres_data, nats_data, minio_data,
-  wa_auth, tg_state, whisper_models,
+  tg_state, whisper_models,
   media_data, ai_models.
   Dockge verwendet gleichwertige
   *_dockge Volumes.

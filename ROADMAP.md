@@ -4,7 +4,7 @@
 
 Der aktuelle Stand ist ein lauffähiger vertikaler MVP für WhatsApp- und Telegram-Gruppen:
 
-- WhatsApp-Connector mit Baileys, QR-/Linked-Device-Skelett und Mock-Daten
+- WhatsApp-Connector mit whatsmeow, QR-/Linked-Device-Skelett und PostgreSQL-Session-State
 - Telegram-Direkt-Connector über Go/`gotd/td` mit QR-Login im Dashboard und PostgreSQL-persistenten Sessions
 - PostgreSQL mit PostGIS und pgvector, NATS JetStream und MinIO-Grundgerüst
 - Audio-Job-Pipeline mit lokalem whisper.cpp und Medium-Modell
@@ -127,7 +127,7 @@ Ziel: Aus der Analyseoberfläche wird ein persönlicher Gruppenassistent.
 
 ## Wichtigste Risiken
 
-1. Die Baileys-Integration nutzt ein inoffizielles WhatsApp-Web-/Multi-Device-Protokoll. Protokolländerungen, Rate-Limits oder Kontosperren können die Verfügbarkeit beeinträchtigen.
+1. Die whatsmeow-Integration nutzt ein inoffizielles WhatsApp-Web-/Multi-Device-Protokoll. Protokolländerungen, Rate-Limits oder Kontosperren können die Verfügbarkeit beeinträchtigen.
 2. Gruppeninhalte können private Nachrichten, Personenbezug, Audio und Standortdaten enthalten. Datenschutz und Zugriffsschutz sind daher produktkritisch.
 3. Öffentliche OpenStreetMap-Tiles sind für die Demo geeignet, aber nicht automatisch für hohe Produktionslast.
 4. KI-Ergebnisse dürfen ohne Qualitätssicherung, Quellenanzeige und Nutzerkontrolle nicht als verlässliche Fakten behandelt werden.

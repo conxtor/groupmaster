@@ -79,6 +79,24 @@ entity connector_auth_state {
   version : bigint
 }
 
+entity "wa_whatsmeow.whatsmeow_device" as WhatsmeowDevice {
+  * jid : text <<PK>>
+  --
+  lid : text
+  noise_key : bytea
+  identity_key : bytea
+  signed_pre_key : bytea
+  adv_key : bytea
+  push_name : text
+}
+
+note right of WhatsmeowDevice
+  Von whatsmeow/sqlstore verwaltet.
+  Das Schema wird durch Migration 024 angelegt.
+  connector_accounts.external_account_id
+  verweist logisch auf jid.
+end note
+
 entity connector_leases {
   * account_id : uuid <<PK/FK>>
   --
