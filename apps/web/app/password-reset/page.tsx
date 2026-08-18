@@ -17,7 +17,7 @@ export default function PasswordResetRequestPage() {
     } catch (value) { setError(value instanceof Error ? value.message : t("loginFailed")); } finally { setBusy(false); }
   }
   return <main className="shell authPage"><section className="authCard panel">
-    <div className="authHeader"><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><label className="languagePicker"><span>🌐</span><select aria-label="Language" value={locale} onChange={(event) => selectLocale(event.target.value)}>{locales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label></div>
+    <div className="authHeader"><p className="eyebrow">CONXTOR - MESSAGING GROUP INTELLIGENCE</p><label className="languagePicker"><span>🌐</span><select aria-label="Language" value={locale} onChange={(event) => selectLocale(event.target.value)}>{locales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label></div>
     <h1>{t("resetRequestTitle")}</h1><p className="muted">{t("resetRequestHint")}</p>{sent ? <div className="successNotice">{t("resetRequestSent")}</div> : <form className="authForm" onSubmit={submit}><label>{t("email")}<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>{error && <div className="notice">{error}</div>}<button className="primaryButton" disabled={busy}>{busy ? t("resetRequestBusy") : t("resetRequestButton")}</button></form>}<p className="authSwitch"><Link href="/login">{t("signIn")}</Link></p>
   </section></main>;
 }

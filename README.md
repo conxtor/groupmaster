@@ -1,10 +1,12 @@
-# WAGI · WhatsApp Group Intelligence
+# CONXTOR - Messaging Group Intelligence
 
 Ein MVP-Monorepo für die Auswertung klassischer WhatsApp-Gruppen normaler Consumer-Nutzer. Ein verknüpftes WhatsApp-Gerät liefert Gruppen und Nachrichten über einen austauschbaren Connector; die Anwendung persistiert sie, verarbeitet Audio asynchron und erzeugt strukturierte KI-Ergebnisse für ein Dashboard.
 
 Die priorisierte Produktplanung mit Beta-Ziel, Produktionsreife, Risiken und Definition of Done steht in [ROADMAP.md](ROADMAP.md).
 
 Die vollständige Referenz aller Umgebungsvariablen, SMTP-/Mailcow-Beispiele und Produktionshinweise steht in [CONFIGURATION.md](CONFIGURATION.md).
+
+Das Projekt steht unter der [MIT-Lizenz](LICENSE). Copyright © 2026 Volker Kerkhoff.
 
 ## Schnellstart
 

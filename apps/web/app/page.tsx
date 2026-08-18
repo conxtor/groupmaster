@@ -4,17 +4,12 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import EventMap from "./event-map";
 import { buildGroupHierarchy, type GroupHierarchyNode } from "./group-hierarchy";
-import { AuthGate, apiFetch } from "./auth";
+import { AuthGate, apiFetch, useAppLocale } from "./auth";
 import { AudioPlayer, VideoPlayer } from "./media-player";
 import { LinkifiedText } from "./linkified-text";
 import {
-  detectBrowserLocale,
-  isSupportedLocale,
   localeCodes,
-  localeNames,
   localizeRuntimeError,
-  readLocaleCookie,
-  supportedLocales,
   translate,
   type Locale,
   type TranslationKey,
@@ -364,24 +359,11 @@ export default function Dashboard() {
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [locale, setLocale] = useState<Locale>("de");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
 
-  const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
+  const { locale, t } = useAppLocale();
   const messagePageSize = 50;
   const queryGroupId = selectedGroup !== "all" ? selectedGroup : groupFilter;
-
-  useEffect(() => {
-    const savedLocale = readLocaleCookie(document.cookie);
-    const browserLanguages = navigator.languages?.length ? navigator.languages : [navigator.language];
-    const nextLocale = savedLocale ?? detectBrowserLocale(browserLanguages);
-    setLocale(nextLocale);
-    document.cookie = `wagi_locale=${nextLocale}; Max-Age=31536000; Path=/; SameSite=Lax`;
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.lang = locale;
-  }, [locale]);
 
   useEffect(() => {
     setMessageOffset(0);
@@ -439,12 +421,6 @@ export default function Dashboard() {
   }, [groups, selectedGroups]);
   const dashboardHierarchy = useMemo(() => buildGroupHierarchy(groups, dashboardGroupIds), [groups, dashboardGroupIds]);
 
-  function selectLocale(value: string) {
-    if (!isSupportedLocale(value)) return;
-    setLocale(value);
-    document.cookie = `wagi_locale=${value}; Max-Age=31536000; Path=/; SameSite=Lax`;
-  }
-
   function clearFilters() {
     setSelectedGroup("all");
     setGroupFilter("all");
@@ -499,10 +475,7 @@ export default function Dashboard() {
 
   return <AuthGate>{(
     <main className="shell">
-      <header className="topbar">
-        <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("title")}</h1></div>
-        <div className="topbarTools"><nav className="pageNav"><Link href="/" className="pageNavActive">{t("dashboard")}</Link><Link href="/knowledge">{t("knowledge")}</Link><Link href="/connectors">{t("connectors")}</Link><Link href="/groups">{t("manageGroups")}</Link><Link href="/replays">{t("replayBackfill")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
-      </header>
+      <header className="pageHeading"><div><p className="eyebrow">CONXTOR</p><h1>{t("title")}</h1></div></header>
       <section className="hero"><div><p className="eyebrow">{t("signalCheck")}</p><p className="heroNumber">{visibleMessages.filter((item) => item.analysis?.relevant).length || 1}</p><p className="muted">{t("relevantSignals", { scope })}</p></div><div className="heroNote"><span>✦</span><p>{t("heroNote")}</p></div></section>
       {error && <div className="notice">{error}</div>}
       <ProcessingStatus locale={locale} status={serviceStatus} />

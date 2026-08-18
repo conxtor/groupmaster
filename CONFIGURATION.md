@@ -1,4 +1,4 @@
-# WAGI-Konfiguration
+# CONXTOR-Konfiguration
 
 Diese Datei ist die Referenz für die Umgebungsvariablen der lokalen
 `docker-compose`-Umgebung und des Dockge-Deployments. Die Vorlage für die lokale

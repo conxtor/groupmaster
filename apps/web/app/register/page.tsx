@@ -22,7 +22,7 @@ export default function RegisterPage() {
   }
 
   return <main className="shell authPage"><section className="authCard panel">
-    <div className="authHeader"><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><label className="languagePicker"><span>🌐</span><select aria-label="Language" value={locale} onChange={(event) => selectLocale(event.target.value)}>{locales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label></div>
+    <div className="authHeader"><p className="eyebrow">CONXTOR - MESSAGING GROUP INTELLIGENCE</p><label className="languagePicker"><span>🌐</span><select aria-label="Language" value={locale} onChange={(event) => selectLocale(event.target.value)}>{locales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label></div>
     {sent ? <><h1>{t("verificationTitle")}</h1><p className="muted">{t("verificationSent")}</p><p className="authSwitch"><Link href="/login">{t("signIn")}</Link></p></> : <>
       <h1>{t("registerTitle")}</h1><p className="muted">{t("registerHint")}</p>{error && <div className="notice">{error}</div>}
       <form className="authForm" onSubmit={submit}>

@@ -1,5 +1,5 @@
 @startuml
-title WAGI – Aktuelles Datenmodell
+title CONXTOR – Aktuelles Datenmodell
 hide methods
 hide stereotypes
 skinparam linetype ortho

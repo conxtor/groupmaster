@@ -2,15 +2,9 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { AuthGate, apiFetch } from "../auth";
+import { AuthGate, apiFetch, useAppLocale } from "../auth";
 import { buildGroupHierarchy, type GroupHierarchyNode } from "../group-hierarchy";
 import {
-  detectBrowserLocale,
-  isSupportedLocale,
-  localeNames,
-  readLocaleCookie,
-  supportedLocales,
-  translate,
   type Locale,
   type TranslationKey,
   type TranslationValues,
@@ -55,7 +49,6 @@ function GroupBranch({ node, selected, onToggle, depth = 0 }: { node: GroupHiera
 }
 
 export default function ReplaysPage() {
-  const [locale, setLocale] = useState<Locale>("de");
   const [groups, setGroups] = useState<Group[]>([]);
   const [jobs, setJobs] = useState<ReplayJob[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -65,18 +58,7 @@ export default function ReplaysPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const t: Translator = (key, values) => translate(locale, key, values);
-
-  useEffect(() => {
-    const saved = readLocaleCookie(document.cookie);
-    const next = saved ?? detectBrowserLocale(navigator.languages?.length ? navigator.languages : [navigator.language]);
-    setLocale(next);
-    document.cookie = `wagi_locale=${next}; Max-Age=31536000; Path=/; SameSite=Lax`;
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.lang = locale;
-  }, [locale]);
+  const { locale, t } = useAppLocale();
 
   useEffect(() => {
     let active = true;
@@ -101,12 +83,6 @@ export default function ReplaysPage() {
   }, [locale]);
 
   const hierarchy = useMemo(() => buildGroupHierarchy(groups.filter((group) => group.isSelected)), [groups]);
-
-  function selectLocale(value: string) {
-    if (!isSupportedLocale(value)) return;
-    setLocale(value);
-    document.cookie = `wagi_locale=${value}; Max-Age=31536000; Path=/; SameSite=Lax`;
-  }
 
   function toggleGroup(id: string) {
     setSelected((current) => {
@@ -135,7 +111,7 @@ export default function ReplaysPage() {
   }
 
   return <AuthGate><main className="shell">
-    <header className="topbar"><div><p className="eyebrow">WAGI / PROCESSING</p><h1>{t("replayBackfillTitle")}</h1></div><div className="topbarTools"><nav className="pageNav"><Link href="/">{t("dashboard")}</Link><Link href="/knowledge">{t("knowledge")}</Link><Link href="/connectors">{t("connectors")}</Link><Link href="/groups">{t("manageGroups")}</Link><Link href="/replays" className="pageNavActive">{t("replayBackfill")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label></div></header>
+    <header className="pageHeading"><div><p className="eyebrow">CONXTOR</p><h1>{t("replayBackfillTitle")}</h1></div></header>
     {notice && <div className="notice">{notice}</div>}{error && <div className="notice">{error}</div>}
     <form className="panel" onSubmit={submit}><div className="panelHead"><div><h2>{t("replayBackfillTitle")}</h2><p className="muted">{t("replayBackfillHint")}</p></div></div><div className="filterGrid"><label><span>{t("replayFrom")}</span><input type="date" value={from} onChange={(event) => setFrom(event.target.value)} required /></label><label><span>{t("replayTo")}</span><input type="date" value={to} onChange={(event) => setTo(event.target.value)} required /></label><label className="filterCheck"><input type="checkbox" checked={includeMedia} onChange={(event) => setIncludeMedia(event.target.checked)} /><span>{t("replayIncludeMedia")}</span></label></div><h3>{t("replayGroups")}</h3><div className="selectionList">{hierarchy.map((node) => <GroupBranch key={node.group.id} node={node} selected={selected} onToggle={toggleGroup} />)}</div><button className="primaryButton" type="submit" disabled={busy || selected.size === 0}>{busy ? "…" : t("startReplay")}</button></form>
     <section className="panel"><div className="panelHead"><h2>{t("replayJobs")}</h2></div>{jobs.length === 0 ? <p className="muted">{t("replayNoJobs")}</p> : <div className="jobList">{jobs.map((job) => <article className="jobRow" key={job.id}><div><strong>{job.status}</strong><small>{new Date(job.from).toLocaleDateString(locale)} – {new Date(job.to).toLocaleDateString(locale)}</small></div><span>{t("replayProgress", { processed: job.processedCount, total: job.totalCount, failed: job.failedCount })}</span></article>)}</div>}</section>

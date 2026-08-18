@@ -1,5 +1,5 @@
 @startuml
-title WAGI – Nutzerverwaltung und Profil
+title CONXTOR – Nutzerverwaltung und Profil
 autonumber
 
 actor "Administrator" as Admin

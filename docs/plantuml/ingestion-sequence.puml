@@ -1,5 +1,5 @@
 @startuml
-title WAGI – Onboarding, Auswahl und Nachrichtenaufnahme
+title CONXTOR – Onboarding, Auswahl und Nachrichtenaufnahme
 autonumber
 
 actor "Nutzer" as User

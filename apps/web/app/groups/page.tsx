@@ -3,14 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { buildGroupHierarchy, type GroupHierarchyNode } from "../group-hierarchy";
-import { AuthGate, apiFetch } from "../auth";
+import { AuthGate, apiFetch, useAppLocale } from "../auth";
 import {
-  detectBrowserLocale,
-  isSupportedLocale,
-  localeNames,
-  readLocaleCookie,
-  supportedLocales,
-  translate,
   type Locale,
   type TranslationKey,
   type TranslationValues,
@@ -62,22 +56,9 @@ function GroupBranch({ node, t, onToggle, depth = 0 }: { node: GroupHierarchyNod
 
 export default function GroupSelectionPage() {
   const [groups, setGroups] = useState<Group[]>([]);
-  const [locale, setLocale] = useState<Locale>("de");
   const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
-
-  useEffect(() => {
-    const savedLocale = readLocaleCookie(document.cookie);
-    const browserLanguages = navigator.languages?.length ? navigator.languages : [navigator.language];
-    const nextLocale = savedLocale ?? detectBrowserLocale(browserLanguages);
-    setLocale(nextLocale);
-    document.cookie = `wagi_locale=${nextLocale}; Max-Age=31536000; Path=/; SameSite=Lax`;
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.lang = locale;
-  }, [locale]);
+  const { locale, t } = useAppLocale();
 
   useEffect(() => {
     let active = true;
@@ -98,12 +79,6 @@ export default function GroupSelectionPage() {
 
   const hierarchy = useMemo(() => buildGroupHierarchy(groups), [groups]);
 
-  function selectLocale(value: string) {
-    if (!isSupportedLocale(value)) return;
-    setLocale(value);
-    document.cookie = `wagi_locale=${value}; Max-Age=31536000; Path=/; SameSite=Lax`;
-  }
-
   async function toggleGroup(group: Group) {
     const selected = !group.isSelected;
     setGroups((current) => current.map((item) => item.id === group.id ? { ...item, isSelected: selected } : item));
@@ -123,10 +98,7 @@ export default function GroupSelectionPage() {
   const selectedCount = groups.filter((group) => group.isSelected).length;
 
   return <AuthGate><main className="shell selectionPage">
-    <header className="topbar">
-      <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("groupSelectionPage")}</h1></div>
-      <div className="topbarTools"><nav className="pageNav"><Link href="/">{t("dashboard")}</Link><Link href="/knowledge">{t("knowledge")}</Link><Link href="/connectors">{t("connectors")}</Link><Link href="/groups" className="pageNavActive">{t("manageGroups")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
-    </header>
+    <header className="pageHeading"><div><p className="eyebrow">CONXTOR</p><h1>{t("groupSelectionPage")}</h1></div></header>
     <section className="selectionIntro"><div><p className="eyebrow">{t("groups")}</p><p className="selectionLead">{t("groupSelectionPageHint")}</p></div><div className="selectionSummary"><strong>{selectedCount}</strong><span>{t("selectedCount")}</span></div></section>
     {error && <div className="notice">{error}</div>}
     <section className="panel selectionPanel">

@@ -1,5 +1,5 @@
 @startuml
-title WAGI – Email-Verifizierung und Passwort-Reset
+title CONXTOR – Email-Verifizierung und Passwort-Reset
 autonumber
 
 actor "Nutzer" as User

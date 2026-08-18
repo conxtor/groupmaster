@@ -1,5 +1,5 @@
 @startuml
-title WAGI – Deployment: lokal und Dockge/Produktion
+title CONXTOR – Deployment: lokal und Dockge/Produktion
 skinparam componentStyle rectangle
 skinparam packageStyle rectangle
 

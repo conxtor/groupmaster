@@ -4,17 +4,11 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { buildGroupHierarchy, type GroupHierarchyNode } from "../group-hierarchy";
 import {
-  detectBrowserLocale,
-  isSupportedLocale,
-  localeNames,
-  readLocaleCookie,
-  supportedLocales,
-  translate,
   type Locale,
   type TranslationKey,
   type TranslationValues,
 } from "../i18n";
-import { AuthGate, apiFetch } from "../auth";
+import { AuthGate, apiFetch, useAppLocale } from "../auth";
 import { AudioPlayer, VideoPlayer } from "../media-player";
 import { LinkifiedText } from "../linkified-text";
 
@@ -263,22 +257,9 @@ export default function KnowledgePage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [topics, setTopics] = useState<KnowledgeTopic[]>([]);
   const [selectedGroup, setSelectedGroup] = useState("all");
-  const [locale, setLocale] = useState<Locale>("de");
   const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
-
-  useEffect(() => {
-    const savedLocale = readLocaleCookie(document.cookie);
-    const browserLanguages = navigator.languages?.length ? navigator.languages : [navigator.language];
-    const nextLocale = savedLocale ?? detectBrowserLocale(browserLanguages);
-    setLocale(nextLocale);
-    document.cookie = `wagi_locale=${nextLocale}; Max-Age=31536000; Path=/; SameSite=Lax`;
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.lang = locale;
-  }, [locale]);
+  const { locale, t } = useAppLocale();
 
   useEffect(() => {
     let active = true;
@@ -327,17 +308,8 @@ export default function KnowledgePage() {
   }, [groups, selectedGroups]);
   const groupHierarchy = useMemo(() => buildGroupHierarchy(groups, visibleGroupIds), [groups, visibleGroupIds]);
 
-  function selectLocale(value: string) {
-    if (!isSupportedLocale(value)) return;
-    setLocale(value);
-    document.cookie = `wagi_locale=${value}; Max-Age=31536000; Path=/; SameSite=Lax`;
-  }
-
   return <AuthGate><main className="shell knowledgePage">
-    <header className="topbar">
-      <div><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><h1>{t("knowledgeBaseTitle")}</h1></div>
-      <div className="topbarTools"><nav className="pageNav"><Link href="/">{t("dashboard")}</Link><Link href="/knowledge" className="pageNavActive">{t("knowledge")}</Link><Link href="/connectors">{t("connectors")}</Link><Link href="/groups">{t("manageGroups")}</Link></nav><label className="languagePicker"><span>{t("language")}</span><select aria-label={t("language")} value={locale} onChange={(event) => selectLocale(event.target.value)}>{supportedLocales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label><div className="status"><span className={`dot ${live ? "on" : ""}`} />{live ? t("liveConnected") : t("localPreview")}</div></div>
-    </header>
+    <header className="pageHeading"><div><p className="eyebrow">CONXTOR</p><h1>{t("knowledgeBaseTitle")}</h1></div></header>
     <section className="selectionIntro"><div><p className="eyebrow">{t("knowledge")}</p><p className="selectionLead">{t("knowledgeBaseHint")}</p></div><div className="selectionSummary"><strong>{selectedGroup === "all" ? visibleTopics.length : visibleTopics.length}</strong><span>{t("knowledge")}</span></div></section>
     {error && <div className="notice">{error}</div>}
     <div className="dashboardGrid knowledgeLayout">

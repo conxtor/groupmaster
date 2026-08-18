@@ -38,7 +38,7 @@ export default function LoginPage() {
   }
 
   return <main className="shell authPage"><section className="authCard panel">
-    <div className="authHeader"><p className="eyebrow">WAGI / GROUP INTELLIGENCE</p><label className="languagePicker"><span>🌐</span><select aria-label="Language" value={locale} onChange={(event) => selectLocale(event.target.value)}>{locales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label></div>
+    <div className="authHeader"><p className="eyebrow">CONXTOR - MESSAGING GROUP INTELLIGENCE</p><label className="languagePicker"><span>🌐</span><select aria-label="Language" value={locale} onChange={(event) => selectLocale(event.target.value)}>{locales.map((option) => <option key={option} value={option}>{localeNames[option]}</option>)}</select></label></div>
     <h1>{t("loginTitle")}</h1><p className="muted">{t("loginHint")}</p>
     {error && <div className="notice">{error}</div>}{verificationNeeded && <p className="authSwitch"><Link href="/verify-email/resend">{t("resendVerification")}</Link></p>}
     <form className="authForm" onSubmit={submit}>

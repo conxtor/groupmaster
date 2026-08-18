@@ -1,5 +1,5 @@
 @startuml
-title WAGI – Medien- und AI-Pipeline
+title CONXTOR – Medien- und AI-Pipeline
 skinparam componentStyle rectangle
 
 start
