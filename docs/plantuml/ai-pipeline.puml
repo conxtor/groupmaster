@@ -52,7 +52,7 @@ if (Text-Ort ausreichend belegt?) then (ja)
   endif
   if (Unsicherer Kandidat?) then (ja)
     if (Hermes aktiviert?) then (ja)
-      :Hermes accept / reject / review\nfür den Ortskandidaten;
+      :Alle unsicheren Ortskandidaten dieser Nachricht\nals einen Hermes-Batch prüfen;
     else (nein)
       :Kandidaten unter der Schwelle verwerfen;
     endif
@@ -74,21 +74,22 @@ else (nein)
   :Lexikalische Heuristik verwenden;
 endif
 
-if (Hermes-Agent aktiviert?) then (ja)
-  :Kandidaten an Hermes-Agent senden;
+if (Hermes-Agent aktiviert und Remote erlaubt?) then (ja)
+  :Unsichere Knowledge-Kandidaten dieser Nachricht\nals einen Hermes-Batch senden;
+  :Ortskandidaten separat als einen Hermes-Batch senden;
   if (Antwort gültig?) then (ja)
-    :Accept / Reject / Review anwenden;
+    :Accept / Reject / Review je Kandidat anwenden;
   else (nein)
     :Lokales Ergebnis behalten;\nRetry + Cooldown protokollieren;
   endif
 else (nein)
-  :Lokales Ergebnis behalten;
+  :Lokales Ergebnis behalten;\nGrund und Trigger als local-only protokollieren;
 endif
 
 :JSON-Schema, Provenance und\nKonfidenzen validieren;
 :message_analyses, ai_jobs, Knowledge-Hierarchie\nund Graph sowie aktive Verarbeitungsdauer speichern;
 :Queue-/Retry-Zeit getrennt von der\naktiven Worker-Zeit beobachten;
-:Relevanz-, Event- und bestätigte Ortsnamen\ngruppenbezogen in ai_learning_terms lernen;
+:Relevanz-, Event-, Action-Item- und bestätigte Ortsnamen\ngruppenbezogen in ai_learning_terms lernen;
 :ai.messages.analyzed publizieren;
 
 fork
@@ -101,6 +102,7 @@ fork
   erneut ausführen;
   :message_analyses und Knowledge
   aktualisieren, keine Medienjobs;
+  :Hermes standardmäßig überspringen;
 fork again
   :Live-Nachrichten werden über
   WAGI_EVENTS unabhängig verarbeitet;
@@ -112,7 +114,11 @@ fork again
   in neuer Generation analysieren;
   :Generation erst nach vollständigem Erfolg
   aktiv schalten; bei Fehler alte KB behalten;
+  :Hermes standardmäßig überspringen;
 end fork;
+
+:Batch-/Skip-/Fehler-Metriken nach Trigger
+in ai_hermes_usage aggregieren;
 
 fork
   :Web/API liest Dashboard, Events\nund Knowledge Base aus PostgreSQL;

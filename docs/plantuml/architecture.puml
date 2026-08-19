@@ -91,8 +91,9 @@ Media --> NATS : media.audio.transcribed\nmedia.image.analyzed\nmedia.document.a
 NATS --> AI : wa.messages.received\nmedia.*.analyzed\nreplay.requested
 ReassessmentNATS --> AI : ai.reassessment.requested\nseparater Durable Consumer
 KnowledgeRebuildNATS --> AI : knowledge.rebuild.requested\nseparater Durable Consumer
-AI --> DB : ai_jobs, message_analyses,\nknowledge hierarchy + graph,\nai_learning_terms + topic definitions\nknowledge_subtopic_terms
+AI --> DB : ai_jobs, message_analyses\n(events + action_items + places),\nknowledge hierarchy + graph,\nai_learning_terms + topic definitions\nknowledge_subtopic_terms
 AI --> DB : ai_learning_term_history\ncreated, feedback, inferred, admin
+AI --> DB : ai_hermes_usage\nminutenweise Batch-/Skip-/Fehlermetriken
 AI --> NATS : ai.messages.analyzed\nDLQ bei Fehlern
 AI ..> MinIO : optional document/media context
 Provisioner --> NATS : WAGI_EVENTS,\nWAGI_* durable consumers

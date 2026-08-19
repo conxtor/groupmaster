@@ -112,6 +112,25 @@ type aiProcessingHistoryView struct {
 	Error                string `json:"error,omitempty"`
 }
 
+type hermesUsageSummaryView struct {
+	LogicalRequests   int64 `json:"logicalRequests"`
+	HTTPAttempts      int64 `json:"httpAttempts"`
+	RemoteCandidates  int64 `json:"remoteCandidates"`
+	SkippedCandidates int64 `json:"skippedCandidates"`
+	Errors            int64 `json:"errors"`
+}
+
+type hermesUsageView struct {
+	BucketStart     time.Time `json:"bucketStart"`
+	Trigger         string    `json:"trigger"`
+	Operation       string    `json:"operation"`
+	Outcome         string    `json:"outcome"`
+	CandidateCount  int64     `json:"candidateCount"`
+	LogicalRequests int64     `json:"logicalRequests"`
+	HTTPAttempts    int64     `json:"httpAttempts"`
+	ErrorCount      int64     `json:"errorCount"`
+}
+
 type jetStreamConsumerView struct {
 	Name          string `json:"name"`
 	FilterSubject string `json:"filterSubject"`
@@ -170,9 +189,15 @@ type adminObservabilityView struct {
 	AIProcessingPageSize   int                         `json:"aiProcessingPageSize"`
 	AIProcessingTotal      int                         `json:"aiProcessingTotal"`
 	AIProcessingTotalPages int                         `json:"aiProcessingTotalPages"`
+	Hermes                 hermesObservabilityView     `json:"hermes"`
 	NATS                   natsObservabilityView       `json:"nats"`
 	MinIO                  minioObservabilityView      `json:"minio"`
 	Streams                []jetStreamView             `json:"streams"`
+}
+
+type hermesObservabilityView struct {
+	Last24Hours hermesUsageSummaryView `json:"last24Hours"`
+	Usage       []hermesUsageView      `json:"usage"`
 }
 
 var observabilityConsumers = map[string][]string{
@@ -215,6 +240,7 @@ func (a *app) collectObservability(r *http.Request) (adminObservabilityView, err
 		AIProcessingPageSize: aiPageSize,
 		Streams:              make([]jetStreamView, 0, len(observabilityConsumers)),
 	}
+	view.Hermes.Usage = make([]hermesUsageView, 0)
 	view.Summary.GroupsByPlatform = make([]observabilityLabelCount, 0)
 	view.Summary.MessagesByKind = make([]observabilityLabelCount, 0)
 
@@ -434,6 +460,43 @@ func (a *app) collectObservability(r *http.Request) (adminObservabilityView, err
 		view.AIProcessingHistory = append(view.AIProcessingHistory, item)
 	}
 	rows.Close()
+
+	// Hermes is optional and the metrics migration may be applied during a
+	// rolling deployment. Keep the rest of the admin page available while the
+	// table is not present yet.
+	if err := a.db.QueryRow(ctx, `
+		SELECT
+			COALESCE(SUM(logical_requests),0)::bigint,
+			COALESCE(SUM(http_attempts),0)::bigint,
+			COALESCE(SUM(candidate_count) FILTER (WHERE outcome='remote'),0)::bigint,
+			COALESCE(SUM(candidate_count) FILTER (WHERE outcome IN ('skipped','local-gate','cooldown')),0)::bigint,
+			COALESCE(SUM(error_count),0)::bigint
+		FROM ai_hermes_usage
+		WHERE bucket_start >= NOW() - INTERVAL '24 hours'
+	`).Scan(
+		&view.Hermes.Last24Hours.LogicalRequests,
+		&view.Hermes.Last24Hours.HTTPAttempts,
+		&view.Hermes.Last24Hours.RemoteCandidates,
+		&view.Hermes.Last24Hours.SkippedCandidates,
+		&view.Hermes.Last24Hours.Errors,
+	); err == nil {
+		usageRows, usageErr := a.db.Query(ctx, `
+			SELECT bucket_start, trigger, operation, outcome, candidate_count, logical_requests, http_attempts, error_count
+			FROM ai_hermes_usage
+			WHERE bucket_start >= NOW() - INTERVAL '24 hours'
+			ORDER BY bucket_start DESC, trigger, operation, outcome
+			LIMIT 200`)
+		if usageErr == nil {
+			for usageRows.Next() {
+				var item hermesUsageView
+				if scanErr := usageRows.Scan(&item.BucketStart, &item.Trigger, &item.Operation, &item.Outcome, &item.CandidateCount, &item.LogicalRequests, &item.HTTPAttempts, &item.ErrorCount); scanErr != nil {
+					break
+				}
+				view.Hermes.Usage = append(view.Hermes.Usage, item)
+			}
+			usageRows.Close()
+		}
+	}
 
 	if a.nc != nil {
 		stats := a.nc.Stats()

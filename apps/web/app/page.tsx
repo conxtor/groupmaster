@@ -18,7 +18,8 @@ import {
 
 type Place = { name: string; latitude?: number; longitude?: number };
 type Event = { eventKey?: string; title: string; startsAt?: string; location?: string; sourceMessageIds?: string[] };
-type Analysis = { relevant?: boolean; relevanceLevel?: "high" | "medium" | "low"; score?: number; summary?: string; places?: Place[]; events?: Event[] };
+type ActionItem = { actionKey?: string; title: string; dueAt?: string; assignee?: string; status?: "open" | "done"; confidence?: number; sourceMessageIds?: string[] };
+type Analysis = { relevant?: boolean; relevanceLevel?: "high" | "medium" | "low"; score?: number; summary?: string; places?: Place[]; events?: Event[]; actionItems?: ActionItem[] };
 type Group = { id: string; subject: string; participantCount: number; isSelected: boolean; discoveredAt: string; platform?: "whatsapp" | "telegram"; chatType?: "group" | "supergroup" | "channel" | "topic"; language?: "de" | "es" | "ca" | "en" | "fr"; parentGroupId?: string; topicId?: number };
 type Message = { id: string; groupId: string; groupSubject: string; waMessageId?: string; senderJid: string; senderName?: string; kind: string; text?: string; replyToWaMessageId?: string; platform?: string; imageUrl?: string; mediaUrl?: string; thumbnailUrl?: string; transcript?: string; audioStatus?: string; audioJobId?: string; audioAttempts?: number; audioError?: string; audioNextAttemptAt?: string; receivedAt: string; hasMedia: boolean; analysis?: Analysis };
 type MessageNode = Message & { children: MessageNode[] };
@@ -51,6 +52,7 @@ function preserveMessageMedia(previousMessages: Message[], nextMessages: Message
 }
 type EventVersion = { event: Event; place?: Place; updatedAt: string; sourceMessageIds: string[]; updateMessage?: Message };
 type EventRecord = { key: string; groupId: string; groupSubject: string; groupPlatform?: string; versions: EventVersion[] };
+type ActionItemRecord = { key: string; groupId: string; groupSubject: string; item: ActionItem; updatedAt: string };
 type Translator = (key: TranslationKey, values?: TranslationValues) => string;
 type ServiceStatus = { connectors: Array<{ connector: string; status: string; detail?: string; lastError?: string; updatedAt: string; queuePosition?: number | null; queueLength?: number | null; waitReason?: string | null }>; audioJobs: Record<string, number>; recentAudioErrors: Array<{ id: string; error?: string; attempts: number; groupSubject: string }>; aiProcessing: { total: number; completed: number; pending: number; model?: string; promptVersion?: string; updatedAt?: string } };
 
@@ -245,6 +247,20 @@ function eventDate(value: string, locale: Locale) {
   return new Intl.DateTimeFormat(localeCodes[locale], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Madrid" }).format(new Date(value));
 }
 
+function actionItemsForMessages(messages: Message[]) {
+  const records = new Map<string, ActionItemRecord>();
+  for (const message of messages) {
+    for (const item of message.analysis?.actionItems ?? []) {
+      const key = `${message.groupId}:${item.actionKey ?? item.title}`;
+      const current = records.get(key);
+      if (!current || message.receivedAt > current.updatedAt) {
+        records.set(key, { key, groupId: message.groupId, groupSubject: message.groupSubject, item, updatedAt: message.receivedAt });
+      }
+    }
+  }
+  return [...records.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
 function audioStatusLabel(status: string | undefined, t: Translator) {
   if (status === "queued") return t("audioQueued");
   if (status === "processing") return t("audioProcessing");
@@ -253,12 +269,12 @@ function audioStatusLabel(status: string | undefined, t: Translator) {
   return status ?? t("audioStatus");
 }
 
-function EventBoard({ events, messages, locale }: { events: EventRecord[]; messages: Message[]; locale: Locale }) {
+function EventBoard({ events, actionItems, messages, locale }: { events: EventRecord[]; actionItems: ActionItemRecord[]; messages: Message[]; locale: Locale }) {
   const t = (key: TranslationKey, values?: TranslationValues) => translate(locale, key, values);
-  if (!events.length) return null;
+  if (!events.length && !actionItems.length) return null;
   return (
     <div className="eventsBoard">
-      <div className="eventsBoardHead"><div><p className="eyebrow">{t("currentEvents")}</p><h2>{t("eventsHeadline")}</h2><p className="muted">{t("eventsSubtitle")}</p></div><span className="count">{events.length}</span></div>
+      {events.length > 0 && <><div className="eventsBoardHead"><div><p className="eyebrow">{t("currentEvents")}</p><h2>{t("eventsHeadline")}</h2><p className="muted">{t("eventsSubtitle")}</p></div><span className="count">{events.length}</span></div>
       <div className="eventList">{events.map((record) => {
         const current = record.versions.at(-1)!;
         const location = eventLocation(current, t);
@@ -269,7 +285,8 @@ function EventBoard({ events, messages, locale }: { events: EventRecord[]; messa
           {current.place ? <EventMap latitude={current.place.latitude!} longitude={current.place.longitude!} label={location} mapLabel={t("mapFor", { label: location })} /> : <div className="mapMissing">{t("noCoordinates")}</div>}
           {record.versions.length > 1 && <div className="eventHistory"><div className="eventHistoryHead"><strong>{t("changeHistory")}</strong><span>{t("versions", { count: record.versions.length })}</span></div><ol>{[...record.versions].reverse().map((version, index, newestFirst) => { const chronologicalIndex = record.versions.indexOf(version); return <li key={`${record.key}-${version.updatedAt}-${index}`} className={index === 0 ? "current" : ""}><div className="historyMeta"><time dateTime={version.updatedAt}>{eventDate(version.updatedAt, locale)}</time><strong>{index === 0 ? t("current") : t("version", { number: chronologicalIndex + 1 })}</strong></div>{index < newestFirst.length - 1 && <p className="historyChange">{versionChange(newestFirst[index + 1], version, locale)}</p>}<p>{eventLocation(version, t)}{version.event.startsAt ? ` · ${version.event.startsAt}` : ""}</p>{version.updateMessage?.text && <small>{t("source", { text: version.updateMessage.text })}</small>}</li>; })}</ol></div>}
         </article>;
-      })}</div>
+      })}</div></>}
+      {actionItems.length > 0 && <section className="actionItemsBoard"><div className="eventsBoardHead"><div><p className="eyebrow">{t("actionItemsLabel")}</p><h2>{t("actionItemsHeadline")}</h2><p className="muted">{t("actionItemsSubtitle")}</p></div><span className="count">{actionItems.length}</span></div><div className="actionItemList">{actionItems.map((record) => <article className="actionItemCard" key={record.key}><div className="actionItemCardHead"><div><p className="eventGroup">{record.groupSubject}</p><h3><LinkifiedText text={record.item.title} /></h3></div><span className={`actionItemState ${record.item.status === "done" ? "done" : "open"}`}>{record.item.status === "done" ? t("actionItemDone") : t("actionItemOpen")}</span></div>{record.item.dueAt && <p className="eventMeta">{t("actionItemDue", { due: record.item.dueAt })}</p>}<div className="eventSourceLine">{t("sourceMessages", { count: record.item.sourceMessageIds?.length ?? 1, date: eventDate(record.updatedAt, locale) })}</div></article>)}</div></section>}
     </div>
   );
 }
@@ -406,6 +423,7 @@ export default function Dashboard() {
   const visibleMessages = useMemo(() => selectedGroup === "all" ? messages : messages.filter((message) => message.groupId === selectedGroup), [messages, selectedGroup]);
   const messageThreads = useMemo(() => buildMessageHierarchy(visibleMessages), [visibleMessages]);
   const eventRecords = useMemo(() => eventVersions(visibleMessages), [visibleMessages]);
+  const actionItemRecords = useMemo(() => actionItemsForMessages(visibleMessages), [visibleMessages]);
   const selectedGroups = useMemo(() => groups.filter((group) => group.isSelected), [groups]);
   const dashboardGroupIds = useMemo(() => {
     const byId = new Map(groups.map((group) => [group.id, group]));
@@ -482,7 +500,7 @@ export default function Dashboard() {
       <section className="panel filterPanel"><div className="panelHead"><div><p className="eyebrow">{t("searchMessages")}</p><h2>{t("messageStream")}</h2></div><button className="textButton" type="button" onClick={clearFilters}>{t("clearFilters")}</button></div><div className="filterGrid"><label><span>{t("searchMessages")}</span><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={t("searchMessages")} /></label><label><span>{t("filterGroup")}</span><select value={groupFilter} onChange={(event) => selectGroup(event.target.value)}><option value="all">{t("allSelected")}</option>{selectedGroups.map((group) => <option key={group.id} value={group.id}>{group.subject}</option>)}</select></label><label><span>{t("filterKind")}</span><select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">{t("allKinds")}</option>{["text", "audio", "image", "video", "location", "document"].map((kind) => <option key={kind} value={kind}>{kindLabel(kind, locale)}</option>)}</select></label><label><span>{t("setRelevance")}</span><select value={relevanceFilter} onChange={(event) => setRelevanceFilter(event.target.value)}><option value="all">{t("allRelevance")}</option><option value="high">{t("relevanceHigh")}</option><option value="medium">{t("relevanceMedium")}</option><option value="low">{t("relevanceLow")}</option></select></label><label><span>{t("filterFrom")}</span><input type="datetime-local" value={fromFilter} onChange={(event) => setFromFilter(event.target.value)} /></label><label><span>{t("filterTo")}</span><input type="datetime-local" value={toFilter} onChange={(event) => setToFilter(event.target.value)} /></label><label className="filterCheck"><input type="checkbox" checked={eventOnly} onChange={(event) => setEventOnly(event.target.checked)} /><span>{t("filterEvents")}</span></label><label className="filterCheck"><input type="checkbox" checked={placeOnly} onChange={(event) => setPlaceOnly(event.target.checked)} /><span>{t("filterPlaces")}</span></label></div></section>
       <div className="grid">
         <aside className="panel groupsPanel"><div className="panelHead"><div><h2>{t("selectedGroupsOnly")}</h2><p className="muted groupSelectionHint">{t("groupSelectionHint")}</p></div><span className="count">{selectedGroups.length}</span></div><Link className="manageGroupsLink" href="/groups">{t("manageGroups")}</Link><button className={`groupRow ${selectedGroup === "all" ? "active" : ""}`} onClick={() => selectGroup("all")}><span className="avatar all">✦</span><span><strong>{t("allSelected")}</strong><small>{t("liveOverview")}</small></span></button>{dashboardHierarchy.map((node) => <DashboardGroupBranch key={node.group.id} node={node} selectedGroup={selectedGroup} onSelect={selectGroup} t={t} />)}</aside>
-        <section className="panel feedPanel"><EventBoard events={eventRecords} messages={eventSourceMessages} locale={locale} /><div className="panelHead"><div><h2>{showAllMessages ? t("allMessages") : t("relevantMessages")}</h2><p className="muted">{showAllMessages ? t("allMessagesSubtitle") : t("relevantMessagesSubtitle")}</p></div><div className="feedControls"><button className={`textButton ${!showAllMessages ? "active" : ""}`} type="button" aria-pressed={!showAllMessages} onClick={() => setShowAllMessages(false)}>{t("relevantOnly")}</button><button className={`textButton ${showAllMessages ? "active" : ""}`} type="button" aria-pressed={showAllMessages} onClick={() => setShowAllMessages(true)}>{t("allMessages")}</button><span className="count">{visibleMessages.length}</span></div></div><div className="feed">{messageThreads.map((message) => <MessageCard key={message.id} message={message} locale={locale} t={t} onRetryAudio={retryAudio} onTranscriptSaved={saveTranscript} onFeedback={submitFeedback} />)}</div><div className="paginationControls" aria-label={t("messagePagination")}><button className="textButton" type="button" disabled={messageOffset === 0 || messagesLoading} onClick={() => setMessageOffset((current) => Math.max(0, current - messagePageSize))}>{t("previousPage")}</button><span>{t("messagePage", { page: Math.floor(messageOffset / messagePageSize) + 1 })}{messagesLoading ? ` · ${t("loadingMessages")}` : ""}</span><button className="textButton" type="button" disabled={!messagesHasMore || messagesLoading} onClick={() => setMessageOffset((current) => current + messagePageSize)}>{t("nextPage")}</button></div></section>
+        <section className="panel feedPanel"><EventBoard events={eventRecords} actionItems={actionItemRecords} messages={eventSourceMessages} locale={locale} /><div className="panelHead"><div><h2>{showAllMessages ? t("allMessages") : t("relevantMessages")}</h2><p className="muted">{showAllMessages ? t("allMessagesSubtitle") : t("relevantMessagesSubtitle")}</p></div><div className="feedControls"><button className={`textButton ${!showAllMessages ? "active" : ""}`} type="button" aria-pressed={!showAllMessages} onClick={() => setShowAllMessages(false)}>{t("relevantOnly")}</button><button className={`textButton ${showAllMessages ? "active" : ""}`} type="button" aria-pressed={showAllMessages} onClick={() => setShowAllMessages(true)}>{t("allMessages")}</button><span className="count">{visibleMessages.length}</span></div></div><div className="feed">{messageThreads.map((message) => <MessageCard key={message.id} message={message} locale={locale} t={t} onRetryAudio={retryAudio} onTranscriptSaved={saveTranscript} onFeedback={submitFeedback} />)}</div><div className="paginationControls" aria-label={t("messagePagination")}><button className="textButton" type="button" disabled={messageOffset === 0 || messagesLoading} onClick={() => setMessageOffset((current) => Math.max(0, current - messagePageSize))}>{t("previousPage")}</button><span>{t("messagePage", { page: Math.floor(messageOffset / messagePageSize) + 1 })}{messagesLoading ? ` · ${t("loadingMessages")}` : ""}</span><button className="textButton" type="button" disabled={!messagesHasMore || messagesLoading} onClick={() => setMessageOffset((current) => current + messagePageSize)}>{t("nextPage")}</button></div></section>
       </div>
       <footer><span>{t("footer")}</span><span>{t("build")}</span></footer>
     </main>

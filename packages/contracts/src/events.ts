@@ -148,6 +148,7 @@ export interface MessageAnalysis {
   facts: Array<{ text: string; confidence: number }>;
   entities: Array<{ name: string; type: string; confidence: number }>;
   events: Array<{ title: string; startsAt?: string; location?: string; confidence: number; sourceMessageIds?: string[] }>;
+  actionItems: Array<{ actionKey?: string; title: string; dueAt?: string; assignee?: string; status: "open" | "done"; confidence: number; sourceMessageIds?: string[] }>;
   places: Array<{ name: string; latitude?: number; longitude?: number; confidence: number }>;
   knowledge: Array<{ topicKey: string; topicTitle: string; itemKey: string; itemType: "fact" | "insight" | "entity"; content: string; confidence: number; sourceMessageIds: string[] }>;
   schemaVersion?: string;

@@ -91,7 +91,7 @@ func loadConfig() config {
 		PoolRetryDelay:        time.Duration(maxInt(5_000, envInt("CONNECTOR_POOL_RETRY_DELAY_MS", 20_000))) * time.Millisecond,
 		StartDelay:            time.Duration(maxInt(0, envInt("CONNECTOR_START_DELAY_MS", 0))) * time.Millisecond,
 		GroupRefreshInterval:  time.Duration(maxInt(30_000, envInt("GROUP_REFRESH_INTERVAL_MS", 60_000))) * time.Millisecond,
-		SyncGrace:             time.Duration(maxInt(0, envInt("WA_SYNC_GRACE_SECONDS", 20))) * time.Second,
+		SyncGrace:             time.Duration(maxInt(0, envInt("WA_SYNC_GRACE_SECONDS", 60))) * time.Second,
 		SQLSchema:             envString("WA_WHATSMEOW_SQL_SCHEMA", "wa_whatsmeow"),
 	}
 }

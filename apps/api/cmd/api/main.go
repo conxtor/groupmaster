@@ -373,7 +373,7 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(m.platform, CASE WHEN m.group_id LIKE 'tg:%%' THEN 'telegram' ELSE 'whatsapp' END),
 		       m.received_at, m.has_media, m.media_status, m.deleted_at,
 		       mo.object_path, mo.thumbnail_path, mo.ocr_text, aj.id::text, aj.transcript, aj.status, aj.attempts, aj.error, aj.next_attempt_at,
-		       COALESCE(jsonb_build_object('relevant', a.relevant, 'relevanceLevel', COALESCE(a.relevance_level, CASE WHEN COALESCE(a.relevance_score, 0) >= 0.75 THEN 'high' WHEN COALESCE(a.relevance_score, 0) >= 0.45 THEN 'medium' ELSE 'low' END), 'score', a.relevance_score, 'summary', a.summary, 'facts', a.facts, 'entities', a.entities, 'events', a.events, 'places', a.places, 'model', a.model, 'schemaVersion', a.schema_version, 'promptVersion', a.prompt_version, 'provenance', a.provenance, 'conflicts', a.conflicts), '{}'::jsonb)
+		       COALESCE(jsonb_build_object('relevant', a.relevant, 'relevanceLevel', COALESCE(a.relevance_level, CASE WHEN COALESCE(a.relevance_score, 0) >= 0.75 THEN 'high' WHEN COALESCE(a.relevance_score, 0) >= 0.45 THEN 'medium' ELSE 'low' END), 'score', a.relevance_score, 'summary', a.summary, 'facts', a.facts, 'entities', a.entities, 'events', a.events, 'actionItems', a.action_items, 'places', a.places, 'model', a.model, 'schemaVersion', a.schema_version, 'promptVersion', a.prompt_version, 'provenance', a.provenance, 'conflicts', a.conflicts), '{}'::jsonb)
 		FROM messages m JOIN wa_groups g ON g.id = m.group_id
 		LEFT JOIN message_analyses a ON a.message_id = m.id
 		LEFT JOIN LATERAL (SELECT object_path, thumbnail_path, ocr_text FROM media_objects WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) mo ON TRUE

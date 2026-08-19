@@ -12,7 +12,7 @@ type Summary = { categories: SummaryCategory[]; hourly: SummaryPoint[]; daily: S
 type LearningPeriod = "24h" | "7d" | "30d";
 type ReassessmentJob = { id: string; status: "queued" | "running" | "completed" | "failed" | "cancelled"; totalCount: number; processedCount: number; failedCount: number; skippedCount: number; error?: string };
 
-const categoryColors: Record<Category, string> = { relevance: "#4c8b68", event: "#d8794e", place: "#6b82b4", keyword: "#9a78b3", exclusion: "#9b9b72" };
+const categoryColors: Record<Category, string> = { relevance: "#4c8b68", event: "#d8794e", action: "#c28a3d", place: "#6b82b4", keyword: "#9a78b3", exclusion: "#9b9b72" };
 function formatDate(value?: string) {
   if (!value) return "–";
   return new Intl.DateTimeFormat("de-DE", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));

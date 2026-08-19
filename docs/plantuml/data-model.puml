@@ -213,7 +213,7 @@ entity message_analyses {
   relevance_level : high | medium | low
   relevance_score : numeric
   summary : text
-  facts/entities/events/places : jsonb
+  facts/entities/events/action_items/places : jsonb
   provenance/conflicts : jsonb
   model : text
   prompt_version : text
@@ -300,7 +300,7 @@ entity ai_learning_terms {
   --
   group_id : text <<FK, nullable>>
   language : de | es | ca | en | fr
-  category : relevance | event | place | keyword | exclusion
+  category : relevance | event | action | place | keyword | exclusion
   topic_key : text <<nullable>>
   term : text
   weight : numeric
@@ -396,6 +396,19 @@ entity ai_place_resolution_cache {
   updated_at : timestamptz
 }
 
+entity ai_hermes_usage {
+  * bucket_start : timestamptz <<PK>>
+  * trigger : text <<PK>>
+  * operation : text <<PK>>
+  * outcome : text <<PK>>
+  --
+  candidate_count : bigint
+  logical_requests : bigint
+  http_attempts : bigint
+  error_count : bigint
+  updated_at : timestamptz
+}
+
 app_users ||--o{ user_sessions
 app_users ||--o{ auth_email_tokens
 app_users ||--o{ user_roles
@@ -439,7 +452,7 @@ ai_learning_terms ||--o{ ai_learning_term_history
 wa_groups ||--o{ ai_learning_term_history
 wa_groups ..> ai_place_resolution_cache : language-scoped cache
 
-note "PostGIS aktiviert in PostgreSQL für Ortsdaten.\npgvector wird primär für knowledge_items.embedding verwendet.\nNATS JetStream und MinIO sind Laufzeitdienste, keine relationalen Tabellen." as N1
+note "PostGIS aktiviert in PostgreSQL für Ortsdaten.\npgvector wird primär für knowledge_items.embedding verwendet.\nai_hermes_usage aggregiert Remote-/Local-only-Metriken minutenweise.\nNATS JetStream und MinIO sind Laufzeitdienste, keine relationalen Tabellen." as N1
 N1 .. wa_groups
 
 note bottom of wa_groups

@@ -165,7 +165,7 @@ services:
       context: ../..
       dockerfile: apps/wa-connector-go/Dockerfile
     environment:
-      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
+      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}?sslmode=${WA_DATABASE_SSLMODE:-disable}
       NATS_URL: nats://nats:4222
       WA_PORT: 3001
       WA_BACKFILL_DAYS: ${WA_BACKFILL_DAYS:-7}
@@ -175,7 +175,7 @@ services:
       WA_HISTORY_REQUEST_DELAY_MS: ${WA_HISTORY_REQUEST_DELAY_MS:-500}
       WA_MEDIA_DOWNLOAD_ATTEMPTS: ${WA_MEDIA_DOWNLOAD_ATTEMPTS:-3}
       WA_MEDIA_RETRY_INTERVAL_MS: ${WA_MEDIA_RETRY_INTERVAL_MS:-60000}
-      WA_SYNC_GRACE_SECONDS: ${WA_SYNC_GRACE_SECONDS:-20}
+      WA_SYNC_GRACE_SECONDS: ${WA_SYNC_GRACE_SECONDS:-60}
       WA_WHATSMEOW_SQL_SCHEMA: ${WA_WHATSMEOW_SQL_SCHEMA:-wa_whatsmeow}
       MEDIA_DIR: /data/media
       MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}
@@ -201,7 +201,7 @@ services:
       context: ../..
       dockerfile: apps/wa-connector-go/Dockerfile
     environment:
-      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
+      DATABASE_URL: postgres://wagi_app:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}?sslmode=${WA_DATABASE_SSLMODE:-disable}
       NATS_URL: nats://nats:4222
       WA_PORT: 3001
       WA_BACKFILL_DAYS: ${WA_BACKFILL_DAYS:-7}
@@ -211,7 +211,7 @@ services:
       WA_HISTORY_REQUEST_DELAY_MS: ${WA_HISTORY_REQUEST_DELAY_MS:-500}
       WA_MEDIA_DOWNLOAD_ATTEMPTS: ${WA_MEDIA_DOWNLOAD_ATTEMPTS:-3}
       WA_MEDIA_RETRY_INTERVAL_MS: ${WA_MEDIA_RETRY_INTERVAL_MS:-60000}
-      WA_SYNC_GRACE_SECONDS: ${WA_SYNC_GRACE_SECONDS:-20}
+      WA_SYNC_GRACE_SECONDS: ${WA_SYNC_GRACE_SECONDS:-60}
       WA_WHATSMEOW_SQL_SCHEMA: ${WA_WHATSMEOW_SQL_SCHEMA:-wa_whatsmeow}
       MEDIA_DIR: /data/media
       MEDIA_CLEANUP_TOKEN: ${MEDIA_CLEANUP_TOKEN:?MEDIA_CLEANUP_TOKEN must be set}

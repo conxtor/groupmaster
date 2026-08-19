@@ -69,6 +69,23 @@ const german = {
   noLeaseHistory: "Noch keine historischen Connector-Leases vorhanden.",
   latestAi: "Letzte 20 KI-Verarbeitungen",
   latestAiHint: "Nur vorhandene KI-Jobs. Die Dauer misst ausschließlich aktive Worker-Zeit, ohne Warteschlange und Retry-Backoff.",
+  hermesUsage: "Hermes-Nutzung",
+  hermesUsageHint: "Remote-Prüfungen der optionalen KI sowie bewusst lokal übersprungene Prüfungen der letzten 24 Stunden.",
+  hermesRequests: "Remote-Anfragen",
+  hermesAttempts: "HTTP-Versuche",
+  hermesRemoteCandidates: "Remote-Kandidaten",
+  hermesSkippedCandidates: "Lokal übersprungen",
+  hermesErrors: "Fehler",
+  hermesTrigger: "Auslöser",
+  hermesOperation: "Prüfung",
+  hermesOutcome: "Ergebnis",
+  hermesCandidates: "Kandidaten",
+  hermesRemote: "Remote",
+  hermesLocalGate: "Lokales Gate",
+  hermesSkipped: "Übersprungen",
+  hermesCooldown: "Cooldown",
+  hermesFailed: "Fehlgeschlagen",
+  hermesNoUsage: "Noch keine Hermes-Nutzung erfasst.",
   changedAt: "Abgeschlossen / geändert",
   mediaType: "Medientyp",
   group: "Gruppe",
@@ -186,11 +203,13 @@ const german = {
   topicsHint: "Sprachvariante auswählen, suchen und kompakt bearbeiten.",
   categoryRelevance: "Relevanz",
   categoryEvent: "Events",
+  categoryAction: "Action Items",
   categoryPlace: "Orte",
   categoryKeyword: "Knowledge-Schlüsselwort",
   categoryExclusion: "Ausschlusswort",
   categoryRelevanceHint: "Begriffe, die die Relevanz einer Nachricht beeinflussen.",
   categoryEventHint: "Begriffe für Treffen, Termine und mehrteilige Ereignisse.",
+  categoryActionHint: "Begriffe, die erkannte Aufgaben und nächste Schritte beeinflussen.",
   categoryPlaceHint: "Begriffe für Orte, Treffpunkte und Ortsangaben.",
   categoryKeywordHint: "Begriffe, die Knowledge-Themen und Unterthemen zuordnen.",
   categoryExclusionHint: "Füllwörter und Floskeln, die Signale abschwächen.",
@@ -234,16 +253,53 @@ const translations: Record<Locale, Partial<Record<AdminKey, string>>> = {
   },
 };
 
+const hermesTranslations: Record<Locale, Partial<Record<AdminKey, string>>> = {
+  de: {},
+  es: {
+    hermesUsage: "Uso de Hermes",
+    hermesUsageHint: "Revisiones remotas y revisiones omitidas localmente durante las últimas 24 horas.",
+    hermesRequests: "Solicitudes remotas", hermesAttempts: "Intentos HTTP", hermesRemoteCandidates: "Candidatos remotos", hermesSkippedCandidates: "Omitidos localmente", hermesErrors: "Errores",
+    hermesTrigger: "Disparador", hermesOperation: "Revisión", hermesOutcome: "Resultado", hermesCandidates: "Candidatos", hermesRemote: "Remoto", hermesLocalGate: "Filtro local", hermesSkipped: "Omitido", hermesCooldown: "En cooldown", hermesFailed: "Fallido", hermesNoUsage: "Todavía no se ha registrado uso de Hermes.",
+  },
+  ca: {
+    hermesUsage: "Ús d'Hermes",
+    hermesUsageHint: "Revisions remotes i revisions omeses localment durant les darreres 24 hores.",
+    hermesRequests: "Sol·licituds remotes", hermesAttempts: "Intents HTTP", hermesRemoteCandidates: "Candidats remots", hermesSkippedCandidates: "Omesos localment", hermesErrors: "Errors",
+    hermesTrigger: "Disparador", hermesOperation: "Revisió", hermesOutcome: "Resultat", hermesCandidates: "Candidats", hermesRemote: "Remot", hermesLocalGate: "Filtre local", hermesSkipped: "Omesa", hermesCooldown: "En cooldown", hermesFailed: "Fallida", hermesNoUsage: "Encara no s'ha registrat ús d'Hermes.",
+  },
+  en: {
+    hermesUsage: "Hermes usage",
+    hermesUsageHint: "Remote reviews and deliberately local-only reviews during the last 24 hours.",
+    hermesRequests: "Remote requests", hermesAttempts: "HTTP attempts", hermesRemoteCandidates: "Remote candidates", hermesSkippedCandidates: "Skipped locally", hermesErrors: "Errors",
+    hermesTrigger: "Trigger", hermesOperation: "Review", hermesOutcome: "Outcome", hermesCandidates: "Candidates", hermesRemote: "Remote", hermesLocalGate: "Local gate", hermesSkipped: "Skipped", hermesCooldown: "Cooldown", hermesFailed: "Failed", hermesNoUsage: "No Hermes usage recorded yet.",
+  },
+  fr: {
+    hermesUsage: "Utilisation de Hermes",
+    hermesUsageHint: "Vérifications distantes et vérifications volontairement locales au cours des dernières 24 heures.",
+    hermesRequests: "Requêtes distantes", hermesAttempts: "Tentatives HTTP", hermesRemoteCandidates: "Candidats distants", hermesSkippedCandidates: "Ignorés localement", hermesErrors: "Erreurs",
+    hermesTrigger: "Déclencheur", hermesOperation: "Vérification", hermesOutcome: "Résultat", hermesCandidates: "Candidats", hermesRemote: "Distant", hermesLocalGate: "Filtre local", hermesSkipped: "Ignoré", hermesCooldown: "Refroidissement", hermesFailed: "Échec", hermesNoUsage: "Aucune utilisation de Hermes enregistrée.",
+  },
+};
+
 export function adminTranslate(locale: Locale, key: AdminKey, values: TranslationValues = {}) {
-  const template = translations[locale][key] ?? german[key] ?? key;
+  const template = hermesTranslations[locale][key] ?? translations[locale][key] ?? german[key] ?? key;
   return template.replace(/\{(\w+)\}/g, (_, name: string) => String(values[name] ?? `{${name}}`));
 }
 
-export type AdminCategory = "relevance" | "event" | "place" | "keyword" | "exclusion";
+export type AdminCategory = "relevance" | "event" | "action" | "place" | "keyword" | "exclusion";
+const actionCategoryTranslations: Record<Locale, { name: string; description: string }> = {
+  de: { name: "Action Items", description: "Begriffe, die erkannte Aufgaben und nächste Schritte beeinflussen." },
+  es: { name: "Acciones", description: "Términos que influyen en las tareas y próximos pasos detectados." },
+  ca: { name: "Accions", description: "Termes que influeixen en les tasques i els propers passos detectats." },
+  en: { name: "Action Items", description: "Terms that influence detected tasks and next steps." },
+  fr: { name: "Actions", description: "Termes qui influencent les tâches et prochaines étapes détectées." },
+};
 export function adminCategoryName(locale: Locale, category: AdminCategory) {
+  if (category === "action") return actionCategoryTranslations[locale].name;
   return adminTranslate(locale, `category${category[0].toUpperCase()}${category.slice(1)}` as AdminKey);
 }
 export function adminCategoryDescription(locale: Locale, category: AdminCategory) {
+  if (category === "action") return actionCategoryTranslations[locale].description;
   return adminTranslate(locale, `category${category[0].toUpperCase()}${category.slice(1)}Hint` as AdminKey);
 }
 

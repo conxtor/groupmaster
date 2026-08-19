@@ -24,11 +24,14 @@ NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
 MODEL = os.getenv("AI_MODEL", "heuristic-mvp")
 AI_PROVIDER = os.getenv("AI_PROVIDER", "hybrid").lower()
 PROMPT_VERSION = os.getenv("AI_PROMPT_VERSION", "cascade-v5-places")
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.4"
 SUPPORTED_GROUP_LANGUAGES = ("de", "es", "ca", "en", "fr")
 _HERMES_CONFIGURED = os.getenv("AI_HERMES_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 _CONFIGURED_KNOWLEDGE_VERSION = os.getenv("AI_KNOWLEDGE_VERSION", "cascade-v5-places")
-KNOWLEDGE_REBUILD_VERSION = _CONFIGURED_KNOWLEDGE_VERSION + ("-hermes" if _HERMES_CONFIGURED and not _CONFIGURED_KNOWLEDGE_VERSION.endswith("-hermes") else "")
+# Hermes is an optional adjudication step, not a knowledge-base schema. Do not
+# make enabling it trigger a full startup backfill or repeat that backfill on
+# every configuration change.
+KNOWLEDGE_REBUILD_VERSION = _CONFIGURED_KNOWLEDGE_VERSION
 KNOWLEDGE_STATE_CONNECTOR = "ai-worker-knowledge"
 EMBEDDING_DIMENSIONS = 384
 EMBEDDINGS_ENABLED = os.getenv("AI_EMBEDDINGS_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
@@ -133,6 +136,16 @@ class Event(BaseModel):
     sourceMessageIds: list[str] = Field(default_factory=list)
 
 
+class ActionItem(BaseModel):
+    actionKey: str | None = None
+    title: str
+    dueAt: str | None = None
+    assignee: str | None = None
+    status: Literal["open", "done"] = "open"
+    confidence: float = Field(ge=0, le=1)
+    sourceMessageIds: list[str] = Field(default_factory=list)
+
+
 class Provenance(BaseModel):
     field: str
     sourceMessageIds: list[str] = Field(default_factory=list)
@@ -165,6 +178,7 @@ class Analysis(BaseModel):
     facts: list[Fact]
     entities: list[Entity]
     events: list[Event]
+    actionItems: list[ActionItem] = Field(default_factory=list)
     places: list[dict]
     knowledge: list[KnowledgeItem]
     model: str
@@ -276,9 +290,16 @@ class EmbeddingProvider:
 
 
 class HermesReviewer:
-    """Optional strict verifier for uncertain knowledge candidates."""
+    """Optional strict verifier for uncertain candidates.
 
-    def __init__(self):
+    The public methods review all candidates of one message in a single
+    request. This keeps the remote provider out of the hot path whenever the
+    deterministic confidence gates are sufficient and avoids one request per
+    candidate.
+    """
+
+    def __init__(self, db=None):
+        self.db = db
         self.enabled = HERMES_ENABLED and bool(HERMES_URL)
         self.endpoint = self._normalize_endpoint(HERMES_URL) if self.enabled else ""
         self._failure_cooldown_until = 0.0
@@ -323,14 +344,16 @@ class HermesReviewer:
                     pass
         return min(HERMES_RETRY_MAX_SECONDS, HERMES_RETRY_BASE_SECONDS * (2**attempt))
 
-    async def _post_with_retry(self, client: httpx.AsyncClient, headers: dict, request_body: dict) -> httpx.Response:
+    async def _post_with_retry(self, client: httpx.AsyncClient, headers: dict, request_body: dict) -> tuple[httpx.Response, int]:
         """Retry only transient Hermes failures; preserve client errors for validation/fallback."""
+        attempts = 0
         for attempt in range(HERMES_RETRY_ATTEMPTS):
             try:
+                attempts += 1
                 response = await client.post(self.endpoint, headers=headers, json=request_body)
                 transient_status = response.status_code in {408, 425, 429} or response.status_code >= 500
                 if not transient_status or attempt + 1 >= HERMES_RETRY_ATTEMPTS:
-                    return response
+                    return response, attempts
                 delay = self._retry_delay(attempt, response)
                 log.warning(
                     "Hermes returned HTTP %s; retrying in %.1fs (%d/%d)",
@@ -353,37 +376,54 @@ class HermesReviewer:
             await asyncio.sleep(delay)
         raise RuntimeError("Hermes retry loop ended unexpectedly")
 
-    async def review(self, item: KnowledgeItem, message_text: str, language: str, allowed_topic_keys: list[str] | None = None) -> HermesDecision | None:
-        if not self.enabled:
-            return None
-        if time.monotonic() < self._failure_cooldown_until:
-            return None
-        system = (
-            "You are a strict multilingual knowledge-base verifier. "
-            "Accept only durable, concrete information that would be useful later in the group. "
-            "Reject casual conversation, greetings, short plans, transient status updates, duplicate wording, "
-            "unsupported guesses and generic named entities. Return JSON only."
-        )
-        allowed = sorted({str(key).strip() for key in (allowed_topic_keys or [item.topicKey]) if str(key).strip()})
-        user = {
-            "language": language,
-            "candidate": {
-                "topicKey": item.topicKey,
-                "content": item.content,
-                "sourceMessageIds": item.sourceMessageIds,
-            },
-            "message": message_text[:2000],
-            "allowedTopicKeys": allowed,
-            "responseSchema": {
-                "decision": "accept|reject|review",
-                "topicKey": "one allowed key or null",
-                "confidence": "number 0..1",
-                "reason": "short explanation",
-            },
-        }
+    async def record_usage(
+        self,
+        trigger: str,
+        operation: str,
+        outcome: str,
+        candidate_count: int = 0,
+        logical_requests: int = 0,
+        http_attempts: int = 0,
+        error_count: int = 0,
+    ):
+        """Record compact usage data without making observability blocking."""
+        if self.db is None:
+            return
+        bucket = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        try:
+            await self.db.execute(
+                """INSERT INTO ai_hermes_usage
+                   (bucket_start, trigger, operation, outcome, candidate_count, logical_requests, http_attempts, error_count)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                   ON CONFLICT (bucket_start, trigger, operation, outcome) DO UPDATE SET
+                     candidate_count=ai_hermes_usage.candidate_count+EXCLUDED.candidate_count,
+                     logical_requests=ai_hermes_usage.logical_requests+EXCLUDED.logical_requests,
+                     http_attempts=ai_hermes_usage.http_attempts+EXCLUDED.http_attempts,
+                     error_count=ai_hermes_usage.error_count+EXCLUDED.error_count,
+                     updated_at=NOW()""",
+                bucket, str(trigger or "live")[:80], str(operation or "analysis")[:40], str(outcome or "unknown")[:40],
+                max(0, int(candidate_count)), max(0, int(logical_requests)), max(0, int(http_attempts)), max(0, int(error_count)),
+            )
+        except Exception:
+            # A rolling deployment may run the new worker before migrations;
+            # Hermes must never become unavailable because its metrics table is.
+            log.debug("could not persist Hermes usage metrics", exc_info=True)
+
+    @staticmethod
+    def _headers() -> dict:
         headers = {"content-type": "application/json"}
         if HERMES_API_KEY:
             headers["authorization"] = f"Bearer {HERMES_API_KEY}"
+        return headers
+
+    async def _request(self, system: str, user: dict, trigger: str, operation: str, candidate_count: int) -> dict | None:
+        if not self.enabled:
+            return None
+        if time.monotonic() < self._failure_cooldown_until:
+            await self.record_usage(trigger, operation, "cooldown", candidate_count=candidate_count)
+            log.debug("Hermes review skipped trigger=%s operation=%s reason=failure-cooldown", trigger, operation)
+            return None
+        attempts = 0
         try:
             timeout = httpx.Timeout(HERMES_TIMEOUT_SECONDS, connect=HERMES_CONNECT_TIMEOUT_SECONDS)
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -396,93 +436,143 @@ class HermesReviewer:
                     ],
                     "response_format": {"type": "json_object"},
                 }
-                response = await self._post_with_retry(client, headers, request_body)
+                response, request_attempts = await self._post_with_retry(client, self._headers(), request_body)
+                attempts += request_attempts
                 # Some OpenAI-compatible Hermes deployments do not expose
                 # response_format; the strict JSON instruction remains active.
                 if response.status_code == 400:
                     request_body.pop("response_format", None)
-                    response = await self._post_with_retry(client, headers, request_body)
+                    response, request_attempts = await self._post_with_retry(client, self._headers(), request_body)
+                    attempts += request_attempts
                 response.raise_for_status()
                 payload = response.json()
             content = payload["choices"][0]["message"]["content"]
-            decision = HermesDecision.model_validate(self._extract_json(content))
-            if decision.topicKey not in {*allowed, None}:
-                decision.topicKey = None
+            result = self._extract_json(content)
             self._failure_cooldown_until = 0.0
-            return decision
+            await self.record_usage(trigger, operation, "remote", candidate_count, 1, attempts)
+            log.info(
+                "Hermes remote review trigger=%s operation=%s candidates=%d attempts=%d",
+                trigger, operation, candidate_count, attempts,
+            )
+            return result
         except Exception as error:
             self._failure_cooldown_until = time.monotonic() + HERMES_FAILURE_COOLDOWN_SECONDS
+            await self.record_usage(trigger, operation, "failed", candidate_count, 1, attempts, 1)
             log.warning(
-                "Hermes knowledge verification failed after up to %d attempts; keeping deterministic result: %s: %s",
-                HERMES_RETRY_ATTEMPTS,
-                type(error).__name__,
-                str(error)[:500],
+                "Hermes %s verification failed trigger=%s after %d attempts; keeping deterministic result: %s: %s",
+                operation, trigger, attempts, type(error).__name__, str(error)[:500],
             )
-            log.debug("Hermes knowledge verification traceback", exc_info=True)
+            log.debug("Hermes %s verification traceback", operation, exc_info=True)
             return None
 
-    async def review_place(self, candidate: dict, message_text: str, language: str) -> HermesPlaceDecision | None:
-        """Adjudicate only uncertain text places; explicit coordinates bypass Hermes."""
-        if not self.enabled or not AI_PLACE_HERMES_ENABLED:
+    @staticmethod
+    def _decision_entries(payload: dict) -> list[dict]:
+        values = payload.get("decisions") or payload.get("items") or payload.get("results")
+        if isinstance(values, dict):
+            values = [values]
+        if isinstance(values, list):
+            return [value for value in values if isinstance(value, dict)]
+        # A provider may return a single decision even though the batch schema
+        # asks for an array. The caller assigns it to the only candidate.
+        return [payload] if isinstance(payload, dict) and "decision" in payload else []
+
+    async def review_knowledge_batch(
+        self,
+        items: list[KnowledgeItem],
+        message_text: str,
+        language: str,
+        allowed_topic_keys: list[str] | None = None,
+        trigger: str = "live",
+    ) -> dict[str, HermesDecision] | None:
+        if not self.enabled or not items:
             return None
-        if time.monotonic() < self._failure_cooldown_until:
+        candidate_keys = [item.itemKey for item in items]
+        allowed = sorted({str(key).strip() for key in (allowed_topic_keys or [item.topicKey for item in items]) if str(key).strip()})
+        system = (
+            "You are a strict multilingual knowledge-base verifier. "
+            "Accept only durable, concrete information that would be useful later in the group. "
+            "Reject casual conversation, greetings, short plans, transient status updates, duplicate wording, "
+            "unsupported guesses and generic named entities. Evaluate every candidate independently. Return JSON only."
+        )
+        user = {
+            "language": language,
+            "candidates": [
+                {"candidateKey": item.itemKey, "topicKey": item.topicKey, "content": item.content, "sourceMessageIds": item.sourceMessageIds}
+                for item in items
+            ],
+            "message": message_text[:4000],
+            "allowedTopicKeys": allowed,
+            "responseSchema": {"decisions": [{"candidateKey": "one supplied key", "decision": "accept|reject|review", "topicKey": "one allowed key or null", "confidence": "number 0..1", "reason": "short explanation"}]},
+        }
+        payload = await self._request(system, user, trigger, "knowledge", len(items))
+        if payload is None:
             return None
+        decisions: dict[str, HermesDecision] = {}
+        for index, raw in enumerate(self._decision_entries(payload)):
+            key = str(raw.get("candidateKey") or raw.get("itemKey") or "").strip()
+            if not key and index < len(candidate_keys):
+                key = candidate_keys[index]
+            if key not in candidate_keys:
+                continue
+            try:
+                decision = HermesDecision.model_validate(raw)
+            except Exception:
+                continue
+            if decision.topicKey not in {*allowed, None}:
+                decision.topicKey = None
+            decisions[key] = decision
+        return decisions
+
+    async def review_places(
+        self,
+        candidates: list[dict],
+        message_text: str,
+        language: str,
+        trigger: str = "live",
+    ) -> dict[str, HermesPlaceDecision] | None:
+        """Adjudicate uncertain text places in one request; coordinates bypass Hermes."""
+        if not self.enabled or not AI_PLACE_HERMES_ENABLED or not candidates:
+            return None
+        candidate_keys = [str(candidate.get("candidateKey") or index) for index, candidate in enumerate(candidates)]
         system = (
             "You are a strict multilingual geographic entity verifier. "
             "Accept only a concrete real-world place, address, venue, city, region or country that is explicitly "
             "supported by the message. Reject generic nouns such as place, location, office, home, group or station "
-            "without a named place. Never infer a place from an event or a person's name. Return JSON only."
+            "without a named place. Never infer a place from an event or a person's name. Evaluate every candidate independently. Return JSON only."
         )
         user = {
             "language": language,
-            "candidate": {
-                "name": candidate.get("name"),
-                "evidence": candidate.get("evidence", []),
-                "source": candidate.get("source"),
-            },
-            "message": message_text[:2000],
-            "responseSchema": {
-                "decision": "accept|reject|review",
-                "confidence": "number 0..1",
-                "canonicalName": "string or null",
-                "reason": "short explanation",
-            },
+            "candidates": [
+                {"candidateKey": key, "name": candidate.get("name"), "evidence": candidate.get("evidence", []), "source": candidate.get("source")}
+                for key, candidate in zip(candidate_keys, candidates)
+            ],
+            "message": message_text[:4000],
+            "responseSchema": {"decisions": [{"candidateKey": "one supplied key", "decision": "accept|reject|review", "confidence": "number 0..1", "canonicalName": "string or null", "reason": "short explanation"}]},
         }
-        headers = {"content-type": "application/json"}
-        if HERMES_API_KEY:
-            headers["authorization"] = f"Bearer {HERMES_API_KEY}"
-        try:
-            timeout = httpx.Timeout(HERMES_TIMEOUT_SECONDS, connect=HERMES_CONNECT_TIMEOUT_SECONDS)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                request_body = {
-                    "model": HERMES_MODEL,
-                    "temperature": 0,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-                    ],
-                    "response_format": {"type": "json_object"},
-                }
-                response = await self._post_with_retry(client, headers, request_body)
-                if response.status_code == 400:
-                    request_body.pop("response_format", None)
-                    response = await self._post_with_retry(client, headers, request_body)
-                response.raise_for_status()
-                payload = response.json()
-            content = payload["choices"][0]["message"]["content"]
-            decision = HermesPlaceDecision.model_validate(self._extract_json(content))
-            self._failure_cooldown_until = 0.0
-            return decision
-        except Exception as error:
-            self._failure_cooldown_until = time.monotonic() + HERMES_FAILURE_COOLDOWN_SECONDS
-            log.warning(
-                "Hermes place verification failed after up to %d attempts; keeping deterministic result: %s: %s",
-                HERMES_RETRY_ATTEMPTS,
-                type(error).__name__,
-                str(error)[:500],
-            )
-            log.debug("Hermes place verification traceback", exc_info=True)
+        payload = await self._request(system, user, trigger, "place", len(candidates))
+        if payload is None:
             return None
+        decisions: dict[str, HermesPlaceDecision] = {}
+        for index, raw in enumerate(self._decision_entries(payload)):
+            key = str(raw.get("candidateKey") or raw.get("placeKey") or "").strip()
+            if not key and index < len(candidate_keys):
+                key = candidate_keys[index]
+            if key not in candidate_keys:
+                continue
+            try:
+                decisions[key] = HermesPlaceDecision.model_validate(raw)
+            except Exception:
+                continue
+        return decisions
+
+    async def review(self, item: KnowledgeItem, message_text: str, language: str, allowed_topic_keys: list[str] | None = None) -> HermesDecision | None:
+        decisions = await self.review_knowledge_batch([item], message_text, language, allowed_topic_keys)
+        return decisions.get(item.itemKey) if decisions else None
+
+    async def review_place(self, candidate: dict, message_text: str, language: str) -> HermesPlaceDecision | None:
+        decisions = await self.review_places([candidate], message_text, language)
+        key = str(candidate.get("candidateKey") or "0")
+        return decisions.get(key) if decisions else None
 
 
 def as_object(value) -> dict:
@@ -774,12 +864,20 @@ class PlaceResolver:
             pass
 
 
-async def enrich_text_places(db, reviewer: HermesReviewer | None, text: str, language: str, learning: dict | None, resolver: PlaceResolver) -> list[dict]:
+async def enrich_text_places(
+    db,
+    reviewer: HermesReviewer | None,
+    text: str,
+    language: str,
+    learning: dict | None,
+    resolver: PlaceResolver,
+    trigger: str = "live",
+) -> list[dict]:
     candidates = text_place_candidates(text, language, learning)
     if not candidates:
         return []
-    places: list[dict] = []
-    for candidate in candidates[:6]:
+    prepared: list[tuple[str, dict]] = []
+    for index, candidate in enumerate(candidates[:6]):
         candidate["status"] = "candidate"
         resolved = await resolver.resolve(db, candidate["name"], language)
         if resolved:
@@ -793,10 +891,36 @@ async def enrich_text_places(db, reviewer: HermesReviewer | None, text: str, lan
             })
         elif AI_PLACE_REQUIRE_GEOCODER:
             continue
+        prepared.append((str(index), candidate))
+
+    remote_candidates = [
+        (key, candidate)
+        for key, candidate in prepared
+        if float(candidate["confidence"]) < AI_PLACE_HERMES_MIN_CONFIDENCE
+        and not learning_text_has_excluded(
+            learning,
+            "place",
+            f"{candidate.get('name', '')} {' '.join(candidate.get('evidence', []))}",
+        )
+    ]
+    uncertain = [candidate for _, candidate in remote_candidates]
+    decisions = None
+    if reviewer and reviewer.enabled and AI_PLACE_HERMES_ENABLED and uncertain:
+        # A single message may contain several proper-noun candidates. Review
+        # them together so a noisy caption cannot generate six remote calls.
+        decisions = await reviewer.review_places(
+            [{**candidate, "candidateKey": key} for key, candidate in remote_candidates],
+            text,
+            language,
+            trigger,
+        )
+
+    places: list[dict] = []
+    for key, candidate in prepared:
 
         confidence = float(candidate["confidence"])
-        if reviewer and reviewer.enabled and confidence < AI_PLACE_HERMES_MIN_CONFIDENCE:
-            decision = await reviewer.review_place(candidate, text, language)
+        if decisions is not None and confidence < AI_PLACE_HERMES_MIN_CONFIDENCE:
+            decision = decisions.get(key)
             if decision and decision.decision == "reject":
                 continue
             if decision and decision.decision == "accept":
@@ -847,6 +971,29 @@ EVENT_TIME_TERMS = (
     "saturday", "sunday", "demain", "aujourd", "samedi", "dimanche",
 )
 EVENT_CUE_TERMS = ("um", "uhr", "a las", "a la", "a les", "at", "às", "à", "gegen", "around", "vers")
+
+ACTION_ITEM_TERMS = (
+    "bitte", "kannst", "könntest", "soll", "sollst", "muss", "müssen", "aufgabe", "todo", "erledigen",
+    "prüfen", "schicken", "senden", "anrufen", "reservieren", "buchen", "kaufen", "mitbringen", "klären",
+    "bestätigen", "informieren", "organisieren", "por favor", "puedes", "podrías", "debes", "hay que",
+    "tarea", "pendiente", "hacer", "revisar", "enviar", "llamar", "reservar", "comprar", "traer", "confirmar",
+    "informar", "organizar", "acordar", "si us plau", "pots", "podries", "has de", "cal", "tasca", "pendent",
+    "fer", "revisar", "trucar", "portar", "confirmar", "organitzar", "acordar", "please", "can you", "could you",
+    "should", "must", "task", "to do", "check", "review", "send", "call", "book", "reserve", "buy", "bring",
+    "confirm", "inform", "organize", "arrange", "s’il te plaît", "peux-tu", "pourrais-tu", "dois", "il faut",
+    "tâche", "à faire", "faire", "vérifier", "envoyer", "appeler", "réserver", "acheter", "apporter", "confirmer",
+    "informer", "organiser", "prévoir",
+)
+ACTION_REQUEST_TERMS = (
+    "bitte", "kannst du", "könntest du", "soll", "muss", "aufgabe", "todo", "por favor", "puedes", "podrías",
+    "debes", "hay que", "tarea", "pendiente", "si us plau", "pots", "podries", "has de", "cal", "tasca",
+    "pendent", "please", "can you", "could you", "should", "must", "task", "to do", "s’il te plaît", "peux-tu",
+    "pourrais-tu", "dois", "il faut", "tâche", "à faire",
+)
+ACTION_COMPLETION_TERMS = (
+    "erledigt", "fertig", "gemacht", "done", "completed", "finished", "hecho", "terminado", "fet", "acabat",
+    "fait", "terminé",
+)
 
 
 def has_any_term(text: str, terms: tuple[str, ...]) -> bool:
@@ -937,7 +1084,10 @@ def within_event_window(left: dict, right: dict) -> bool:
 
 def multi_message_events(message_id: str, context: list[dict], learning: dict | None = None) -> list[Event]:
     learned_event_terms = [term for term in (learning or {}).get("event", {}).keys() if term not in EVENT_TIME_TERMS and term not in EVENT_CUE_TERMS]
-    event_terms = list(dict.fromkeys([*EVENT_ACTION_TERMS, *learned_event_terms]))
+    event_terms = list(dict.fromkeys([
+        term for term in [*EVENT_ACTION_TERMS, *learned_event_terms]
+        if not learning_term_is_excluded(learning, "event", term)
+    ]))
     ordered = sorted((item for item in context if item.get("id")), key=lambda item: item_time(item) or datetime.min.replace(tzinfo=timezone.utc))
     current = next((item for item in ordered if str(item.get("id")) == str(message_id)), None)
     if not current:
@@ -992,6 +1142,96 @@ def multi_message_events(message_id: str, context: list[dict], learning: dict | 
     return candidates
 
 
+def action_due_at(text: str, action_terms: list[str] | tuple[str, ...]) -> str | None:
+    normalized = " ".join(str(text or "").split())
+    weekday = re.search(
+        r"\b(morgen|heute|samstag|sonntag|freitag|montag|dienstag|mittwoch|donnerstag|domingo|dimanche|mañana|hoy|sábado|demà|avui|dissabte|diumenge|tomorrow|today|saturday|sunday|demain|aujourd|samedi)\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    clock = explicit_time(normalized)
+    date = re.search(r"\b(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\b", normalized)
+    if weekday and clock:
+        return f"{weekday.group(1).capitalize()} {clock}"
+    if date and clock:
+        return f"{date.group(1)} {clock}"
+    if clock and has_any_term(normalized, tuple(action_terms)):
+        return f"Zeit {clock}"
+    return None
+
+
+def action_item_candidate(text: str, action_terms: list[str] | tuple[str, ...], learning: dict | None = None) -> tuple[bool, bool, bool]:
+    normalized = " ".join(str(text or "").casefold().split())
+    if len(normalized) < 6:
+        return False, False, False
+    request_terms = tuple(term for term in ACTION_REQUEST_TERMS if not learning_term_is_excluded(learning, "action", term))
+    completion_terms = tuple(term for term in ACTION_COMPLETION_TERMS if not learning_term_is_excluded(learning, "action", term))
+    has_action = has_any_term(normalized, tuple(action_terms))
+    has_request = has_any_term(normalized, request_terms)
+    has_completion = has_any_term(normalized, completion_terms)
+    starts_with_action = any(
+        re.match(rf"^(?:bitte\s+)?{re.escape(str(term).casefold())}(?:\b|\s)", normalized)
+        for term in action_terms
+        if str(term).strip()
+    )
+    return has_action and (has_request or starts_with_action or has_completion), has_request, has_completion
+
+
+def stable_action_key(title: str, due_at: str | None) -> str:
+    return f"{event_key_slug(title, 96)}:{event_key_slug(due_at or '', 32)}".strip(":") or "action"
+
+
+def multi_message_action_items(message_id: str, context: list[dict], learning: dict | None = None) -> list[ActionItem]:
+    learned_action_terms = [str(term) for term in (learning or {}).get("action", {}).keys()]
+    action_terms = list(dict.fromkeys([
+        term for term in [*ACTION_ITEM_TERMS, *learned_action_terms]
+        if not learning_term_is_excluded(learning, "action", term)
+    ]))
+    ordered = sorted((item for item in context if item.get("id")), key=lambda item: item_time(item) or datetime.min.replace(tzinfo=timezone.utc))
+    current = next((item for item in ordered if str(item.get("id")) == str(message_id)), None)
+    if not current:
+        return []
+    current_refs = {str(current.get("id") or ""), str(current.get("waMessageId") or "")}
+    if current.get("groupId") and current.get("waMessageId"):
+        current_refs.add(f"{current['groupId']}:{current['waMessageId']}")
+    candidates = [
+        item for item in ordered
+        if str(item.get("id")) == str(message_id) or reply_target(item) in current_refs
+    ]
+    result: list[ActionItem] = []
+    for item in candidates:
+        text = " ".join(str(item.get("text") or "").split()).strip()
+        candidate, has_request, has_completion = action_item_candidate(text, action_terms, learning)
+        if not candidate:
+            continue
+        due_at = action_due_at(text, action_terms)
+        source_ids = [str(item["id"])]
+        parent = reply_target(item)
+        parent_item = next((other for other in ordered if str(other.get("id")) == parent or str(other.get("waMessageId")) == parent), None)
+        if parent_item:
+            source_ids.insert(0, str(parent_item["id"]))
+        confidence = 0.58 + (0.14 if has_request else 0) + (0.10 if due_at else 0) + (0.08 if has_completion else 0)
+        result.append(ActionItem(
+            actionKey=stable_action_key(text, due_at),
+            title=text[:180],
+            dueAt=due_at,
+            status="done" if has_completion else "open",
+            confidence=round(min(0.94, confidence), 4),
+            sourceMessageIds=list(dict.fromkeys(source_ids)),
+        ))
+    merged: dict[str, ActionItem] = {}
+    for item in result:
+        key = item.actionKey or stable_action_key(item.title, item.dueAt)
+        if key not in merged:
+            merged[key] = item
+        else:
+            merged[key].sourceMessageIds = list(dict.fromkeys(merged[key].sourceMessageIds + item.sourceMessageIds))
+            merged[key].confidence = max(merged[key].confidence, item.confidence)
+            if item.status == "done":
+                merged[key].status = "done"
+    return list(merged.values())
+
+
 def relevance_level_for_score(score: float) -> Literal["high", "medium", "low"]:
     if score >= 0.75:
         return "high"
@@ -1010,15 +1250,18 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
     # lower relevance without making Pydantic reject the whole backfill.
     score = max(0.0, min(0.98, raw_score))
     events = multi_message_events(message_id, context, learning)
+    action_items = multi_message_action_items(message_id, context, learning)
     if events:
         score = max(score, 0.78)
+    elif action_items:
+        score = max(score, 0.62)
     media_signal = any(
         str(item.get("id")) == message_id and item.get("kind") in {"image", "video", "audio", "document", "location"}
         for item in context
     )
     if media_signal and normalized:
         score = max(score, 0.38)
-    relevant = score >= 0.45 or bool(events) or (media_signal and bool(normalized))
+    relevant = score >= 0.45 or bool(events) or bool(action_items) or (media_signal and bool(normalized))
     facts = [Fact(text=normalized, confidence=0.64)] if normalized else []
     entities = []
     for match in re.finditer(r"\b[A-ZÄÖÜ][\wÄÖÜäöüß-]{2,}\b", normalized):
@@ -1046,6 +1289,8 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
     provenance = [Provenance(field="summary", sourceMessageIds=[message_id], confidence=0.64)]
     if events:
         provenance.append(Provenance(field="events", sourceMessageIds=list(dict.fromkeys(source for event in events for source in event.sourceMessageIds)), confidence=max(event.confidence for event in events)))
+    if action_items:
+        provenance.append(Provenance(field="actionItems", sourceMessageIds=list(dict.fromkeys(source for item in action_items for source in item.sourceMessageIds)), confidence=max(item.confidence for item in action_items)))
     if place:
         provenance.append(Provenance(field="places", sourceMessageIds=[message_id], confidence=place["confidence"]))
     return Analysis(
@@ -1057,6 +1302,7 @@ def heuristic_analysis(message_id: str, text: str, context: list[dict], language
         facts=facts,
         entities=entities[:10],
         events=events,
+        actionItems=action_items,
         places=[place] if place else [],
         knowledge=knowledge_items_for_message(message_id, normalized, context, entities, [place] if place else [], language, learning),
         provenance=provenance,
@@ -1157,6 +1403,40 @@ def learning_terms_for(learning: dict | None, category: str, fallback: tuple[str
     else:
         terms = []
     return terms or list(fallback)
+
+
+def learning_exclusion_entries(learning: dict | None) -> list[dict]:
+    values = (learning or {}).get("excluded", [])
+    return [value for value in values if isinstance(value, dict)]
+
+
+def learning_topic_matches(stored_topic: str | None, topic_key: str | None) -> bool:
+    stored = str(stored_topic or "").strip()
+    requested = str(topic_key or "").strip()
+    if stored == requested:
+        return True
+    return stored.removesuffix(":detail") == requested.removesuffix(":detail")
+
+
+def learning_term_is_excluded(learning: dict | None, category: str, term: str, topic_key: str | None = None) -> bool:
+    normalized = str(term or "").strip().casefold()
+    if not normalized:
+        return False
+    return any(
+        str(entry.get("category") or "").strip() == category
+        and learning_topic_matches(entry.get("topicKey"), topic_key)
+        and str(entry.get("term") or "").strip().casefold() == normalized
+        for entry in learning_exclusion_entries(learning)
+    )
+
+
+def learning_text_has_excluded(learning: dict | None, category: str, text: str, topic_key: str | None = None) -> bool:
+    return any(
+        str(entry.get("category") or "").strip() == category
+        and learning_topic_matches(entry.get("topicKey"), topic_key)
+        and has_term(text, str(entry.get("term") or "").strip())
+        for entry in learning_exclusion_entries(learning)
+    )
 
 
 def learning_weight(learning: dict | None, category: str, text: str, fallback: tuple[str, ...] = ()) -> float:
@@ -1488,15 +1768,44 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
     ]
 
 
-async def verify_knowledge_items(reviewer: HermesReviewer, text: str, language: str, items: list[KnowledgeItem], allowed_topic_keys: list[str] | None = None) -> list[KnowledgeItem]:
-    if not reviewer.enabled:
+async def verify_knowledge_items(
+    reviewer: HermesReviewer | None,
+    text: str,
+    language: str,
+    items: list[KnowledgeItem],
+    learning: dict | None = None,
+    allowed_topic_keys: list[str] | None = None,
+    trigger: str = "live",
+) -> list[KnowledgeItem]:
+    if not reviewer or not reviewer.enabled:
         return items
-    verified: list[KnowledgeItem] = []
+    locally_accepted: list[KnowledgeItem] = []
+    candidates: list[KnowledgeItem] = []
     for item in items:
-        if not HERMES_REVIEW_ALL and item.confidence >= 0.9:
-            verified.append(item)
+        if learning_text_has_excluded(
+            learning,
+            "keyword",
+            f"{item.topicKey or ''} {item.content}",
+            item.topicKey,
+        ):
+            # Preserve deterministic local analysis, but never submit a
+            # manually removed term to the external reviewer.
+            locally_accepted.append(item)
             continue
-        decision = await reviewer.review(item, text, language, allowed_topic_keys)
+        if not HERMES_REVIEW_ALL and item.confidence >= 0.9:
+            locally_accepted.append(item)
+            continue
+        candidates.append(item)
+
+    if locally_accepted:
+        await reviewer.record_usage(trigger, "knowledge", "local-gate", candidate_count=len(locally_accepted))
+    if not candidates:
+        return locally_accepted
+
+    decisions = await reviewer.review_knowledge_batch(candidates, text, language, allowed_topic_keys, trigger)
+    verified: list[KnowledgeItem] = [*locally_accepted]
+    for item in candidates:
+        decision = decisions.get(item.itemKey) if decisions is not None else None
         # A network or provider failure must not stop ingestion. Only a valid
         # explicit rejection removes a deterministic candidate.
         if decision is None:
@@ -1647,7 +1956,16 @@ async def remove_rejected_knowledge(db, group_id: str | None, rejected_keys: set
 class AIAdapter:
     """Local adapter contract. External providers can implement this interface later."""
 
-    async def analyze(self, message_id: str, text: str, context: list[dict], language: str = "de", learning: dict | None = None) -> Analysis:
+    async def analyze(
+        self,
+        message_id: str,
+        text: str,
+        context: list[dict],
+        language: str = "de",
+        learning: dict | None = None,
+        allow_remote_review: bool = True,
+        trigger: str = "live",
+    ) -> Analysis:
         raise NotImplementedError
 
 
@@ -1657,7 +1975,16 @@ class HeuristicAdapter(AIAdapter):
         self.reviewer = reviewer
         self.place_resolver = PlaceResolver()
 
-    async def analyze(self, message_id: str, text: str, context: list[dict], language: str = "de", learning: dict | None = None) -> Analysis:
+    async def analyze(
+        self,
+        message_id: str,
+        text: str,
+        context: list[dict],
+        language: str = "de",
+        learning: dict | None = None,
+        allow_remote_review: bool = True,
+        trigger: str = "live",
+    ) -> Analysis:
         analysis = heuristic_analysis(message_id, text, context, language, learning)
         current = next((item for item in context if str(item.get("id")) == str(message_id)), {})
         explicit_location = location_details(current)
@@ -1667,7 +1994,15 @@ class HeuristicAdapter(AIAdapter):
             # it because a caption may contain unrelated words.
             places = analysis.places
         else:
-            places = await enrich_text_places(self.db, self.reviewer, text, language, learning, self.place_resolver)
+            places = await enrich_text_places(
+                self.db,
+                self.reviewer if allow_remote_review else None,
+                text,
+                language,
+                learning,
+                self.place_resolver,
+                trigger,
+            )
         analysis.places = places
         # Knowledge topic matching runs after place validation so an ordinary
         # sentence containing “place” cannot create a Places KB entry.
@@ -1717,6 +2052,7 @@ async def publish(js, subject: str, event_type: str, data: dict):
         ]
         compact_analysis["entities"] = analysis.get("entities", [])[:10]
         compact_analysis["events"] = analysis.get("events", [])[:10]
+        compact_analysis["actionItems"] = analysis.get("actionItems", [])[:10]
         compact_analysis["places"] = analysis.get("places", [])[:10]
         compact_analysis["knowledge"] = [
             {
@@ -2017,7 +2353,7 @@ async def configured_knowledge_topic_keys(db, language: str) -> list[str]:
 
 async def load_learning_terms(db, group_id: str | None, language: str) -> dict:
     """Load editable global defaults plus stronger group-local terms."""
-    result: dict = {"relevance": {}, "event": {}, "place": {}, "exclusion": [], "keyword": {}, "topicRoles": {}}
+    result: dict = {"relevance": {}, "event": {}, "action": {}, "place": {}, "exclusion": [], "keyword": {}, "topicRoles": {}, "excluded": []}
     try:
         rows = await db.fetch(
             """SELECT category, topic_key, term, weight
@@ -2028,6 +2364,26 @@ async def load_learning_terms(db, group_id: str | None, language: str) -> dict:
         )
     except Exception:
         return result
+    try:
+        exclusion_rows = await db.fetch(
+            """SELECT category, topic_key, term
+               FROM ai_learning_term_exclusions
+               WHERE language=$1 AND (group_id IS NULL OR group_id=$2)""",
+            language, group_id,
+        )
+        result["excluded"] = [
+            {
+                "category": str(row["category"] or ""),
+                "topicKey": str(row["topic_key"] or ""),
+                "term": str(row["term"] or "").strip().casefold(),
+            }
+            for row in exclusion_rows
+            if str(row["term"] or "").strip()
+        ]
+    except Exception:
+        # Keep rolling deployments compatible while the new migration is
+        # being applied; the active term table remains usable.
+        pass
     try:
         topic_rows = await db.fetch(
             """SELECT topic_key, signal_type FROM knowledge_topic_definitions
@@ -2056,7 +2412,7 @@ async def load_learning_terms(db, group_id: str | None, language: str) -> dict:
             result["keyword"][topic_key]["detail" if is_detail else "keywords"].append(term)
         elif category == "exclusion":
             result["exclusion"].append(term)
-        elif category in {"relevance", "event", "place"}:
+        elif category in {"relevance", "event", "action", "place"}:
             result[category][term] = result[category].get(term, 0.0) + weight
     return result
 
@@ -2102,6 +2458,13 @@ async def record_inferred_learning(db, group_id: str | None, language: str, text
         add_signal("relevance", AI_LEARNING_INFERENCE_BASE_DELTA)
     if analysis.events:
         add_signal("event", AI_LEARNING_INFERENCE_BASE_DELTA)
+    if analysis.actionItems:
+        add_signal("action", AI_LEARNING_INFERENCE_BASE_DELTA)
+        signal_terms[("action", None)] = list(dict.fromkeys(
+            token
+            for item in analysis.actionItems
+            for token in inferred_learning_tokens(item.title, stopwords)
+        ))
     place_items = [
         place for place in analysis.places
         if str(place.get("status") or "accepted") == "accepted" and place.get("learningEligible")
@@ -2125,7 +2488,10 @@ async def record_inferred_learning(db, group_id: str | None, language: str, text
         # can be inferred from it in this pass.
         known = learning_known_terms(learning, category, topic_key)
         scoped_tokens = signal_terms.get((category, topic_key), tokens)
-        candidates = [term for term in scoped_tokens if term not in known]
+        candidates = [
+            term for term in scoped_tokens
+            if term not in known and not learning_term_is_excluded(learning, category, term, topic_key)
+        ]
         for term in candidates[:AI_LEARNING_MAX_TERMS_PER_SIGNAL]:
             topic_value = topic_key or ""
             row = await db.fetchrow(
@@ -2185,7 +2551,10 @@ async def refresh_knowledge_topic_titles(db):
 
 async def prepare_knowledge_rebuild(db) -> bool:
     current_version = await db.fetchval("SELECT detail FROM connector_states WHERE connector=$1", KNOWLEDGE_STATE_CONNECTOR)
-    if current_version == KNOWLEDGE_REBUILD_VERSION:
+    # Older workers appended "-hermes" to this state. Treat that historical
+    # marker as compatible so enabling the optional verifier does not cause a
+    # second full startup rebuild.
+    if current_version in {KNOWLEDGE_REBUILD_VERSION, f"{KNOWLEDGE_REBUILD_VERSION}-hermes"}:
         return False
     # Do not delete an active KB during startup. Administrators can request a
     # generation-based rebuild from the dedicated admin page; a failed rebuild
@@ -2268,7 +2637,12 @@ async def process_analysis(db, analyzer, payload: dict, trigger: str, force: boo
     if not message_id or not await claim_ai_job(db, message_id, force=force):
         return False
     try:
-        await analyzer(payload)
+        # Keep the trigger alongside the message payload so all nested review
+        # stages can report why a Hermes decision was (or was not) requested.
+        enriched_data = dict(data)
+        enriched_data["_trigger"] = trigger
+        analyzer_payload = {**payload, "data": enriched_data} if isinstance(payload.get("data"), dict) else {"data": enriched_data}
+        await analyzer(analyzer_payload)
         await complete_ai_job(db, message_id)
         return True
     except Exception as error:
@@ -2324,7 +2698,7 @@ async def main():
     nc = await nats.connect(NATS_URL)
     js = nc.jetstream()
     encoder = EmbeddingProvider()
-    hermes_reviewer = HermesReviewer()
+    hermes_reviewer = HermesReviewer(db)
     adapter = build_adapter(db, hermes_reviewer)
     try:
         await js.stream_info("WAGI_EVENTS")
@@ -2352,6 +2726,8 @@ async def main():
         data = payload.get("data", payload)
         message_id = data.get("messageId")
         text = data.get("text") or ""
+        trigger = str(data.get("_trigger") or "live")
+        allow_remote_review = data.get("skipRemoteReview") is not True
         if not message_id:
             return
         current = await db.fetchrow(
@@ -2389,7 +2765,15 @@ async def main():
         group_language = await resolve_group_language(db, group_id, context, text)
         learning = await load_learning_terms(db, group_id, group_language)
         configured_topic_keys = await configured_knowledge_topic_keys(db, group_language)
-        analysis = await adapter.analyze(message_id, text, context, group_language, learning)
+        analysis = await adapter.analyze(
+            message_id,
+            text,
+            context,
+            group_language,
+            learning,
+            allow_remote_review=allow_remote_review,
+            trigger=trigger,
+        )
         analysis.events = deduplicate_events(analysis.events)
         analysis.conflicts = find_conflicts(context)
         if analysis.conflicts:
@@ -2399,7 +2783,24 @@ async def main():
                 confidence=min(conflict.confidence for conflict in analysis.conflicts if conflict.confidence is not None),
             ))
         analysis.knowledge = await semantic_enrich_knowledge(db, encoder, group_id, message_id, text, group_language, analysis.knowledge)
-        analysis.knowledge = await verify_knowledge_items(hermes_reviewer, text, group_language, analysis.knowledge, configured_topic_keys)
+        remote_reviewer = hermes_reviewer if allow_remote_review else None
+        analysis.knowledge = await verify_knowledge_items(
+            remote_reviewer,
+            text,
+            group_language,
+            analysis.knowledge,
+            learning=learning,
+            allowed_topic_keys=configured_topic_keys,
+            trigger=trigger,
+        )
+        if not allow_remote_review and hermes_reviewer.enabled:
+            await hermes_reviewer.record_usage(
+                trigger,
+                "analysis",
+                "skipped",
+                candidate_count=len(analysis.knowledge) + len(analysis.places),
+            )
+            log.debug("Hermes review skipped trigger=%s reason=local-only", trigger)
         feedback = await load_ai_feedback(db, group_id, message_id)
         analysis, rejected_knowledge = apply_feedback_overrides(analysis, feedback, group_language)
         if not data.get("skipLearning"):
@@ -2409,15 +2810,15 @@ async def main():
             analysis.provenance.append(Provenance(field="knowledge", sourceMessageIds=[message_id], confidence=max(item.confidence for item in analysis.knowledge)))
         serialized_analysis = analysis.model_dump(mode="json")
         await db.execute(
-            """INSERT INTO message_analyses (message_id, relevant, relevance_level, relevance_score, summary, facts, entities, events, places, model, schema_version, prompt_version, provenance, conflicts)
-               VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12,$13::jsonb,$14::jsonb)
+            """INSERT INTO message_analyses (message_id, relevant, relevance_level, relevance_score, summary, facts, entities, events, action_items, places, model, schema_version, prompt_version, provenance, conflicts)
+               VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14::jsonb,$15::jsonb)
                ON CONFLICT (message_id) DO UPDATE SET relevant=EXCLUDED.relevant, relevance_level=EXCLUDED.relevance_level, relevance_score=EXCLUDED.relevance_score,
                summary=EXCLUDED.summary, facts=EXCLUDED.facts, entities=EXCLUDED.entities, events=EXCLUDED.events,
-               places=EXCLUDED.places, model=EXCLUDED.model, schema_version=EXCLUDED.schema_version, prompt_version=EXCLUDED.prompt_version,
+               action_items=EXCLUDED.action_items, places=EXCLUDED.places, model=EXCLUDED.model, schema_version=EXCLUDED.schema_version, prompt_version=EXCLUDED.prompt_version,
                provenance=EXCLUDED.provenance, conflicts=EXCLUDED.conflicts, updated_at=NOW()""",
             message_id, analysis.relevant, analysis.relevanceLevel, analysis.relevanceScore, analysis.summary,
             json.dumps(serialized_analysis["facts"]), json.dumps(serialized_analysis["entities"]),
-            json.dumps(serialized_analysis["events"]), json.dumps(serialized_analysis["places"]), analysis.model,
+            json.dumps(serialized_analysis["events"]), json.dumps(serialized_analysis["actionItems"]), json.dumps(serialized_analysis["places"]), analysis.model,
             analysis.schemaVersion, analysis.promptVersion, json.dumps(serialized_analysis["provenance"]), json.dumps(serialized_analysis["conflicts"]),
         )
         await upsert_knowledge(db, group_id, analysis.knowledge, encoder, group_language, knowledge_generation)
@@ -2450,7 +2851,13 @@ async def main():
                 return
             message_id = data.get("messageId")
             if message_id:
-                await process_analysis(db, analyze_message, {"data": {"messageId": message_id, "force": True}}, "feedback", force=True)
+                await process_analysis(
+                    db,
+                    analyze_message,
+                    {"data": {"messageId": message_id, "force": True, "skipRemoteReview": True}},
+                    "feedback",
+                    force=True,
+                )
             await mark_processed(db, "ai.feedback", event_id)
             await message.ack()
         except Exception as error:
@@ -2554,7 +2961,13 @@ async def main():
             failed = 0
             for row in rows:
                 try:
-                    await process_analysis(db, analyze_message, {"data": {"messageId": row["messageId"], "groupId": row["groupId"], "text": row["text"], "force": True}}, "replay", force=True)
+                    await process_analysis(
+                        db,
+                        analyze_message,
+                        {"data": {"messageId": row["messageId"], "groupId": row["groupId"], "text": row["text"], "force": True, "skipRemoteReview": not bool(data.get("allowRemoteReview"))}},
+                        "replay",
+                        force=True,
+                    )
                     if data.get("includeMedia") and row["objectPath"]:
                         subject = "media.audio.requested" if row["kind"] == "audio" else "media.objects.requested"
                         event_data = {"messageId": row["messageId"], "mediaKey": row["mediaKey"], "mediaMime": row["mediaMime"], "objectPath": row["objectPath"]}
@@ -2636,7 +3049,7 @@ async def main():
                     did_process = await process_analysis(
                         db,
                         analyze_message,
-                        {"data": {"messageId": message_id, "groupId": row["groupId"], "text": reassessment_text, "force": True, "skipLearning": True}},
+                        {"data": {"messageId": message_id, "groupId": row["groupId"], "text": reassessment_text, "force": True, "skipLearning": True, "skipRemoteReview": True}},
                         "reassessment",
                         force=True,
                     )
@@ -2730,7 +3143,7 @@ async def main():
                     did_process = await process_analysis(
                         db,
                         analyze_message,
-                        {"data": {"messageId": message_id, "groupId": row["groupId"], "text": rebuild_text, "force": True, "skipLearning": True, "knowledgeGeneration": generation_id}},
+                        {"data": {"messageId": message_id, "groupId": row["groupId"], "text": rebuild_text, "force": True, "skipLearning": True, "skipRemoteReview": True, "knowledgeGeneration": generation_id}},
                         "knowledge-rebuild",
                         force=True,
                     )
@@ -2790,7 +3203,13 @@ async def main():
             return
         log.info("backfilling knowledge base for %d existing selected messages", len(rows))
         for row in rows:
-            await process_analysis(db, analyze_message, {"data": dict(row)}, "startup-backfill", force=force)
+            await process_analysis(
+                db,
+                analyze_message,
+                {"data": {**dict(row), "skipRemoteReview": True}},
+                "startup-backfill",
+                force=force,
+            )
 
     async def recover_ai_jobs():
         """Requeue stale AI work and publish queued jobs after a restart."""

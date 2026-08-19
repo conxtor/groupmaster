@@ -186,8 +186,9 @@ WA_BACKFILL_THROTTLE_MS=250
 WA_BACKFILL_GROUP_DELAY_MS=1500
 WA_HISTORY_PAGE_SIZE=50
 WA_HISTORY_REQUEST_DELAY_MS=500
-WA_SYNC_GRACE_SECONDS=20
+WA_SYNC_GRACE_SECONDS=60
 WA_WHATSMEOW_SQL_SCHEMA=wa_whatsmeow
+WA_DATABASE_SSLMODE=disable
 WA_MEDIA_DOWNLOAD_ATTEMPTS=3
 WA_MEDIA_RETRY_INTERVAL_MS=60000
 ```
@@ -197,6 +198,10 @@ Für ein echtes Konto:
 1. Den Stack mit `docker-compose --env-file .env -f infra/docker/docker-compose.yml up -d --build wa-connector wa-connector-worker` starten.
 2. Die Connector-Seite öffnen und den angezeigten QR-Code in WhatsApp unter **Verknüpfte Geräte** → **Gerät hinzufügen** scannen. QR-Payloads werden nicht in Docker-Logs ausgegeben.
 3. Gruppen im Web-UI auswählen. Nach der Auswahl werden nur diese Gruppen synchronisiert; die Auswahl kann jederzeit geändert werden.
+
+Die lokale PostgreSQL-Compose-Datenbank läuft ohne TLS; deshalb bleibt
+`WA_DATABASE_SSLMODE=disable` lokal erforderlich. Für eine PostgreSQL-Instanz
+mit aktivierter TLS-Verbindung den Wert auf `require` oder `verify-full` setzen.
 
 Bei der ersten Aktivierung und bei jedem Systemneustart werden nur Nachrichten
 innerhalb des Zeitfensters `WA_BACKFILL_DAYS` verarbeitet. Die History-Abfragen
@@ -339,7 +344,7 @@ gruppengebundener kanonischer Begriff gelernt.
 Die neue Lernschicht liegt in `ai_learning_terms` und ist nach Sprache und
 optional nach Gruppe gebunden. Globale Systembegriffe bilden die Defaults;
 Feedback aus einer Gruppe erzeugt zusätzliche positive oder negative
-Wortgewichte für Relevanz, Events und Orte. Die gruppenspezifischen Gewichte
+Wortgewichte für Relevanz, Events, Action Items und Orte. Die gruppenspezifischen Gewichte
 werden zusammen mit den globalen Werten geladen und beeinflussen dadurch nur
 die jeweilige Gruppe stärker. Administratoren verwalten diese Begriffe,
 Ausschlusswörter und Knowledge-Schlüsselwörter unter `/admin/ai-learning`.
@@ -349,18 +354,35 @@ zeigt zusätzlich Gruppenkontext, Plattform, Chat-Typ, Lernquelle, Feedbackzähl
 und Änderungsdatum.
 Die Übersichtsseite zeigt außerdem die Anzahl je Kategorie, Metriken für 24
 Stunden, 7 Tage und 1 Monat sowie eine einfache Zeitgrafik. Relevanz, Events,
-Orte, Knowledge-Schlüsselwörter und Ausschlusswörter haben jeweils eigene
+Action Items, Orte, Knowledge-Schlüsselwörter und Ausschlusswörter haben jeweils eigene
 Unterseiten mit den für die Kategorie relevanten Eingabefeldern. Dort können
 mehrere Begriffe markiert und gemeinsam aktiviert, deaktiviert oder gelöscht
-werden.
+werden. Die Gewichtsspalte kann per Klick absteigend oder aufsteigend sortiert
+werden; die Sortierung wird serverseitig vor der Paginierung angewendet. Ein
+manuelles Löschen erzeugt zusätzlich einen dauerhaften, nach Sprache,
+Kategorie, Thema und Gruppe gebundenen Ausschluss in
+`ai_learning_term_exclusions`. Dadurch wird der Begriff nicht erneut
+automatisch gelernt und nicht an Hermes zur externen Prüfung übergeben. Eine
+spätere explizite Neuanlage durch den Administrator hebt genau diesen
+Ausschluss wieder auf.
+Action Items werden als eigener Analysebereich neben Events erkannt. Sie
+enthalten Titel, optionalen Fälligkeitshinweis, Status (`open` oder `done`),
+Konfidenz und Quellnachrichten und erscheinen im Dashboard direkt unter dem
+Event-Bereich. Ihre Begriffe werden konservativ pro Gruppe und Sprache gelernt.
+`infra/migrations/027_action_items_learning.sql` ergänzt die JSONB-Persistenz,
+die sechste Lernkategorie und mehrsprachige Standardbegriffe. Manuelle
+Ausschlüsse werden auch für Action Items über `ai_learning_term_exclusions`
+berücksichtigt.
 Die Zeitgrafik ist als gestapeltes Balkendiagramm ausgeführt. Über die Auswahl
 „Letzte 24 Stunden“, „Letzte 7 Tage“ oder „Letzter Monat“ kann der Zeitraum
-gewechselt werden; die Farblegende ordnet die Segmente den fünf Kategorien zu.
+gewechselt werden; die Farblegende ordnet die Segmente den sechs Kategorien zu.
 Die Migration `infra/migrations/014_relevance_learning.sql` legt das Modell und
 die initialen, aus der bisherigen Heuristik übernommenen Begriffe an.
 `infra/migrations/015_more_exclusion_words.sql` ergänzt die globalen
 Ausschlussbegriffe um zusätzliche Füllwörter, Gesprächspartikeln und typische
 Floskeln in Deutsch, Spanisch, Katalanisch, Englisch und Französisch.
+`infra/migrations/026_ai_learning_exclusions.sql` ergänzt dauerhafte Tombstones
+für manuell entfernte Lernbegriffe.
 
 Füll- und Ausschlusswörter werden im laufenden Betrieb ausschließlich aus
 `ai_learning_terms` geladen. AI-Worker und API enthalten dafür keine statischen
@@ -483,6 +505,17 @@ einem endgültigen Ausfall pausiert der Verifier für
 keine Nachrichtenverarbeitung blockiert. Der Read-Timeout beträgt standardmäßig
 60 Sekunden; `AI_HERMES_CONNECT_TIMEOUT_MS` begrenzt den Verbindungsaufbau
 separat.
+
+Die Remote-Nutzung ist zusätzlich nach Verarbeitungspfad begrenzt: Der Worker
+sendet die unsicheren Knowledge-Kandidaten einer Nachricht gemeinsam in einem
+Batch und ebenso alle unsicheren Ortskandidaten. Startup-Backfills, KB-
+Neuaufbauten, Neubewertungen, Replays und explizite Feedback-Neuberechnungen
+laufen standardmäßig vollständig lokal und laden keine zusätzlichen Medien.
+Ein Replay kann nur durch das explizite Ereignisfeld `allowRemoteReview=true`
+Remote-Prüfungen erlauben. Jeder Remote-Batch und jeder lokale Skip wird nach
+Trigger, Prüfung, Ergebnis, Kandidatenzahl und HTTP-Versuchen in
+`ai_hermes_usage` aggregiert. Die Übersicht ist für Administratoren unter
+„Hermes-Nutzung“ sichtbar.
 
 ### Präzise Ortsauswertung
 
@@ -624,7 +657,7 @@ Bootstrap-Administrator wird beim ersten erfolgreichen API-Start angelegt.
 - `GET/POST /api/v1/connectors/accounts` für eigene persistente Connector-Konten
 - `GET /api/v1/admin/users` und `PATCH /api/v1/admin/users/{id}` für Administratoren
 - `GET/POST/PATCH/DELETE /api/v1/admin/ai-learning[...]` für die sprach- und gruppenbezogene Lernmodellverwaltung
-- `GET /api/v1/admin/ai-learning?language=de&search=...&category=...&groupId=...&page=1&pageSize=25` für Suche und Paginierung
+- `GET /api/v1/admin/ai-learning?language=de&search=...&category=...&groupId=...&page=1&pageSize=25&sort=weight&sortDirection=desc` für Suche, Gewichtssortierung und Paginierung
 - `GET /api/v1/admin/ai-learning/summary?language=de` für Kategorieanzahl und Lernmetriken
 - `POST /api/v1/admin/ai-learning/bulk` mit `{ "ids": ["..."], "action": "enable|disable|delete" }` für Mehrfachaktionen
 - `GET/POST /api/v1/admin/ai-learning/reassessment` für Status und Start der vollständigen Neubewertung

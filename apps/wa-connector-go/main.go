@@ -90,6 +90,7 @@ func (a *app) runWhatsAppCycle(parent context.Context, onboarding bool) error {
 	if err != nil {
 		return err
 	}
+	configureHistorySync(a.cfg)
 	client := whatsmeow.NewClient(device, waLog.Stdout("whatsmeow", "INFO", false))
 	client.AutoTrustIdentity = true
 	connected := make(chan struct{}, 1)
@@ -315,7 +316,6 @@ func (a *app) runOnboarding(ctx context.Context) {
 			_ = lease.updateQR(ctx, "completed", "", nil, nil)
 			_ = lease.updateOnboarding(ctx, request.ID, "completed", nil)
 			_ = lease.setStatus(ctx, "paused", nil)
-			a.setStatus(ctx, "stopped", "WhatsApp-Onboarding abgeschlossen; Slot freigegeben", nil)
 		}
 		_ = lease.release(context.Background(), "onboarding_completed")
 		a.setLease(nil)
@@ -323,6 +323,9 @@ func (a *app) runOnboarding(ctx context.Context) {
 		a.onboarding = nil
 		a.connectedAt = nil
 		a.mu.Unlock()
+		if err == nil {
+			a.setStatus(ctx, "waiting", "WhatsApp-Onboarding abgeschlossen; Slot freigegeben", nil)
+		}
 	}
 }
 

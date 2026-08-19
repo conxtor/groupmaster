@@ -208,8 +208,9 @@ MinIO-Datenträger bleibt bei Neustarts erhalten.
 | `WA_BACKFILL_THROTTLE_MS` / `WA_BACKFILL_GROUP_DELAY_MS` | 250 / 1500 | Backfill-Pausen. |
 | `WA_HISTORY_PAGE_SIZE` | 50 | Maximale Zahl von Nachrichten je History-Anfrage. |
 | `WA_HISTORY_REQUEST_DELAY_MS` | 500 | Pause zwischen angeforderten History-Seiten. |
-| `WA_SYNC_GRACE_SECONDS` | 20 | Nachlauf für History-Sync- und Live-Ereignisse nach der Verbindung. |
+| `WA_SYNC_GRACE_SECONDS` | 60 | Nachlauf für History-Sync- und Live-Ereignisse nach der Verbindung. |
 | `WA_WHATSMEOW_SQL_SCHEMA` | `wa_whatsmeow` | PostgreSQL-Schema für verschlüsselten whatsmeow-Geräte- und Signal-State. |
+| `WA_DATABASE_SSLMODE` | `disable` lokal | PostgreSQL-SSL-Modus für den whatsmeow-SQL-Store. Für TLS-gesicherte Produktionsdatenbanken z. B. `require` oder `verify-full` setzen. |
 | `WA_MEDIA_DOWNLOAD_ATTEMPTS` | 3 | Medienwiederholungen. |
 | `WA_MEDIA_RETRY_INTERVAL_MS` | 60000 | Abstand zwischen Medienwiederholungen. |
 | `GROUP_REFRESH_INTERVAL_MS` | 60000 | Gruppen-/Topic-Aktualisierung, mindestens 30 Sekunden. |
@@ -296,6 +297,13 @@ GramJS-Fallback.
 | `AI_LEARNING_MAX_DELTA` | 0.015 | Obergrenze einer automatischen Verstärkung; Benutzerfeedback bleibt deutlich stärker. |
 | `AI_LEARNING_MAX_TERMS_PER_SIGNAL` | 8 | Maximale Anzahl neuer Begriffe je Kategorie bzw. Knowledge-Thema und Nachricht. |
 
+Hermes wird pro Nachricht höchstens einmal für Knowledge-Kandidaten und
+höchstens einmal für Ortskandidaten angefragt; beide Kandidatenmengen werden
+gebündelt. Startup-Backfills, KB-Neuaufbauten, Reassessment, Replay und
+Feedback-Neuberechnungen sind standardmäßig `local-only`. Für Replay muss ein
+Ereignis ausdrücklich `allowRemoteReview=true` setzen. Die aggregierte Nutzung
+steht in `ai_hermes_usage` und in der Admin-Observability zur Verfügung.
+
 Die automatische Lernschleife läuft für neue Nachrichten weiter. Sie arbeitet
 gruppen- und sprachgebunden: Bereits vorhandene aktive Begriffe in derselben
 Gruppe liefern einen konservativ gedeckelten Kontextbonus. Relevanzgewichte
@@ -305,8 +313,8 @@ Ort- oder Knowledge-Signale angelegt. Ausschlusswörter werden nicht automatisch
 erzeugt. Explizites Nutzerfeedback bleibt stärker als diese automatische
 Inferenz.
 
-Die Seite `/admin/ai-learning` zeigt die Kategorien Relevanz, Events, Orte,
-Knowledge-Schlüsselwort und Ausschlusswort mit ihren aktuellen und zeitlichen
+Die Seite `/admin/ai-learning` zeigt die Kategorien Relevanz, Events, Action Items,
+Orte, Knowledge-Schlüsselwort und Ausschlusswort mit ihren aktuellen und zeitlichen
 Lernmetriken. Jede Kategorie besitzt eine eigene Unterseite für Suche,
 Paginierung, Bearbeitung und Mehrfachaktionen. Die Zeitmetriken werden aus der
 Tabelle `ai_learning_term_history` berechnet und benötigen keine zusätzliche
@@ -326,7 +334,15 @@ verwendeten globalen Sprachbegriffe sowie gruppenspezifischen Lerngewichte
 werden nicht über Umgebungsvariablen, sondern in der Tabelle
 `ai_learning_terms` gepflegt. Administratoren können sie unter
 `/admin/ai-learning` nach Sprache und Kategorie verwalten. Die Kategorien sind
-Relevanz, Event, Ort, Knowledge-Schlüsselwort und Ausschlusswort.
+Relevanz, Event, Action Items, Ort, Knowledge-Schlüsselwort und Ausschlusswort.
+
+Die Listen können über die Gewichtsspalte auf jeder Kategorie-Unterseite
+aufsteigend oder absteigend sortiert werden. Beim manuellen Löschen wird der
+Begriff in `ai_learning_term_exclusions` als dauerhafter Ausschluss für seine
+Sprache, Kategorie, sein Thema und seine Gruppe gespeichert. Automatisches
+Lernen und Hermes-Prüfungen berücksichtigen diese Ausschlüsse. Eine bewusst
+neu angelegte oder bearbeitete Entsprechung durch den Administrator hebt den
+passenden Ausschluss wieder auf.
 
 Die Migration `014_relevance_learning.sql` legt die Lernstruktur und die
 initialen Heuristikbegriffe an. Die Folge-Migration
@@ -336,6 +352,10 @@ und Füllwortlisten werden zur Laufzeit ausschließlich aus der Datenbank gelade
 im AI-Worker und in der API gibt es dafür keine parallelen statischen Listen.
 Die bestehende Migration 014 wird nicht nachträglich geändert, damit ihre
 Prüfsumme bei bereits installierten Systemen stabil bleibt.
+`026_ai_learning_exclusions.sql` ergänzt die dauerhaften Tombstones für
+manuell entfernte Lernbegriffe.
+`027_action_items_learning.sql` ergänzt die JSONB-Persistenz für Action Items,
+die Kategorie-Constraints und mehrsprachige Standardbegriffe für Aufgaben.
 
 Die Standard-KB-Themen werden durch `019_knowledge_topics.sql` in
 `knowledge_topic_definitions` angelegt; `022_knowledge_topic_roles.sql`

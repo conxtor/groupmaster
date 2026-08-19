@@ -13,14 +13,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 type whatsappGroup struct {
@@ -44,6 +47,19 @@ func whatsmeowDatabaseURL(base, schema string) string {
 
 func (a *app) newWhatsmeowStore(ctx context.Context) (*sqlstore.Container, error) {
 	return sqlstore.New(ctx, "postgres", whatsmeowDatabaseURL(a.cfg.DatabaseURL, a.cfg.SQLSchema), waLog.Noop)
+}
+
+func configureHistorySync(cfg config) {
+	if store.DeviceProps == nil || store.DeviceProps.HistorySyncConfig == nil {
+		return
+	}
+	days := uint32(maxInt(1, cfg.BackfillDays))
+	pageSize := uint32(maxInt(10, cfg.HistoryPageSize))
+	store.DeviceProps.HistorySyncConfig.FullSyncDaysLimit = proto.Uint32(days)
+	store.DeviceProps.HistorySyncConfig.RecentSyncDaysLimit = proto.Uint32(days)
+	store.DeviceProps.HistorySyncConfig.InitialSyncMaxMessagesPerChat = proto.Uint32(pageSize)
+	store.DeviceProps.HistorySyncConfig.OnDemandReady = proto.Bool(true)
+	store.DeviceProps.HistorySyncConfig.CompleteOnDemandReady = proto.Bool(true)
 }
 
 func (a *app) discoverGroups(ctx context.Context, client *whatsmeow.Client) (map[string]bool, error) {
@@ -232,10 +248,13 @@ func (a *app) handleHistorySync(ctx context.Context, client *whatsmeow.Client, s
 	if history == nil {
 		return
 	}
+	matchedConversations := 0
+	persistedMessages := 0
 	for _, conversation := range history.GetConversations() {
 		if conversation == nil || !selected[conversation.GetID()] {
 			continue
 		}
+		matchedConversations++
 		chat, err := types.ParseJID(conversation.GetID())
 		if err != nil {
 			continue
@@ -254,6 +273,8 @@ func (a *app) handleHistorySync(ctx context.Context, client *whatsmeow.Client, s
 			}
 			if err := a.persistMessage(ctx, client, event); err != nil {
 				log.Printf("whatsapp history persistence failed chat=%s id=%s error=%v", chat, event.Info.ID, err)
+			} else {
+				persistedMessages++
 			}
 			if a.cfg.BackfillThrottle > 0 {
 				time.Sleep(a.cfg.BackfillThrottle)
@@ -263,6 +284,7 @@ func (a *app) handleHistorySync(ctx context.Context, client *whatsmeow.Client, s
 			time.Sleep(a.cfg.BackfillGroupDelay)
 		}
 	}
+	log.Printf("whatsapp history sync received type=%s conversations=%d selected=%d persisted=%d", history.GetSyncType().String(), len(history.GetConversations()), matchedConversations, persistedMessages)
 }
 
 func extractWhatsAppMessage(message *waE2E.Message) (kind, text, mime, fileName string, media whatsmeow.DownloadableMessage, hasMedia bool, replyID string) {
@@ -335,11 +357,15 @@ func (a *app) persistMessage(ctx context.Context, client *whatsmeow.Client, even
 	if !receivedAt.IsZero() {
 		sequence = receivedAt.UnixMilli()
 	}
+	var editedAt *time.Time
+	if event.IsEdit {
+		editedAt = &receivedAt
+	}
 	var messageID string
 	err = a.db.QueryRow(ctx, `INSERT INTO messages (group_id,wa_message_id,platform,external_chat_id,sender_jid,sender_name,kind,text,received_at,has_media,media_key,media_mime,raw,content_hash,sequence_no,media_status,edited_at)
-VALUES ($1,$2,'whatsapp',$1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $8 THEN 'processing' ELSE 'none' END,CASE WHEN $14 THEN $7 ELSE NULL END)
-ON CONFLICT (group_id,wa_message_id) DO UPDATE SET text=EXCLUDED.text,sender_name=EXCLUDED.sender_name,kind=EXCLUDED.kind,has_media=EXCLUDED.has_media,media_mime=EXCLUDED.media_mime,raw=EXCLUDED.raw,content_hash=EXCLUDED.content_hash,sequence_no=GREATEST(COALESCE(messages.sequence_no,0),COALESCE(EXCLUDED.sequence_no,0)),edited_at=EXCLUDED.edited_at
-RETURNING id::text`, groupID, string(event.Info.ID), event.Info.Sender.String(), nullIfEmpty(event.Info.PushName), kind, text, receivedAt, hasMedia, nullIfEmpty(string(event.Info.ID)), nullIfEmpty(mime), raw, contentHash, sequence, event.IsEdit).Scan(&messageID)
+VALUES ($1,$2,'whatsapp',$1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $8::boolean THEN 'processing' ELSE 'none' END,$14)
+ON CONFLICT (group_id,wa_message_id) DO UPDATE SET text=EXCLUDED.text,sender_name=EXCLUDED.sender_name,kind=EXCLUDED.kind,has_media=EXCLUDED.has_media,media_mime=EXCLUDED.media_mime,raw=EXCLUDED.raw,content_hash=EXCLUDED.content_hash,sequence_no=GREATEST(COALESCE(messages.sequence_no,0),COALESCE(EXCLUDED.sequence_no,0)),edited_at=COALESCE(EXCLUDED.edited_at,messages.edited_at)
+RETURNING id::text`, groupID, string(event.Info.ID), event.Info.Sender.String(), nullIfEmpty(event.Info.PushName), kind, text, receivedAt, hasMedia, nullIfEmpty(string(event.Info.ID)), nullIfEmpty(mime), raw, contentHash, sequence, editedAt).Scan(&messageID)
 	if err != nil {
 		return err
 	}
@@ -445,21 +471,46 @@ func (a *app) requestHistory(ctx context.Context, client *whatsmeow.Client, grou
 	if lease == nil {
 		return
 	}
+	cutoff := time.Now().Add(-time.Duration(a.cfg.BackfillDays) * 24 * time.Hour)
 	for _, groupID := range groupIDs {
-		externalID, receivedAt, err := lease.loadCursor(ctx, groupID)
-		if err != nil || externalID == "" || receivedAt.IsZero() {
+		var externalID, sender string
+		var receivedAt time.Time
+		err := a.db.QueryRow(ctx, `SELECT wa_message_id,received_at,COALESCE(sender_jid,'')
+			FROM messages WHERE group_id=$1 ORDER BY received_at ASC LIMIT 1`, groupID).Scan(&externalID, &receivedAt, &sender)
+		if errors.Is(err, pgx.ErrNoRows) {
+			chat, parseErr := types.ParseJID(groupID)
+			if parseErr != nil {
+				log.Printf("whatsapp initial history request skipped group=%s error=%v", groupID, parseErr)
+				continue
+			}
+			info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, IsGroup: true}, ID: types.MessageID(""), Timestamp: time.Now()}
+			if _, requestErr := client.SendPeerMessage(ctx, client.BuildHistorySyncRequest(info, a.cfg.HistoryPageSize)); requestErr != nil {
+				log.Printf("whatsapp initial history request failed group=%s days=%d error=%v", groupID, a.cfg.BackfillDays, requestErr)
+			} else {
+				log.Printf("whatsapp initial history request sent group=%s days=%d page_size=%d", groupID, a.cfg.BackfillDays, a.cfg.HistoryPageSize)
+			}
+			if a.cfg.HistoryRequestDelay > 0 {
+				time.Sleep(a.cfg.HistoryRequestDelay)
+			}
+			continue
+		}
+		if err != nil {
+			continue
+		}
+		if !receivedAt.After(cutoff) {
+			log.Printf("whatsapp history backfill complete group=%s oldest=%s cutoff=%s", groupID, receivedAt.UTC().Format(time.RFC3339), cutoff.UTC().Format(time.RFC3339))
 			continue
 		}
 		chat, err := types.ParseJID(groupID)
 		if err != nil {
 			continue
 		}
-		var sender string
-		_ = a.db.QueryRow(ctx, `SELECT sender_jid FROM messages WHERE group_id=$1 AND wa_message_id=$2 LIMIT 1`, groupID, externalID).Scan(&sender)
 		senderJID, _ := types.ParseJID(sender)
 		info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: senderJID, IsGroup: true}, ID: types.MessageID(externalID), Timestamp: receivedAt}
 		if _, err := client.SendPeerMessage(ctx, client.BuildHistorySyncRequest(info, a.cfg.HistoryPageSize)); err != nil {
-			log.Printf("whatsapp history request failed group=%s error=%v", groupID, err)
+			log.Printf("whatsapp history request failed group=%s oldest=%s error=%v", groupID, externalID, err)
+		} else {
+			log.Printf("whatsapp history request sent group=%s before=%s page_size=%d", groupID, externalID, a.cfg.HistoryPageSize)
 		}
 		if a.cfg.HistoryRequestDelay > 0 {
 			time.Sleep(a.cfg.HistoryRequestDelay)

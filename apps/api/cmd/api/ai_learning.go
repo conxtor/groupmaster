@@ -105,7 +105,7 @@ func normalizeLearningLanguage(value string) string {
 
 func normalizeLearningCategory(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
-	for _, supported := range []string{"relevance", "event", "place", "keyword", "exclusion"} {
+	for _, supported := range []string{"relevance", "event", "action", "place", "keyword", "exclusion"} {
 		if value == supported {
 			return value
 		}
@@ -157,6 +157,14 @@ func (a *app) adminAILearning(w http.ResponseWriter, r *http.Request) {
 				INSERT INTO ai_learning_term_history (term_id, group_id, language, category, term, event_type, source)
 				SELECT id, group_id, language, category, term, 'deleted', source FROM ai_learning_terms WHERE id=$1`, id); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "learning history could not be stored"})
+				return
+			}
+			if _, err = tx.Exec(r.Context(), `
+				INSERT INTO ai_learning_term_exclusions (group_id, language, category, topic_key, term, source)
+				SELECT group_id, language, category, topic_key, term, 'admin'
+				FROM ai_learning_terms WHERE id=$1
+				ON CONFLICT DO NOTHING`, id); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "learning exclusion could not be stored"})
 				return
 			}
 			result, err := tx.Exec(r.Context(), "DELETE FROM ai_learning_terms WHERE id=$1", id)
@@ -215,6 +223,15 @@ func (a *app) listAILearning(w http.ResponseWriter, r *http.Request) {
 		conditions = append(conditions, "(t.term ILIKE "+add(pattern)+" OR COALESCE(t.topic_key,'') ILIKE "+add(pattern)+" OR COALESCE(t.source,'') ILIKE "+add(pattern)+" OR COALESCE(g.subject,'') ILIKE "+add(pattern)+" OR COALESCE(g.platform,'') ILIKE "+add(pattern)+")")
 	}
 	where := strings.Join(conditions, " AND ")
+	sortBy := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort")))
+	sortDirection := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sortDirection")))
+	if sortDirection != "asc" {
+		sortDirection = "desc"
+	}
+	orderBy := "t.language, t.category, COALESCE(g.subject, ''), t.topic_key NULLS FIRST, t.term"
+	if sortBy == "weight" {
+		orderBy = "t.weight " + strings.ToUpper(sortDirection) + " NULLS LAST, t.term"
+	}
 	countArgs := append([]any(nil), args...)
 	var total int
 	if err := a.db.QueryRow(r.Context(), fmt.Sprintf("SELECT COUNT(*) FROM ai_learning_terms t LEFT JOIN wa_groups g ON g.id=t.group_id WHERE %s", where), countArgs...).Scan(&total); err != nil {
@@ -241,8 +258,8 @@ func (a *app) listAILearning(w http.ResponseWriter, r *http.Request) {
 		       t.language, t.category, t.topic_key, t.term, t.weight, t.relevance_level,
 		       t.enabled, t.source, t.positive_count, t.negative_count, t.created_at, t.updated_at
 		FROM ai_learning_terms t LEFT JOIN wa_groups g ON g.id=t.group_id
-		WHERE %s ORDER BY t.language, t.category, COALESCE(g.subject, ''), t.topic_key NULLS FIRST, t.term
-		LIMIT %s OFFSET %s`, where, limitPlaceholder, offsetPlaceholder), queryArgs...)
+		WHERE %s ORDER BY %s
+		LIMIT %s OFFSET %s`, where, orderBy, limitPlaceholder, offsetPlaceholder), queryArgs...)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "learning terms unavailable"})
 		return
@@ -265,7 +282,7 @@ func (a *app) listAILearning(w http.ResponseWriter, r *http.Request) {
 }
 
 func learningCategoryNames() []string {
-	return []string{"relevance", "event", "place", "keyword", "exclusion"}
+	return []string{"relevance", "event", "action", "place", "keyword", "exclusion"}
 }
 
 func emptyLearningCounts() map[string]int {
@@ -438,6 +455,14 @@ func (a *app) adminAILearningBulk(w http.ResponseWriter, r *http.Request) {
 			SELECT id, group_id, language, category, term, 'deleted', source
 			FROM ai_learning_terms WHERE id = ANY($1::uuid[])`, ids); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "bulk history could not be stored"})
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `
+			INSERT INTO ai_learning_term_exclusions (group_id, language, category, topic_key, term, source)
+			SELECT group_id, language, category, topic_key, term, 'admin'
+			FROM ai_learning_terms WHERE id = ANY($1::uuid[])
+			ON CONFLICT DO NOTHING`, ids); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "bulk exclusions could not be stored"})
 			return
 		}
 	}
@@ -624,6 +649,13 @@ func (a *app) createAILearning(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "learning term could not be created"})
 		return
 	}
+	// Creating a term explicitly is an intentional restore, so remove a
+	// matching automatic-learning tombstone if one exists.
+	_, _ = a.db.Exec(r.Context(), `
+		DELETE FROM ai_learning_term_exclusions
+		WHERE group_id IS NOT DISTINCT FROM NULLIF($1,'') AND language=$2 AND category=$3
+		  AND topic_key IS NOT DISTINCT FROM NULLIF($4,'') AND lower(term)=lower($5)`,
+		request.GroupID, request.Language, request.Category, request.TopicKey, request.Term)
 	if _, err := a.db.Exec(r.Context(), `
 		INSERT INTO ai_learning_term_history (term_id, group_id, language, category, term, event_type, weight_delta, source)
 		SELECT id, group_id, language, category, term, 'created', weight, source
@@ -661,6 +693,13 @@ func (a *app) updateAILearning(w http.ResponseWriter, r *http.Request, id uuid.U
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "learning term not found"})
 		return
 	}
+	// Editing a term is also explicit admin intent and may restore a term that
+	// had previously been removed from this exact scope.
+	_, _ = a.db.Exec(r.Context(), `
+		DELETE FROM ai_learning_term_exclusions
+		WHERE group_id IS NOT DISTINCT FROM NULLIF($1,'') AND language=$2 AND category=$3
+		  AND topic_key IS NOT DISTINCT FROM NULLIF($4,'') AND lower(term)=lower($5)`,
+		request.GroupID, request.Language, request.Category, request.TopicKey, request.Term)
 	if _, err := a.db.Exec(r.Context(), `
 		INSERT INTO ai_learning_term_history (term_id, group_id, language, category, term, event_type, source)
 		SELECT id, group_id, language, category, term, 'admin_update', source
