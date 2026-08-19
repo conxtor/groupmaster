@@ -302,11 +302,22 @@ ON CONFLICT (connector) DO UPDATE SET status=EXCLUDED.status,detail=EXCLUDED.det
 }
 
 func (a *app) publish(subject, eventType string, data any) error {
+	return a.publishWithID(subject, eventType, "", data)
+}
+
+// publishWithID keeps ordinary operational events unique per occurrence while
+// allowing message revisions to use a stable logical event id. The NATS
+// message-id header is intentionally not used; deduplication is handled by
+// the database-backed event inbox consumers.
+func (a *app) publishWithID(subject, eventType, eventID string, data any) error {
 	if a.js == nil {
 		return nil
 	}
+	if eventID == "" {
+		eventID = randomID()
+	}
 	payload, err := json.Marshal(map[string]any{
-		"id": randomID(), "type": eventType, "occurredAt": time.Now().UTC().Format(time.RFC3339Nano), "source": "tg-connector", "data": data,
+		"id": eventID, "type": eventType, "occurredAt": time.Now().UTC().Format(time.RFC3339Nano), "source": "tg-connector", "data": data,
 	})
 	if err != nil {
 		return err

@@ -336,9 +336,20 @@ async def on_media(db, js, message):
             elif message_kind == "document":
                 await publish(js, {"_subject": "media.document.analyzed", "_type": "media.document.analyzed", "messageId": message_id, "text": bounded_analysis_text(ocr_text), "mime": data.get("mediaMime"), "provider": "local-document-extractor"})
         if str(data.get("mediaMime", "")).startswith("audio/"):
-            await db.execute("UPDATE audio_jobs SET object_path=$1 WHERE message_id=$2 AND media_key=$3", data.get("objectPath"), message_id, media_key)
-            job_id = await db.fetchval("SELECT id FROM audio_jobs WHERE message_id=$1 AND media_key=$2 ORDER BY created_at DESC LIMIT 1", message_id, media_key)
-            await publish(js, {"_subject": "media.audio.requested", "_type": "media.audio.requested", "jobId": str(job_id) if job_id else None, "messageId": message_id, "mediaKey": media_key, "mediaMime": data.get("mediaMime"), "objectPath": data.get("objectPath")})
+            job = await db.fetchrow(
+                """UPDATE audio_jobs
+                   SET object_path=COALESCE(NULLIF($1, ''), object_path),
+                       media_mime=COALESCE(media_mime, $4),
+                       updated_at=NOW()
+                   WHERE message_id=$2 AND media_key=$3
+                   RETURNING id::text, status, media_mime, object_path""",
+                data.get("objectPath"), message_id, media_key, data.get("mediaMime"),
+            )
+            # The connector may publish an audio event before or alongside the
+            # media event. Only a queued canonical job needs another trigger;
+            # completed, processing and failed jobs must not be started again.
+            if job and job["status"] == "queued":
+                await publish(js, {"_subject": "media.audio.requested", "_type": "media.audio.requested", "jobId": str(job["id"]), "messageId": message_id, "mediaKey": media_key, "mediaMime": job["media_mime"] or data.get("mediaMime"), "objectPath": job["object_path"] or data.get("objectPath")})
         await mark_processed(db, "media.objects", event_id)
         await message.ack()
     except Exception as error:
@@ -460,23 +471,31 @@ async def main():
         try:
             payload = json.loads(message.data)
             data = payload.get("data", payload)
-            job_id = data["jobId"]
             event_id = payload_id(payload, message.data)
             if not await claim_event(db, "media.audio", event_id, message.subject, payload):
                 await message.ack()
                 return
-            current = await db.fetchrow("SELECT status FROM audio_jobs WHERE id=$1", job_id)
-            if not current or current["status"] in {"completed", "failed"}:
+            job_id = str(data.get("jobId") or "").strip()
+            if not job_id:
                 await mark_processed(db, "media.audio", event_id)
                 await message.ack()
                 return
-            if current["status"] == "processing":
-                # A duplicate JetStream delivery must not run whisper.cpp twice.
+            # Claim the durable job atomically. This closes the race between
+            # duplicate connector events and duplicate JetStream deliveries:
+            # exactly one worker can transition queued -> processing.
+            claimed = await db.fetchrow(
+                """UPDATE audio_jobs
+                   SET status='processing', attempts=attempts+1,
+                       next_attempt_at=NULL, updated_at=NOW()
+                   WHERE id=$1 AND status='queued'
+                   RETURNING id::text, message_id::text, media_mime, object_path""",
+                job_id,
+            )
+            if not claimed:
                 await mark_processed(db, "media.audio", event_id)
                 await message.ack()
                 return
-            await db.execute("UPDATE audio_jobs SET status='processing', attempts=attempts+1, next_attempt_at=NULL, updated_at=NOW() WHERE id=$1", job_id)
-            source = data.get("objectPath") or (await db.fetchval("SELECT object_path FROM audio_jobs WHERE id=$1", job_id))
+            source = data.get("objectPath") or claimed["object_path"]
             if WHISPER_ENABLED:
                 if not source or not os.path.isfile(source):
                     raise FileNotFoundError(f"Audioquelle nicht verfügbar: {source or data.get('mediaKey', 'unbekannt')}")

@@ -1026,7 +1026,12 @@ func (a *app) createAudioJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := uuid.New()
-	_, err := a.db.Exec(r.Context(), `INSERT INTO audio_jobs (id, message_id, media_key, media_mime) VALUES ($1,$2,$3,$4)`, jobID, request.MessageID, request.MediaKey, request.MediaMime)
+	err := a.db.QueryRow(r.Context(), `INSERT INTO audio_jobs (id, message_id, media_key, media_mime)
+VALUES ($1,$2,$3,$4)
+ON CONFLICT (message_id,media_key) DO UPDATE SET
+  media_mime=COALESCE(audio_jobs.media_mime,EXCLUDED.media_mime),
+  updated_at=NOW()
+RETURNING id`, jobID, request.MessageID, request.MediaKey, request.MediaMime).Scan(&jobID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -1073,7 +1078,7 @@ func (a *app) retryAudioJob(w http.ResponseWriter, r *http.Request, jobID string
 		UPDATE audio_jobs aj
 		SET status='queued', attempts=0, error=NULL, next_attempt_at=NOW(), updated_at=NOW()
 		FROM messages m JOIN wa_groups g ON g.id=m.group_id
-		WHERE aj.id=$1::uuid AND aj.message_id=m.id AND %s AND %s
+		WHERE aj.id=$1::uuid AND aj.message_id=m.id AND aj.status <> 'processing' AND %s AND %s
 		RETURNING aj.id::text, aj.message_id::text, m.group_id, g.subject, aj.media_key, aj.media_mime,
 		          aj.status, aj.transcript, aj.language, aj.confidence, aj.attempts, aj.error,
 		          aj.next_attempt_at, aj.updated_at, aj.object_path`, selection, visibility), args...).

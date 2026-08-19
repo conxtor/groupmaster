@@ -26,8 +26,8 @@ type telegramEntity struct {
 	ChatType          string
 	ExternalID        string
 	ParticipantCount  int
-	Input              tg.InputPeerClass
-	Channel            *tg.Channel
+	Input             tg.InputPeerClass
+	Channel           *tg.Channel
 	TopicID           int
 	TopicTopMessageID int
 }
@@ -564,6 +564,29 @@ func (a *app) persistMessage(ctx context.Context, entity *telegramEntity, messag
 	}
 	kind, media := messageKindAndMedia(message)
 	text := messageText(message)
+	raw, _ := json.Marshal(message)
+	waMessageID := entity.GroupID + ":" + strconv.Itoa(message.ID)
+	senderID, senderName := messageSender(message, users, entity)
+	replyID := ""
+	if reply, ok := message.GetReplyTo(); ok {
+		if header, ok := reply.(*tg.MessageReplyHeader); ok && header.ReplyToMsgID != 0 {
+			replyID = entity.GroupID + ":" + strconv.Itoa(header.ReplyToMsgID)
+		}
+	}
+	contentHash := telegramMessageContentHash(
+		entity.GroupID,
+		waMessageID,
+		kind,
+		text,
+		senderID,
+		mediaMime(media),
+		replyID,
+	)
+	var existingID, existingHash, existingMediaStatus *string
+	_ = a.db.QueryRow(ctx, "SELECT id::text,content_hash,media_status FROM messages WHERE group_id=$1 AND wa_message_id=$2", entity.GroupID, waMessageID).Scan(&existingID, &existingHash, &existingMediaStatus)
+	if existingHash != nil && *existingHash == contentHash && (media == nil || existingMediaStatus != nil && *existingMediaStatus == "completed") {
+		return nil
+	}
 	objectPath := ""
 	if media != nil {
 		if downloaded, downloadErr := a.downloadMedia(ctx, media, kind); downloadErr == nil {
@@ -572,16 +595,6 @@ func (a *app) persistMessage(ctx context.Context, entity *telegramEntity, messag
 			fmt.Printf("Telegram media download failed %s: %v\n", media.Key, downloadErr)
 		}
 	}
-	raw, _ := json.Marshal(message)
-	hashInput := sha256.Sum256(append([]byte(entity.GroupID+":"+strconv.Itoa(message.ID)+":"+kind+":"+text), raw...))
-	contentHash := hex.EncodeToString(hashInput[:])
-	waMessageID := entity.GroupID + ":" + strconv.Itoa(message.ID)
-	var existingID, existingHash, existingMediaStatus *string
-	_ = a.db.QueryRow(ctx, "SELECT id::text,content_hash,media_status FROM messages WHERE group_id=$1 AND wa_message_id=$2", entity.GroupID, waMessageID).Scan(&existingID, &existingHash, &existingMediaStatus)
-	if existingHash != nil && *existingHash == contentHash && (media == nil || existingMediaStatus != nil && *existingMediaStatus == "completed") {
-		return nil
-	}
-	senderID, senderName := messageSender(message, users, entity)
 	mediaStatus := "none"
 	if media != nil {
 		mediaStatus = "pending"
@@ -593,33 +606,60 @@ func (a *app) persistMessage(ctx context.Context, entity *telegramEntity, messag
 	err = a.db.QueryRow(ctx, `INSERT INTO messages (group_id,wa_message_id,platform,external_chat_id,sender_jid,sender_name,kind,text,received_at,has_media,media_key,media_mime,raw,content_hash,sequence_no,media_status)
 VALUES ($1,$2,'telegram',$3,$4,$5,$6,$7,to_timestamp($8),$9,$10,$11,$12,$13,$14,$15)
 ON CONFLICT (group_id,wa_message_id) DO UPDATE SET sender_jid=EXCLUDED.sender_jid,sender_name=EXCLUDED.sender_name,kind=EXCLUDED.kind,text=EXCLUDED.text,received_at=EXCLUDED.received_at,has_media=EXCLUDED.has_media,media_key=EXCLUDED.media_key,media_mime=EXCLUDED.media_mime,raw=EXCLUDED.raw,content_hash=EXCLUDED.content_hash,sequence_no=EXCLUDED.sequence_no,media_status=CASE WHEN EXCLUDED.media_status='completed' THEN 'completed' ELSE messages.media_status END
+WHERE messages.content_hash IS DISTINCT FROM EXCLUDED.content_hash
 RETURNING id::text`, entity.GroupID, waMessageID, entity.ExternalID, senderID, nullIfEmpty(senderName), kind, text, message.Date, media != nil, nullIfMediaKey(media), nullIfMediaMime(media), raw, contentHash, message.ID, mediaStatus).Scan(&messageID)
+	messageChanged := true
+	if errors.Is(err, pgx.ErrNoRows) {
+		messageChanged = false
+		err = a.db.QueryRow(ctx, "SELECT id::text FROM messages WHERE group_id=$1 AND wa_message_id=$2", entity.GroupID, waMessageID).Scan(&messageID)
+	}
 	if err != nil {
 		return err
 	}
-	replyID := ""
-	if reply, ok := message.GetReplyTo(); ok {
-		if header, ok := reply.(*tg.MessageReplyHeader); ok && header.ReplyToMsgID != 0 {
-			replyID = entity.GroupID + ":" + strconv.Itoa(header.ReplyToMsgID)
+	data := map[string]any{"messageId": messageID, "waMessageId": waMessageID, "groupId": entity.GroupID, "platform": "telegram", "chatType": entity.ChatType, "externalChatId": entity.ExternalID, "senderJid": senderID, "senderName": senderName, "kind": kind, "text": text, "receivedAt": time.Unix(int64(message.Date), 0).UTC().Format(time.RFC3339), "hasMedia": media != nil, "mediaKey": nullIfMediaKey(media), "mediaMime": nullIfMediaMime(media), "replyToWaMessageId": nullIfEmpty(replyID), "raw": json.RawMessage(raw), "contentHash": contentHash, "mediaObjectPath": nullIfEmpty(objectPath), "changeType": ternary(existingID != nil, "updated", "created"), "sequenceNo": message.ID}
+	if messageChanged {
+		if err := a.publishWithID(subjectMessageReceived, "wa.messages.received", telegramMessageEventID(contentHash), data); err != nil {
+			return err
 		}
 	}
-	data := map[string]any{"messageId": messageID, "waMessageId": waMessageID, "groupId": entity.GroupID, "platform": "telegram", "chatType": entity.ChatType, "externalChatId": entity.ExternalID, "senderJid": senderID, "senderName": senderName, "kind": kind, "text": text, "receivedAt": time.Unix(int64(message.Date), 0).UTC().Format(time.RFC3339), "hasMedia": media != nil, "mediaKey": nullIfMediaKey(media), "mediaMime": nullIfMediaMime(media), "replyToWaMessageId": nullIfEmpty(replyID), "raw": json.RawMessage(raw), "mediaObjectPath": nullIfEmpty(objectPath), "changeType": ternary(existingID != nil, "updated", "created"), "sequenceNo": message.ID}
-	if err := a.publish(subjectMessageReceived, "wa.messages.received", data); err != nil {
-		return err
-	}
-	if media != nil && objectPath != "" {
+	mediaNeedsPublish := existingID == nil || existingMediaStatus == nil || *existingMediaStatus != "completed"
+	if media != nil && objectPath != "" && mediaNeedsPublish {
 		_ = a.publish(subjectMediaRequested, "media.objects.requested", map[string]any{"messageId": messageID, "mediaKey": media.Key, "objectPath": objectPath, "mediaMime": media.Mime, "kind": kind, "platform": "telegram", "fileName": media.FileName})
 		if kind == "audio" {
 			var jobID string
-			if err := a.db.QueryRow(ctx, "SELECT id::text FROM audio_jobs WHERE message_id=$1::uuid AND media_key=$2 ORDER BY created_at DESC LIMIT 1", messageID, media.Key).Scan(&jobID); errors.Is(err, pgx.ErrNoRows) {
-				jobID = randomID()
-				_, _ = a.db.Exec(ctx, "INSERT INTO audio_jobs (id,message_id,media_key,media_mime,object_path) VALUES ($1::uuid,$2::uuid,$3,$4,$5)", jobID, messageID, media.Key, media.Mime, objectPath)
+			if err := a.db.QueryRow(ctx, `INSERT INTO audio_jobs (message_id,media_key,media_mime,status,object_path)
+VALUES ($1::uuid,$2,$3,'queued',$4)
+ON CONFLICT (message_id,media_key) DO UPDATE SET
+  media_mime=COALESCE(audio_jobs.media_mime,EXCLUDED.media_mime),
+  object_path=COALESCE(audio_jobs.object_path,EXCLUDED.object_path),
+  updated_at=NOW()
+RETURNING id::text`, messageID, media.Key, media.Mime, objectPath).Scan(&jobID); err == nil {
+				_ = a.publish(subjectAudioRequested, "media.audio.requested", map[string]any{"jobId": jobID, "messageId": messageID, "mediaKey": media.Key, "mediaMime": media.Mime, "objectPath": objectPath})
 			}
-			_ = a.publish(subjectAudioRequested, "media.audio.requested", map[string]any{"jobId": jobID, "messageId": messageID, "mediaKey": media.Key, "mediaMime": media.Mime, "objectPath": objectPath})
 		}
 	}
 	_ = lease.saveCursor(ctx, entity.GroupID, strconv.Itoa(message.ID), time.Unix(int64(message.Date), 0), message.ID)
 	return nil
+}
+
+func telegramMessageContentHash(parts ...string) string {
+	hash := sha256.New()
+	for _, part := range parts {
+		_, _ = fmt.Fprintf(hash, "%d:", len(part))
+		_, _ = hash.Write([]byte(part))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func telegramMessageEventID(contentHash string) string {
+	return "message:telegram:" + contentHash
+}
+
+func mediaMime(media *telegramMedia) string {
+	if media == nil {
+		return ""
+	}
+	return media.Mime
 }
 
 func nullIfMediaKey(value *telegramMedia) any {

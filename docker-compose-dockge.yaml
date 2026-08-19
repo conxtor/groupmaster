@@ -135,7 +135,7 @@ services:
     image: ghcr.io/${GHCR_IMAGE_OWNER:-conxtor}/wagi-wa-connector-whatsmeow:${GHCR_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://wagi_app:${WAGI_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-app}
+      DATABASE_URL: postgres://wagi_app:${WAGI_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-app}?sslmode=${WA_DATABASE_SSLMODE:-disable}
       NATS_URL: nats://nats:4222
       WA_PORT: 3001
       WA_BACKFILL_DAYS: ${WA_BACKFILL_DAYS:-7}
@@ -170,7 +170,7 @@ services:
     image: ghcr.io/${GHCR_IMAGE_OWNER:-conxtor}/wagi-wa-connector-whatsmeow:${GHCR_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://wagi_app:${WAGI_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-app}
+      DATABASE_URL: postgres://wagi_app:${WAGI_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-app}?sslmode=${WA_DATABASE_SSLMODE:-disable}
       NATS_URL: nats://nats:4222
       WA_PORT: 3001
       WA_BACKFILL_DAYS: ${WA_BACKFILL_DAYS:-7}

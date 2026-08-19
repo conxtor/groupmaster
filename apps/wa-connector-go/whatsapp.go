@@ -351,21 +351,42 @@ func (a *app) persistMessage(ctx context.Context, client *whatsmeow.Client, even
 	if err != nil {
 		raw = []byte(`{}`)
 	}
-	hash := sha256.Sum256([]byte(groupID + "\x00" + string(event.Info.ID)))
-	contentHash := hex.EncodeToString(hash[:])
+	contentHash := whatsappMessageContentHash(
+		groupID,
+		string(event.Info.ID),
+		kind,
+		text,
+		event.Info.Sender.String(),
+		mime,
+		replyID,
+	)
 	var sequence int64
 	if !receivedAt.IsZero() {
 		sequence = receivedAt.UnixMilli()
+	}
+	var existingID, existingHash, existingMediaStatus *string
+	_ = a.db.QueryRow(ctx, "SELECT id::text,content_hash,media_status FROM messages WHERE group_id=$1 AND wa_message_id=$2", groupID, string(event.Info.ID)).Scan(&existingID, &existingHash, &existingMediaStatus)
+	if existingHash != nil && *existingHash == contentHash && (!hasMedia || existingMediaStatus != nil && *existingMediaStatus == "completed") {
+		// The connector may see the same message through several user leases.
+		// Once its content and media are complete, do not download, publish or
+		// analyze it again.
+		return lease.saveCursor(ctx, groupID, string(event.Info.ID), receivedAt, int(sequence))
 	}
 	var editedAt *time.Time
 	if event.IsEdit {
 		editedAt = &receivedAt
 	}
 	var messageID string
+	messageChanged := true
 	err = a.db.QueryRow(ctx, `INSERT INTO messages (group_id,wa_message_id,platform,external_chat_id,sender_jid,sender_name,kind,text,received_at,has_media,media_key,media_mime,raw,content_hash,sequence_no,media_status,edited_at)
 VALUES ($1,$2,'whatsapp',$1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CASE WHEN $8::boolean THEN 'processing' ELSE 'none' END,$14)
 ON CONFLICT (group_id,wa_message_id) DO UPDATE SET text=EXCLUDED.text,sender_name=EXCLUDED.sender_name,kind=EXCLUDED.kind,has_media=EXCLUDED.has_media,media_mime=EXCLUDED.media_mime,raw=EXCLUDED.raw,content_hash=EXCLUDED.content_hash,sequence_no=GREATEST(COALESCE(messages.sequence_no,0),COALESCE(EXCLUDED.sequence_no,0)),edited_at=COALESCE(EXCLUDED.edited_at,messages.edited_at)
+WHERE messages.content_hash IS DISTINCT FROM EXCLUDED.content_hash
 RETURNING id::text`, groupID, string(event.Info.ID), event.Info.Sender.String(), nullIfEmpty(event.Info.PushName), kind, text, receivedAt, hasMedia, nullIfEmpty(string(event.Info.ID)), nullIfEmpty(mime), raw, contentHash, sequence, editedAt).Scan(&messageID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		messageChanged = false
+		err = a.db.QueryRow(ctx, "SELECT id::text FROM messages WHERE group_id=$1 AND wa_message_id=$2", groupID, string(event.Info.ID)).Scan(&messageID)
+	}
 	if err != nil {
 		return err
 	}
@@ -389,23 +410,45 @@ RETURNING id::text`, groupID, string(event.Info.ID), event.Info.Sender.String(),
 		"senderJid": event.Info.Sender.String(), "senderName": nullIfEmpty(event.Info.PushName), "kind": kind,
 		"text": text, "receivedAt": receivedAt.UTC().Format(time.RFC3339Nano), "hasMedia": hasMedia,
 		"mediaKey": nullIfEmpty(mediaKey), "mediaMime": nullIfEmpty(mime), "replyToWaMessageId": nullIfEmpty(replyID),
-		"raw": json.RawMessage(raw), "changeType": map[bool]string{true: "updated", false: "created"}[event.IsEdit], "editedAt": map[bool]any{true: receivedAt.UTC().Format(time.RFC3339Nano), false: nil}[event.IsEdit], "sequenceNo": sequence, "mediaObjectPath": nullIfEmpty(objectPath), "fileName": nullIfEmpty(fileName),
+		"raw": json.RawMessage(raw), "contentHash": contentHash, "changeType": map[bool]string{true: "updated", false: "created"}[event.IsEdit], "editedAt": map[bool]any{true: receivedAt.UTC().Format(time.RFC3339Nano), false: nil}[event.IsEdit], "sequenceNo": sequence, "mediaObjectPath": nullIfEmpty(objectPath), "fileName": nullIfEmpty(fileName),
 	}
-	if err := a.publish(subjectMessageReceived, "wa.messages.received", data); err != nil {
-		return err
+	if messageChanged {
+		if err := a.publishWithID(subjectMessageReceived, "wa.messages.received", whatsappMessageEventID(contentHash), data); err != nil {
+			return err
+		}
 	}
-	if hasMedia && objectPath != "" {
+	mediaNeedsPublish := existingID == nil || existingMediaStatus == nil || *existingMediaStatus != "completed"
+	if hasMedia && objectPath != "" && mediaNeedsPublish {
 		if err := a.publish(subjectMediaRequested, "media.objects.requested", map[string]any{"messageId": messageID, "mediaKey": mediaKey, "mediaMime": mime, "objectPath": objectPath, "fileName": fileName}); err != nil {
 			return err
 		}
 		if kind == "audio" {
 			var jobID string
-			if err := a.db.QueryRow(ctx, `INSERT INTO audio_jobs (message_id,media_key,media_mime,status,object_path) VALUES ($1::uuid,$2,$3,'queued',$4) RETURNING id::text`, messageID, mediaKey, mime, objectPath).Scan(&jobID); err == nil {
+			if err := a.db.QueryRow(ctx, `INSERT INTO audio_jobs (message_id,media_key,media_mime,status,object_path)
+VALUES ($1::uuid,$2,$3,'queued',$4)
+ON CONFLICT (message_id,media_key) DO UPDATE SET
+  media_mime=COALESCE(audio_jobs.media_mime,EXCLUDED.media_mime),
+  object_path=COALESCE(audio_jobs.object_path,EXCLUDED.object_path),
+  updated_at=NOW()
+RETURNING id::text`, messageID, mediaKey, mime, objectPath).Scan(&jobID); err == nil {
 				_ = a.publish(subjectAudioRequested, "media.audio.requested", map[string]any{"jobId": jobID, "messageId": messageID, "mediaKey": mediaKey, "mediaMime": mime, "objectPath": objectPath})
 			}
 		}
 	}
 	return nil
+}
+
+func whatsappMessageContentHash(parts ...string) string {
+	hash := sha256.New()
+	for _, part := range parts {
+		_, _ = fmt.Fprintf(hash, "%d:", len(part))
+		_, _ = hash.Write([]byte(part))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func whatsappMessageEventID(contentHash string) string {
+	return "message:whatsapp:" + contentHash
 }
 
 func (a *app) downloadMedia(ctx context.Context, client *whatsmeow.Client, media whatsmeow.DownloadableMessage, mediaKey, mime, fileName string) (string, error) {
