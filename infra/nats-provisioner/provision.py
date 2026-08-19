@@ -40,6 +40,15 @@ STREAMS = [
         duplicate_window=10 * 60,
     ),
     StreamConfig(
+        name="WAGI_THREAD_REASSESSMENT",
+        subjects=["ai.threads.reassessment.>"],
+        storage=StorageType.FILE,
+        retention=RetentionPolicy.LIMITS,
+        max_msgs=-1,
+        max_age=int(os.getenv("NATS_THREAD_REASSESSMENT_MAX_AGE_DAYS", "30")) * 24 * 60 * 60,
+        duplicate_window=10 * 60,
+    ),
+    StreamConfig(
         name="WAGI_KB_REBUILD",
         subjects=["knowledge.rebuild.>"],
         storage=StorageType.FILE,
@@ -59,6 +68,7 @@ CONSUMERS = [
     ("WAGI_EVENTS", "WAGI_MEDIA_OBJECTS", "media.objects.requested"),
     ("WAGI_EVENTS", "WAGI_MEDIA_AUDIO", "media.audio.requested"),
     ("WAGI_REASSESSMENT", "WAGI_AI_REASSESSMENT", "ai.reassessment.requested"),
+    ("WAGI_THREAD_REASSESSMENT", "WAGI_AI_THREAD_REASSESSMENT", "ai.threads.reassessment.requested"),
     ("WAGI_KB_REBUILD", "WAGI_KB_REBUILD", "knowledge.rebuild.requested"),
 ]
 
@@ -79,6 +89,8 @@ async def provision(js):
         ack_wait = 5 * 60
         if durable == "WAGI_AI_REASSESSMENT":
             ack_wait = int(os.getenv("NATS_REASSESSMENT_ACK_WAIT_SECONDS", "86400"))
+        if durable == "WAGI_AI_THREAD_REASSESSMENT":
+            ack_wait = int(os.getenv("NATS_THREAD_REASSESSMENT_ACK_WAIT_SECONDS", "86400"))
         if durable == "WAGI_KB_REBUILD":
             ack_wait = int(os.getenv("NATS_KB_REBUILD_ACK_WAIT_SECONDS", "86400"))
         config = ConsumerConfig(

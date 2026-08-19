@@ -8,6 +8,8 @@ start
 :event_inbox beansprucht Event idempotent;
 :ai_jobs anlegen / Retrystatus setzen;
 :Nachricht + zeitnahen Gruppenkontext\naus PostgreSQL laden;
+:Implizite Thread-Kandidaten\nmit Zeitnähe, Token-Overlap und\nReply-/Absender-Evidenz bewerten;
+:Hohe Treffer als relation\nmit Score und Evidence speichern;\nTrenn-Feedback als Sperre anwenden;
 
 if (Medientyp?) then (Audio)
   :media.audio.requested;
@@ -42,6 +44,7 @@ endif
 :Relevanz und Relevance-Score;
 :Facts und Entities extrahieren;
 :Events über mehrere Nachrichten\nmit Quellenbelegen zusammenführen;
+:Event-, Action-Item- und Knowledge-Quellen\nauf den erkannten Thread-Kontext begrenzen;
 :Explizite GPS-/Standortnachrichten\nmit hoher Konfidenz übernehmen;
 :Text-Ortskandidaten nur aus Kontext,\nAdresse und NER-lite/spaCy-Evidenz bilden;
 if (Text-Ort ausreichend belegt?) then (ja)
@@ -107,6 +110,16 @@ fork again
   :Live-Nachrichten werden über
   WAGI_EVENTS unabhängig verarbeitet;
 fork again
+  :Administrator startet Thread-Neubewertung;
+  :ai.threads.reassessment.requested in
+  WAGI_THREAD_REASSESSMENT lesen;
+  :Automatische Thread-Kanten und
+  Mitgliedschaften aus Nachrichtenfenstern
+  neu berechnen;
+  :Manuelles Link-/Unlink-Feedback
+  erhalten;
+  :Thread-Fortschritt und Status speichern;
+fork again
   :Administrator startet KB-Neuaufbau;
   :knowledge.rebuild.requested in
   WAGI_KB_REBUILD lesen;
@@ -126,6 +139,9 @@ fork again
   :Bei Fehler: Backoff, event_inbox,\nevent_failures und DLQ-Eintrag;
 fork again
   :Replay/Backfill kann ausgewählte\nZeiträume erneut anfordern;
+fork again
+  :Nutzer bestätigt oder trennt\neine Thread-Beziehung pro Gruppe;
+  :Feedback historisieren und\nbei der nächsten Analyse anwenden;
 end fork
 stop
 @enduml

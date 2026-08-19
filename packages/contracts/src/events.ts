@@ -11,6 +11,7 @@ export const subjects = {
   groupSelectionChanged: "connector.group.selection.changed",
   replayRequested: "replay.requested",
   aiReassessmentRequested: "ai.reassessment.requested",
+  threadReassessmentRequested: "ai.threads.reassessment.requested",
   knowledgeRebuildRequested: "knowledge.rebuild.requested",
 } as const;
 
@@ -131,6 +132,11 @@ export interface ReplayRequested {
 
 export interface AIReassessmentRequested {
   reassessmentId: string;
+  totalCount?: number;
+}
+
+export interface ThreadReassessmentRequested {
+  threadReassessmentId: string;
   totalCount?: number;
 }
 

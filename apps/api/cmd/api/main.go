@@ -83,6 +83,7 @@ type message struct {
 	ReceivedAt         time.Time       `json:"receivedAt"`
 	HasMedia           bool            `json:"hasMedia"`
 	Analysis           json.RawMessage `json:"analysis,omitempty"`
+	Thread             json.RawMessage `json:"thread,omitempty"`
 }
 
 type audioJobRequest struct {
@@ -235,6 +236,12 @@ func ensureEventStream(js nats.JetStreamContext) error {
 			Storage:  nats.FileStorage,
 			MaxMsgs:  -1,
 		},
+		{
+			Name:     "WAGI_THREAD_REASSESSMENT",
+			Subjects: []string{"ai.threads.reassessment.>"},
+			Storage:  nats.FileStorage,
+			MaxMsgs:  -1,
+		},
 	}
 	for _, config := range streams {
 		if _, err := js.StreamInfo(config.Name); err == nil {
@@ -373,11 +380,41 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(m.platform, CASE WHEN m.group_id LIKE 'tg:%%' THEN 'telegram' ELSE 'whatsapp' END),
 		       m.received_at, m.has_media, m.media_status, m.deleted_at,
 		       mo.object_path, mo.thumbnail_path, mo.ocr_text, aj.id::text, aj.transcript, aj.status, aj.attempts, aj.error, aj.next_attempt_at,
-		       COALESCE(jsonb_build_object('relevant', a.relevant, 'relevanceLevel', COALESCE(a.relevance_level, CASE WHEN COALESCE(a.relevance_score, 0) >= 0.75 THEN 'high' WHEN COALESCE(a.relevance_score, 0) >= 0.45 THEN 'medium' ELSE 'low' END), 'score', a.relevance_score, 'summary', a.summary, 'facts', a.facts, 'entities', a.entities, 'events', a.events, 'actionItems', a.action_items, 'places', a.places, 'model', a.model, 'schemaVersion', a.schema_version, 'promptVersion', a.prompt_version, 'provenance', a.provenance, 'conflicts', a.conflicts), '{}'::jsonb)
+		       COALESCE(jsonb_build_object('relevant', a.relevant, 'relevanceLevel', COALESCE(a.relevance_level, CASE WHEN COALESCE(a.relevance_score, 0) >= 0.75 THEN 'high' WHEN COALESCE(a.relevance_score, 0) >= 0.45 THEN 'medium' ELSE 'low' END), 'score', a.relevance_score, 'summary', a.summary, 'facts', a.facts, 'entities', a.entities, 'events', a.events, 'actionItems', a.action_items, 'places', a.places, 'model', a.model, 'schemaVersion', a.schema_version, 'promptVersion', a.prompt_version, 'provenance', a.provenance, 'conflicts', a.conflicts), '{}'::jsonb),
+		       thread_view.thread
 		FROM messages m JOIN wa_groups g ON g.id = m.group_id
 		LEFT JOIN message_analyses a ON a.message_id = m.id
 		LEFT JOIN LATERAL (SELECT object_path, thumbnail_path, ocr_text FROM media_objects WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) mo ON TRUE
 		LEFT JOIN LATERAL (SELECT id, transcript, status, attempts, error, next_attempt_at FROM audio_jobs WHERE message_id=m.id ORDER BY updated_at DESC LIMIT 1) aj ON TRUE
+		LEFT JOIN LATERAL (
+		  SELECT jsonb_build_object(
+		    'id', ct.id::text,
+		    'title', ct.title,
+		    'confidence', ctm.confidence,
+		    'messageCount', (SELECT COUNT(*) FROM conversation_thread_messages count_members WHERE count_members.thread_id=ct.id),
+		    'relatedMessages', COALESCE((
+		      SELECT jsonb_agg(jsonb_build_object(
+		        'id', related.id::text,
+		        'senderName', related.sender_name,
+		        'senderJid', related.sender_jid,
+		        'kind', related.kind,
+		        'text', COALESCE(NULLIF(related_audio.transcript, ''), related.text),
+		        'receivedAt', related.received_at,
+		        'confidence', related_members.confidence,
+		        'role', related_members.role
+		      ) ORDER BY related.received_at ASC)
+		      FROM conversation_thread_messages related_members
+		      JOIN messages related ON related.id=related_members.message_id
+		      LEFT JOIN LATERAL (SELECT transcript FROM audio_jobs WHERE message_id=related.id ORDER BY updated_at DESC LIMIT 1) related_audio ON TRUE
+		      WHERE related_members.thread_id=ct.id AND related.id <> m.id
+		    ), '[]'::jsonb)
+		  ) AS thread
+		  FROM conversation_thread_messages ctm
+		  JOIN conversation_threads ct ON ct.id=ctm.thread_id
+		  WHERE ctm.message_id=m.id
+		  ORDER BY ctm.confidence DESC, ct.updated_at DESC
+		  LIMIT 1
+		) thread_view ON TRUE
 		WHERE %s ORDER BY m.received_at DESC LIMIT %s OFFSET %s`, strings.Join(conditions, " AND "), limitArg, offsetArg), args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
@@ -389,7 +426,7 @@ func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 		var item message
 		var objectPath, thumbnailPath *string
 		var audioAttempts *int
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.WAMessageID, &item.SenderJID, &item.SenderName, &item.Kind, &item.Text, &item.ReplyToWAID, &item.Platform, &item.ReceivedAt, &item.HasMedia, &item.MediaStatus, &item.DeletedAt, &objectPath, &thumbnailPath, &item.OCRText, &item.AudioJobID, &item.Transcript, &item.AudioStatus, &audioAttempts, &item.AudioError, &item.AudioNextAttemptAt, &item.Analysis); err != nil {
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.WAMessageID, &item.SenderJID, &item.SenderName, &item.Kind, &item.Text, &item.ReplyToWAID, &item.Platform, &item.ReceivedAt, &item.HasMedia, &item.MediaStatus, &item.DeletedAt, &objectPath, &thumbnailPath, &item.OCRText, &item.AudioJobID, &item.Transcript, &item.AudioStatus, &audioAttempts, &item.AudioError, &item.AudioNextAttemptAt, &item.Analysis, &item.Thread); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -688,8 +725,8 @@ func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "messageId and targetKey are required"})
 		return
 	}
-	if request.TargetType != "relevance" && request.TargetType != "event" && request.TargetType != "place" && request.TargetType != "knowledge" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "targetType must be relevance, event, place or knowledge"})
+	if request.TargetType != "relevance" && request.TargetType != "event" && request.TargetType != "place" && request.TargetType != "knowledge" && request.TargetType != "thread" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "targetType must be relevance, event, place, knowledge or thread"})
 		return
 	}
 	if request.Decision != "accept" && request.Decision != "reject" && request.Decision != "correct" {
@@ -720,6 +757,44 @@ func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
 	if correction == nil {
 		correction = map[string]any{}
 	}
+	if request.TargetType == "thread" {
+		if request.Decision != "accept" && request.Decision != "reject" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "thread feedback must accept or reject a relation"})
+			return
+		}
+		relatedMessageID, _ := correction["relatedMessageId"].(string)
+		relatedMessageID = strings.TrimSpace(relatedMessageID)
+		if relatedMessageID == "" {
+			relatedMessageID = request.TargetKey
+		}
+		if _, err := uuid.Parse(relatedMessageID); err != nil || relatedMessageID == request.MessageID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "thread feedback needs a different relatedMessageId"})
+			return
+		}
+		var relatedGroupID string
+		if err := a.db.QueryRow(r.Context(), `SELECT group_id FROM messages WHERE id=$1::uuid`, relatedMessageID).Scan(&relatedGroupID); err != nil {
+			if err == pgx.ErrNoRows {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "related message not found"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "related message access could not be checked"})
+			return
+		}
+		if relatedGroupID != groupID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "thread messages must belong to the same group"})
+			return
+		}
+		if !user.isAdmin() {
+			var canRead bool
+			if err := a.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM user_group_access WHERE user_id=$1::uuid AND group_id=$2 AND can_read=TRUE)`, user.ID, relatedGroupID).Scan(&canRead); err != nil || !canRead {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "related message is not visible to this user"})
+				return
+			}
+		}
+		request.TargetKey = relatedMessageID
+		correction["relatedMessageId"] = relatedMessageID
+		correction["relationType"] = "same_thread"
+	}
 	correctionJSON, err := json.Marshal(correction)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid correction"})
@@ -732,6 +807,19 @@ func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
 		user.ID, groupID, request.MessageID, request.TargetType, request.TargetKey, request.Decision, correctionJSON, strings.TrimSpace(request.Note)).Scan(&feedbackID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "feedback could not be saved"})
 		return
+	}
+	if request.TargetType == "thread" {
+		decision := "link"
+		if request.Decision == "reject" {
+			decision = "unlink"
+		}
+		if _, err := a.db.Exec(r.Context(), `
+			INSERT INTO conversation_relation_feedback (user_id, group_id, message_id, related_message_id, decision, note)
+			VALUES ($1::uuid,$2,$3::uuid,$4::uuid,$5,NULLIF($6,''))`,
+			user.ID, groupID, request.MessageID, request.TargetKey, decision, strings.TrimSpace(request.Note)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "thread feedback could not be saved"})
+			return
+		}
 	}
 	if request.TargetType == "relevance" {
 		level, _ := request.Correction["relevanceLevel"].(string)
@@ -771,7 +859,7 @@ func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"id": uuid.NewString(), "type": "ai.feedback.created", "occurredAt": time.Now().UTC(), "source": "api",
-		"data": map[string]any{"feedbackId": feedbackID, "messageId": request.MessageID, "groupId": groupID, "targetType": request.TargetType},
+		"data": map[string]any{"feedbackId": feedbackID, "messageId": request.MessageID, "groupId": groupID, "targetType": request.TargetType, "targetKey": request.TargetKey, "decision": request.Decision, "correction": correction},
 	})
 	if err := a.nc.Publish("ai.feedback.created", payload); err != nil {
 		log.Printf("AI feedback event publish failed: %v", err)

@@ -1,4 +1,5 @@
 import asyncio
+from bisect import bisect_left, bisect_right
 import json
 import logging
 import math
@@ -6,7 +7,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import asyncpg
@@ -15,6 +16,14 @@ import httpx
 from pydantic import BaseModel, Field
 
 from reliability import claim_event, mark_processed, payload_id, retry_or_dead_letter
+from conversation_threads import (
+    THREAD_AUTO_LINK_THRESHOLD,
+    THREAD_WINDOW_HOURS,
+    annotate_feedback_context,
+    annotate_thread_context,
+    apply_thread_feedback,
+    persist_conversation_thread,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("wagi-ai-worker")
@@ -1088,7 +1097,17 @@ def multi_message_events(message_id: str, context: list[dict], learning: dict | 
         term for term in [*EVENT_ACTION_TERMS, *learned_event_terms]
         if not learning_term_is_excluded(learning, "event", term)
     ]))
-    ordered = sorted((item for item in context if item.get("id")), key=lambda item: item_time(item) or datetime.min.replace(tzinfo=timezone.utc))
+    ordered = sorted(
+        (
+            item for item in context
+            if item.get("id") and (
+                str(item.get("id")) == str(message_id)
+                or float(item.get("threadScore") or 0) >= THREAD_AUTO_LINK_THRESHOLD
+                or (reply_target(item) and not item.get("threadBlocked"))
+            )
+        ),
+        key=lambda item: item_time(item) or datetime.min.replace(tzinfo=timezone.utc),
+    )
     current = next((item for item in ordered if str(item.get("id")) == str(message_id)), None)
     if not current:
         return []
@@ -1187,7 +1206,17 @@ def multi_message_action_items(message_id: str, context: list[dict], learning: d
         term for term in [*ACTION_ITEM_TERMS, *learned_action_terms]
         if not learning_term_is_excluded(learning, "action", term)
     ]))
-    ordered = sorted((item for item in context if item.get("id")), key=lambda item: item_time(item) or datetime.min.replace(tzinfo=timezone.utc))
+    ordered = sorted(
+        (
+            item for item in context
+            if item.get("id") and (
+                str(item.get("id")) == str(message_id)
+                or float(item.get("threadScore") or 0) >= THREAD_AUTO_LINK_THRESHOLD
+                or (reply_target(item) and not item.get("threadBlocked"))
+            )
+        ),
+        key=lambda item: item_time(item) or datetime.min.replace(tzinfo=timezone.utc),
+    )
     current = next((item for item in ordered if str(item.get("id")) == str(message_id)), None)
     if not current:
         return []
@@ -1196,7 +1225,9 @@ def multi_message_action_items(message_id: str, context: list[dict], learning: d
         current_refs.add(f"{current['groupId']}:{current['waMessageId']}")
     candidates = [
         item for item in ordered
-        if str(item.get("id")) == str(message_id) or reply_target(item) in current_refs
+        if str(item.get("id")) == str(message_id)
+        or (float(item.get("threadScore") or 0) >= THREAD_AUTO_LINK_THRESHOLD and not item.get("threadBlocked"))
+        or (reply_target(item) in current_refs and not item.get("threadBlocked"))
     ]
     result: list[ActionItem] = []
     for item in candidates:
@@ -1597,12 +1628,20 @@ def related_knowledge_source_ids(message_id: str, normalized: str, context: list
         if len(token) >= 3 and token not in stopwords and not token.isnumeric()
     }
     related = [message_id]
+    has_thread_annotations = any("threadScore" in item for item in context if str(item.get("id")) != str(message_id))
     for item in context:
         item_id = str(item.get("id") or "")
         if not item_id or item_id == str(message_id):
             continue
         other_text = " ".join(str(item.get("text") or "").split()).strip()
         if not is_informative_text(other_text, stopwords):
+            continue
+        # Once the thread cascade has identified high-confidence relations,
+        # do not let a broad context-window token overlap pull an entire group
+        # into one KB item. Explicit replies remain eligible below.
+        if has_thread_annotations and float(item.get("threadScore") or 0) < THREAD_AUTO_LINK_THRESHOLD and not reply_target(item):
+            continue
+        if item.get("threadBlocked"):
             continue
         other_tokens = {
             token for token in re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", other_text.casefold())
@@ -2715,6 +2754,13 @@ async def main():
         except Exception:
             await js.stream_info("WAGI_REASSESSMENT")
     try:
+        await js.stream_info("WAGI_THREAD_REASSESSMENT")
+    except Exception:
+        try:
+            await js.add_stream(name="WAGI_THREAD_REASSESSMENT", subjects=["ai.threads.reassessment.>"])
+        except Exception:
+            await js.stream_info("WAGI_THREAD_REASSESSMENT")
+    try:
         await js.stream_info("WAGI_KB_REBUILD")
     except Exception:
         try:
@@ -2764,6 +2810,11 @@ async def main():
                         item["text"] = data.get("text")
         group_language = await resolve_group_language(db, group_id, context, text)
         learning = await load_learning_terms(db, group_id, group_language)
+        # Mark likely continuation messages before analysis. The annotation is
+        # consumed by event/action/KB source selection and is also persisted as
+        # evidence by the thread graph after the analysis succeeds.
+        annotate_thread_context(message_id, context, set(learning_terms_for(learning, "exclusion")))
+        await annotate_feedback_context(db, group_id, message_id, context)
         configured_topic_keys = await configured_knowledge_topic_keys(db, group_language)
         analysis = await adapter.analyze(
             message_id,
@@ -2823,6 +2874,8 @@ async def main():
         )
         await upsert_knowledge(db, group_id, analysis.knowledge, encoder, group_language, knowledge_generation)
         await upsert_knowledge_graph(db, group_id, analysis, knowledge_generation)
+        if current and group_id:
+            await persist_conversation_thread(db, group_id, {**dict(current), "text": text}, context, serialized_analysis)
         await publish(js, "ai.messages.analyzed", "ai.messages.analyzed", serialized_analysis)
 
     async def on_message(message):
@@ -2850,6 +2903,12 @@ async def main():
                 await message.ack()
                 return
             message_id = data.get("messageId")
+            if data.get("targetType") == "thread":
+                correction = data.get("correction") if isinstance(data.get("correction"), dict) else {}
+                related_message_id = str(correction.get("relatedMessageId") or data.get("targetKey") or "")
+                decision = "link" if data.get("decision") == "accept" else "unlink"
+                if data.get("groupId") and message_id and related_message_id:
+                    await apply_thread_feedback(db, str(data["groupId"]), str(message_id), related_message_id, decision)
             if message_id:
                 await process_analysis(
                     db,
@@ -3083,6 +3142,123 @@ async def main():
                 await db.execute("UPDATE ai_reassessment_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", job_id, str(error)[:4000])
             await retry_or_dead_letter(db, js, message, payload, "ai.reassessment", error)
 
+    async def on_thread_reassessment(message):
+        """Rebuild automatic thread relations while preserving user feedback."""
+        payload = {}
+        job_id = None
+        try:
+            payload = json.loads(message.data)
+            data = payload.get("data", payload)
+            job_id = str(data.get("threadReassessmentId") or "")
+            event_id = payload_id(payload, message.data)
+            if not job_id:
+                raise ValueError("threadReassessmentId missing")
+            if not await claim_event(db, "ai.thread-reassessment", event_id, message.subject, payload):
+                await message.ack()
+                return
+            await db.execute(
+                """UPDATE thread_reassessment_jobs
+                   SET status='running', started_at=COALESCE(started_at,NOW()), updated_at=NOW(), error=NULL
+                   WHERE id=$1::uuid AND status IN ('queued','running')""",
+                job_id,
+            )
+            rows = await db.fetch(
+                """SELECT m.id::text AS id, m.wa_message_id AS "waMessageId", m.group_id AS "groupId",
+                          m.sender_jid AS "senderJid", m.text, m.received_at AS "receivedAt",
+                          g.language,
+                          CASE WHEN m.raw ? 'reply_to_message'
+                               THEN m.group_id || ':' || (m.raw #>> '{reply_to_message,message_id}')
+                          END AS "replyToWaMessageId"
+                   FROM messages m
+                   JOIN wa_groups g ON g.id=m.group_id
+                   ORDER BY m.group_id, m.received_at ASC""",
+            )
+            await db.execute("UPDATE thread_reassessment_jobs SET total_count=$2, updated_at=NOW() WHERE id=$1::uuid", job_id, len(rows))
+
+            # Only automatic edges and memberships are rebuilt. Explicit user
+            # feedback remains authoritative and is deliberately retained.
+            await db.execute("DELETE FROM message_relations WHERE relation_type='same_thread' AND source='heuristic'")
+            await db.execute("DELETE FROM conversation_thread_messages WHERE source='heuristic'")
+            await db.execute(
+                """DELETE FROM conversation_threads thread
+                   WHERE NOT EXISTS (SELECT 1 FROM conversation_thread_messages member WHERE member.thread_id=thread.id)"""
+            )
+
+            grouped: dict[str, list[dict]] = {}
+            for row in rows:
+                item = dict(row)
+                grouped.setdefault(str(item["groupId"]), []).append(item)
+            group_times = {group_id: [item["receivedAt"] for item in items] for group_id, items in grouped.items()}
+            stopwords_cache: dict[str, set[str]] = {}
+            processed = 0
+            failed = 0
+            skipped = 0
+            for row in rows:
+                current = dict(row)
+                current_id = str(current["id"])
+                group_id = str(current["groupId"])
+                received_at = current["receivedAt"]
+                try:
+                    if not received_at:
+                        skipped += 1
+                        continue
+                    window_start = received_at - timedelta(hours=THREAD_WINDOW_HOURS)
+                    window_end = received_at + timedelta(hours=THREAD_WINDOW_HOURS)
+                    items = grouped[group_id]
+                    times = group_times[group_id]
+                    start = bisect_left(times, window_start)
+                    end = bisect_right(times, window_end)
+                    context = [dict(item) for item in items[start:end]]
+                    if len(context) > AI_CONTEXT_MAX_MESSAGES:
+                        context = sorted(
+                            context,
+                            key=lambda item: abs((item["receivedAt"] - received_at).total_seconds()),
+                        )[:AI_CONTEXT_MAX_MESSAGES]
+                        context.sort(key=lambda item: item["receivedAt"])
+                    language = str(current.get("language") or "de")
+                    if group_id not in stopwords_cache:
+                        learning = await load_learning_terms(db, group_id, language)
+                        stopwords_cache[group_id] = set(learning_terms_for(learning, "exclusion"))
+                    annotate_thread_context(current_id, context, stopwords_cache[group_id])
+                    await annotate_feedback_context(db, group_id, current_id, context)
+                    thread_id = await persist_conversation_thread(
+                        db,
+                        group_id,
+                        current,
+                        context,
+                        {"summary": str(current.get("text") or "")},
+                    )
+                    if thread_id:
+                        processed += 1
+                    else:
+                        skipped += 1
+                except Exception:
+                    failed += 1
+                    log.exception("thread reassessment item failed: %s", current_id)
+                await db.execute(
+                    """UPDATE thread_reassessment_jobs
+                       SET processed_count=$2, failed_count=$3, skipped_count=$4, updated_at=NOW()
+                       WHERE id=$1::uuid""",
+                    job_id, processed, failed, skipped,
+                )
+                if AI_REASSESSMENT_DELAY_SECONDS:
+                    await asyncio.sleep(AI_REASSESSMENT_DELAY_SECONDS)
+            await db.execute(
+                """UPDATE thread_reassessment_jobs
+                   SET status=CASE WHEN failed_count > 0 AND processed_count=0 THEN 'failed' ELSE 'completed' END,
+                       completed_at=NOW(), updated_at=NOW()
+                   WHERE id=$1::uuid""",
+                job_id,
+            )
+            await mark_processed(db, "ai.thread-reassessment", event_id)
+            await message.ack()
+            log.info("thread reassessment %s completed: processed=%d failed=%d skipped=%d", job_id, processed, failed, skipped)
+        except Exception as error:
+            log.exception("thread reassessment failed")
+            if job_id:
+                await db.execute("UPDATE thread_reassessment_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", job_id, str(error)[:4000])
+            await retry_or_dead_letter(db, js, message, payload, "ai.threads.reassessment", error)
+
     async def on_knowledge_rebuild(message):
         """Build a separate KB generation and switch it on only when complete."""
         payload = {}
@@ -3255,6 +3431,7 @@ async def main():
     await js.subscribe("media.document.analyzed", durable="WAGI_AI_DOCUMENTS", stream="WAGI_EVENTS", cb=on_document)
     await js.subscribe("replay.requested", durable="WAGI_AI_REPLAY", stream="WAGI_EVENTS", cb=on_replay)
     await js.subscribe("ai.reassessment.requested", durable="WAGI_AI_REASSESSMENT", stream="WAGI_REASSESSMENT", cb=on_reassessment)
+    await js.subscribe("ai.threads.reassessment.requested", durable="WAGI_AI_THREAD_REASSESSMENT", stream="WAGI_THREAD_REASSESSMENT", cb=on_thread_reassessment)
     await js.subscribe("knowledge.rebuild.requested", durable="WAGI_KB_REBUILD", stream="WAGI_KB_REBUILD", cb=on_knowledge_rebuild)
 
     async def run_knowledge_startup():
@@ -3270,7 +3447,7 @@ async def main():
 
     asyncio.create_task(run_knowledge_startup())
     asyncio.create_task(recover_ai_jobs())
-    log.info("AI worker listening with durable consumers for messages, audio, images, documents, replay, feedback and isolated reassessment (provider=%s, prompt=%s)", AI_PROVIDER, PROMPT_VERSION)
+    log.info("AI worker listening with durable consumers for messages, audio, images, documents, replay, feedback, reassessment and thread reassessment (provider=%s, prompt=%s)", AI_PROVIDER, PROMPT_VERSION)
     await asyncio.Event().wait()
 
 

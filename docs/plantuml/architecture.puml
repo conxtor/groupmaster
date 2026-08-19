@@ -32,6 +32,7 @@ package "Connector-Pools" {
 package "Event- und Verarbeitungsplattform" {
   queue "NATS JetStream\nWAGI_EVENTS" as NATS
   queue "NATS JetStream\nWAGI_REASSESSMENT" as ReassessmentNATS
+  queue "NATS JetStream\nWAGI_THREAD_REASSESSMENT" as ThreadReassessmentNATS
   queue "NATS JetStream\nWAGI_KB_REBUILD" as KnowledgeRebuildNATS
   component "media-worker\nMinIO + OCR + whisper.cpp medium" as Media
   component "ai-worker\nHeuristik + NER-lite/spaCy\nGeocoder-Cache + Embeddings\noptional Hermes-Agent" as AI
@@ -74,6 +75,7 @@ TGWorker --> Telegram : selected groups,\nSupergroups + Topics
 API --> DB : Auth, groups, accounts,\nselection, cursors, queries
 API --> NATS : control events, audio jobs,\nfeedback, replay
 API --> ReassessmentNATS : ai.reassessment.requested\nAdministrator-Job
+API --> ThreadReassessmentNATS : ai.threads.reassessment.requested\nAdministrator-Job
 API --> KnowledgeRebuildNATS : knowledge.rebuild.requested\nGeneration-based KB rebuild
 API --> MediaVolume : signed media streaming
 
@@ -90,14 +92,19 @@ Media --> NATS : media.audio.transcribed\nmedia.image.analyzed\nmedia.document.a
 
 NATS --> AI : wa.messages.received\nmedia.*.analyzed\nreplay.requested
 ReassessmentNATS --> AI : ai.reassessment.requested\nseparater Durable Consumer
+ThreadReassessmentNATS --> AI : ai.threads.reassessment.requested\nseparater Durable Consumer
 KnowledgeRebuildNATS --> AI : knowledge.rebuild.requested\nseparater Durable Consumer
 AI --> DB : ai_jobs, message_analyses\n(events + action_items + places),\nknowledge hierarchy + graph,\nai_learning_terms + topic definitions\nknowledge_subtopic_terms
+AI --> DB : conversation_threads,\nmessage_relations, thread memberships\nwith scoring evidence
+User --> API : thread feedback\nlink / unlink per group
+API --> DB : conversation_relation_feedback\nuser- and group-scoped history
 AI --> DB : ai_learning_term_history\ncreated, feedback, inferred, admin
 AI --> DB : ai_hermes_usage\nminutenweise Batch-/Skip-/Fehlermetriken
 AI --> NATS : ai.messages.analyzed\nDLQ bei Fehlern
 AI ..> MinIO : optional document/media context
 Provisioner --> NATS : WAGI_EVENTS,\nWAGI_* durable consumers
 Provisioner --> ReassessmentNATS : WAGI_REASSESSMENT\nWAGI_AI_REASSESSMENT
+Provisioner --> ThreadReassessmentNATS : WAGI_THREAD_REASSESSMENT\nWAGI_AI_THREAD_REASSESSMENT
 Provisioner --> KnowledgeRebuildNATS : WAGI_KB_REBUILD\nWAGI_KB_REBUILD
 
 note right of ReassessmentNATS
@@ -106,6 +113,13 @@ note right of ReassessmentNATS
   Keine Medien- oder Connector-Jobs.
   Gedrosselt, damit Live-Verarbeitung
   unabhängig weiterlaufen kann.
+end note
+
+note right of ThreadReassessmentNATS
+  Neubewertung berechnet nur automatische
+  Thread-Kanten und Mitgliedschaften neu.
+  Manuelle Link-/Unlink-Entscheidungen
+  bleiben erhalten.
 end note
 
 note right of KnowledgeRebuildNATS

@@ -147,6 +147,8 @@ DMARC in Mailcow bzw. DNS einrichten.
 | `NATS_DLQ_MAX_AGE_DAYS` | 90 | DLQ-Aufbewahrung. |
 | `NATS_REASSESSMENT_MAX_AGE_DAYS` | 30 | Aufbewahrung des separaten Neubewertungs-Streams. |
 | `NATS_REASSESSMENT_ACK_WAIT_SECONDS` | 86400 | Ack-Zeitfenster für lange Neubewertungsjobs. |
+| `NATS_THREAD_REASSESSMENT_MAX_AGE_DAYS` | 30 | Aufbewahrung des separaten Thread-Neubewertungs-Streams. |
+| `NATS_THREAD_REASSESSMENT_ACK_WAIT_SECONDS` | 86400 | Ack-Zeitfenster für Thread-Neubewertungen. |
 | `NATS_KB_REBUILD_MAX_AGE_DAYS` | 30 | Aufbewahrung des separaten KB-Neuaufbau-Streams. |
 | `NATS_KB_REBUILD_ACK_WAIT_SECONDS` | 86400 | Ack-Zeitfenster für einen laufenden KB-Neuaufbau. |
 | `NATS_MAX_DELIVERIES` | 5 | Zustellversuche vor DLQ. |
@@ -185,6 +187,11 @@ Die Verarbeitung nutzt den isolierten JetStream-Stream
 Generation bleibt während des Aufbaus sichtbar und wird bei Fehlern nicht
 ersetzt. Dafür sind keine zusätzlichen Umgebungsvariablen erforderlich; die
 beiden `NATS_KB_REBUILD_*`-Werte steuern nur Aufbewahrung und Ack-Zeitfenster.
+
+Die Funktion **Threads neu bewerten** verwendet den separaten Stream
+`WAGI_THREAD_REASSESSMENT`. Die beiden `NATS_THREAD_REASSESSMENT_*`-Werte
+steuern dessen Aufbewahrung und Ack-Zeitfenster. Automatische Beziehungen
+werden neu berechnet; manuelles Thread-Feedback bleibt erhalten.
 
 Es gibt keinen separaten Bucket-Initialisierungscontainer. Der `media-worker` prüft den
 jeweiligen Zielbucket vor Uploads und Bereinigungen und legt ihn bei Bedarf
@@ -266,6 +273,10 @@ GramJS-Fallback.
 | `AI_PROMPT_VERSION`, `AI_KNOWLEDGE_VERSION` | cascade-v5-places | Prompt-/Schema-Versionen. |
 | `AI_CONTEXT_MAX_MESSAGES` | 80 | Kontextfenster. |
 | `AI_EVENT_WINDOW_HOURS` / `AI_EVENT_MIN_CONFIDENCE` | 36 / 0.70 | Event-Fenster und Mindestkonfidenz. |
+| `AI_THREAD_WINDOW_HOURS` | 18 | Zeitfenster, in dem Nachrichten einer Gruppe als mögliche Fortsetzung betrachtet werden. |
+| `AI_THREAD_MAX_CANDIDATES` | 6 | Maximale Zahl der stärksten Thread-Kandidaten je Nachricht. |
+| `AI_THREAD_AUTO_LINK_THRESHOLD` | 0.50 | Mindestscore für eine automatische, persistierte Thread-Beziehung. Explizite Antworten werden unabhängig davon verknüpft. |
+| `AI_THREAD_CONTEXT_THRESHOLD` | 0.42 | Niedrigere Schwelle für Thread-Kontext, der Events und Knowledge-Auswertungen unterstützen darf. |
 | `AI_EMBEDDINGS_ENABLED` | true | Embeddings aktivieren. |
 | `AI_EMBEDDING_MODEL`, `AI_EMBEDDING_CACHE_DIR` | MiniLM / fastembed cache | Modell und Cache. |
 | `AI_HF_MODEL_LOAD_INTERVAL_SECONDS` | 86400 | Mindestabstand zu Hugging Face. |
@@ -312,6 +323,25 @@ reduzieren den Bonus. Neue Begriffe werden nur für erkannte Relevanz-, Event-,
 Ort- oder Knowledge-Signale angelegt. Ausschlusswörter werden nicht automatisch
 erzeugt. Explizites Nutzerfeedback bleibt stärker als diese automatische
 Inferenz.
+
+### Zusammenhängende Nachrichten ohne Reply-Funktion
+
+Der AI-Worker führt zusätzlich eine gruppenbezogene, erklärbare Thread-Kaskade
+aus. Sie bewertet zeitliche Nähe, gemeinsame Inhaltsbegriffe, gleichen Absender
+und vorhandene Reply-Referenzen. Nur Beziehungen oberhalb von
+`AI_THREAD_AUTO_LINK_THRESHOLD` werden dauerhaft in
+`conversation_threads`, `conversation_thread_messages` und
+`message_relations` gespeichert. Der niedrigere
+`AI_THREAD_CONTEXT_THRESHOLD` darf den Kontext für Events, Action Items und
+Knowledge-Quellen erweitern, erzeugt aber noch keine dauerhafte Beziehung.
+
+Im Dashboard kann der Nutzer pro erkannter Beziehung **Zusammenhang bestätigen**
+oder **Nachricht trennen** wählen. Diese Rückmeldung wird mit Nutzer und Gruppe
+in `conversation_relation_feedback` historisiert. Eine Trennung blockiert die
+automatische Wiederaufnahme desselben Nachrichtenpaares; eine Bestätigung kann
+auch zwei Nachrichten verknüpfen, die den automatischen Schwellwert nicht
+erreicht haben. Das Feedback ist somit immer auf die betreffende Gruppe
+begrenzt und beeinflusst keine andere Gruppe.
 
 Die Seite `/admin/ai-learning` zeigt die Kategorien Relevanz, Events, Action Items,
 Orte, Knowledge-Schlüsselwort und Ausschlusswort mit ihren aktuellen und zeitlichen

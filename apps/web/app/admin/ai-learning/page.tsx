@@ -67,6 +67,39 @@ function ReassessmentCard() {
   return <section className="panel adminPanel learningReassessment"><div className="panelHead"><div><h2>{at("reassessTitle")}</h2><p className="muted">{at("reassessHint")}</p></div><button className="primaryButton" type="button" disabled={starting || latest?.status === "queued" || latest?.status === "running"} onClick={() => void start()}>{starting ? at("reassessStarting") : at("reassessStart")}</button></div>{error && <div className="notice">{error}</div>}{latest && <div className="learningJobStatus"><div><strong>{statusLabels[latest.status]}</strong><span>{latest.processedCount} verarbeitet · {latest.failedCount} fehlgeschlagen · {latest.skippedCount} übersprungen von {latest.totalCount}</span></div><div className="learningProgress"><i style={{ width: `${progress}%` }} /></div>{latest.error && <small className="statusLineError">{latest.error}</small>}</div>}</section>;
 }
 
+function ThreadReassessmentCard() {
+  const { locale } = useAppLocale();
+  const at = (key: Parameters<typeof adminTranslate>[1], values?: Record<string, string | number>) => adminTranslate(locale, key, values);
+  const [jobs, setJobs] = useState<ReassessmentJob[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const latest = jobs[0];
+  async function loadJobs() {
+    const response = await apiFetch("/api/v1/admin/ai-learning/thread-reassessment");
+    if (!response.ok) throw new Error(at("loadFailed"));
+    setJobs(await response.json() as ReassessmentJob[]);
+  }
+  useEffect(() => { void loadJobs().catch((value) => setError(value instanceof Error ? value.message : at("loadFailed"))); }, []);
+  useEffect(() => {
+    if (!latest || !["queued", "running"].includes(latest.status)) return;
+    const timer = window.setInterval(() => { void loadJobs().catch(() => undefined); }, 3000);
+    return () => window.clearInterval(timer);
+  }, [latest?.id, latest?.status]);
+  async function start() {
+    if (!window.confirm(at("threadReassessConfirm"))) return;
+    setStarting(true); setError(null);
+    try {
+      const response = await apiFetch("/api/v1/admin/ai-learning/thread-reassessment", { method: "POST" });
+      const body = await response.json().catch(() => null) as { error?: string } | null;
+      if (!response.ok) throw new Error(response.status === 409 ? at("threadReassessConflict") : body?.error ?? at("threadReassessStart"));
+      await loadJobs();
+    } catch (value) { setError(value instanceof Error ? value.message : at("failedStatus")); } finally { setStarting(false); }
+  }
+  const progress = latest && latest.totalCount > 0 ? Math.min(100, Math.round(((latest.processedCount + latest.failedCount + latest.skippedCount) / latest.totalCount) * 100)) : 0;
+  const statusLabels = { queued: at("queuedStatus"), running: at("runningStatus"), completed: at("completedStatus"), failed: at("failedStatus"), cancelled: at("cancelledStatus") };
+  return <section className="panel adminPanel learningReassessment"><div className="panelHead"><div><h2>{at("threadReassessTitle")}</h2><p className="muted">{at("threadReassessHint")}</p></div><button className="primaryButton" type="button" disabled={starting || latest?.status === "queued" || latest?.status === "running"} onClick={() => void start()}>{starting ? at("threadReassessStarting") : at("threadReassessStart")}</button></div>{error && <div className="notice">{error}</div>}{latest && <div className="learningJobStatus"><div><strong>{statusLabels[latest.status]}</strong><span>{at("messagesProgress", { processed: latest.processedCount, total: latest.totalCount, failed: latest.failedCount, skipped: latest.skippedCount })}</span></div><div className="learningProgress"><i style={{ width: `${progress}%` }} /></div>{latest.error && <small className="statusLineError">{latest.error}</small>}</div>}</section>;
+}
+
 function AdminAILearningOverview() {
   const { locale } = useAppLocale();
   const at = (key: Parameters<typeof adminTranslate>[1], values?: Record<string, string | number>) => adminTranslate(locale, key, values);
@@ -78,7 +111,7 @@ function AdminAILearningOverview() {
   const categories = (Object.keys(categoryNames) as Category[]).map((category) => summary?.categories.find((item) => item.category === category) ?? { category, count: 0, activeCount: 0, learned24h: 0, learned7d: 0, learned30d: 0 });
   const graphPoints = period === "24h" ? summary?.hourly ?? [] : summary?.daily ?? [];
   const periodLabels: Record<LearningPeriod, string> = { "24h": at("last24h"), "7d": at("last7d"), "30d": at("lastMonth") };
-  return <main className="shell adminPage"><header className="pageHeading"><div><p className="eyebrow">CONXTOR</p><h1>{at("learningTitle")}</h1><p className="muted">{at("learningHint")}</p></div></header>{error && <div className="notice">{error}</div>}<ReassessmentCard /><section className="panel adminPanel"><div className="panelHead"><div><h2>{at("learningCategories")}</h2><p className="muted">{at("learningCategoriesHint")}</p></div><label className="learningLanguagePicker"><span>{at("language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value as Language)}>{Object.entries(languageNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div><div className="learningCategoryGrid">{categories.map((item) => <Link className="learningCategoryCard" href={`/admin/ai-learning/${item.category}?language=${language}`} key={item.category}><span className="learningCategoryAccent" style={{ background: categoryColors[item.category] }} /><strong>{adminCategoryName(locale, item.category)}</strong><small>{adminCategoryDescription(locale, item.category)}</small><div className="learningCategoryFacts"><b>{item.count}</b><span>{at("termCount", { count: item.activeCount })}</span></div><div className="learningCategoryPeriods"><span>24 h <b>{item.learned24h}</b></span><span>7 Tage <b>{item.learned7d}</b></span><span>1 Monat <b>{item.learned30d}</b></span></div></Link>)}</div></section><section className="panel adminPanel"><div className="panelHead"><div><h2>{at("learnedOverTime")}</h2><p className="muted">{at("learnedOverTimeHint")}</p></div><div className="learningChartControls"><span>{languageNames[language]}</span><label><span className="srOnly">{at("period")}</span><select value={period} onChange={(event) => setPeriod(event.target.value as LearningPeriod)}>{Object.entries(periodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div></div><LearningSummaryGraph points={graphPoints} period={period} locale={locale} /><div className="learningMetricStrip">{categories.map((item) => <div key={item.category}><strong>{item.learned24h}</strong><span>{adminCategoryName(locale, item.category)} · 24 h</span><small>7 Tage: {item.learned7d} · 1 Monat: {item.learned30d}</small></div>)}</div></section></main>;
+  return <main className="shell adminPage"><header className="pageHeading"><div><p className="eyebrow">CONXTOR</p><h1>{at("learningTitle")}</h1><p className="muted">{at("learningHint")}</p></div></header>{error && <div className="notice">{error}</div>}<ReassessmentCard /><ThreadReassessmentCard /><section className="panel adminPanel"><div className="panelHead"><div><h2>{at("learningCategories")}</h2><p className="muted">{at("learningCategoriesHint")}</p></div><label className="learningLanguagePicker"><span>{at("language")}</span><select value={language} onChange={(event) => setLanguage(event.target.value as Language)}>{Object.entries(languageNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div><div className="learningCategoryGrid">{categories.map((item) => <Link className="learningCategoryCard" href={`/admin/ai-learning/${item.category}?language=${language}`} key={item.category}><span className="learningCategoryAccent" style={{ background: categoryColors[item.category] }} /><strong>{adminCategoryName(locale, item.category)}</strong><small>{adminCategoryDescription(locale, item.category)}</small><div className="learningCategoryFacts"><b>{item.count}</b><span>{at("termCount", { count: item.activeCount })}</span></div><div className="learningCategoryPeriods"><span>24 h <b>{item.learned24h}</b></span><span>7 Tage <b>{item.learned7d}</b></span><span>1 Monat <b>{item.learned30d}</b></span></div></Link>)}</div></section><section className="panel adminPanel"><div className="panelHead"><div><h2>{at("learnedOverTime")}</h2><p className="muted">{at("learnedOverTimeHint")}</p></div><div className="learningChartControls"><span>{languageNames[language]}</span><label><span className="srOnly">{at("period")}</span><select value={period} onChange={(event) => setPeriod(event.target.value as LearningPeriod)}>{Object.entries(periodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div></div><LearningSummaryGraph points={graphPoints} period={period} locale={locale} /><div className="learningMetricStrip">{categories.map((item) => <div key={item.category}><strong>{item.learned24h}</strong><span>{adminCategoryName(locale, item.category)} · 24 h</span><small>7 Tage: {item.learned7d} · 1 Monat: {item.learned30d}</small></div>)}</div></section></main>;
 }
 
 export default function AdminAILearningPage() { return <AuthGate><AdminAILearningOverview /></AuthGate>; }

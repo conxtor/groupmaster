@@ -291,8 +291,48 @@ entity ai_feedback {
   user_id : uuid <<FK>>
   group_id : text <<FK>>
   message_id : uuid <<FK>>
-  target_type : relevance | event | place | knowledge
+  target_type : relevance | event | place | knowledge | thread
   decision : accept | reject | correct
+}
+
+entity conversation_threads {
+  * id : uuid <<PK>>
+  --
+  group_id : text <<FK>>
+  title : text
+  confidence : numeric
+  first_message_at / last_message_at : timestamptz
+}
+
+entity conversation_thread_messages {
+  * thread_id : uuid <<PK/FK>>
+  * message_id : uuid <<PK/FK>>
+  --
+  role : root | context | reply
+  confidence : numeric
+  source : heuristic | user | llm
+  evidence : jsonb
+}
+
+entity message_relations {
+  * source_message_id : uuid <<PK/FK>>
+  * target_message_id : uuid <<PK/FK>>
+  * relation_type : same_thread | continues | updates | supports | contradicts
+  --
+  group_id : text <<FK>>
+  confidence : numeric
+  source : heuristic | user | llm
+  evidence : jsonb
+}
+
+entity conversation_relation_feedback {
+  * id : uuid <<PK>>
+  --
+  user_id : uuid <<FK>>
+  group_id : text <<FK>>
+  message_id / related_message_id : uuid <<FK>>
+  decision : link | unlink
+  created_at : timestamptz
 }
 
 entity ai_learning_terms {
@@ -361,6 +401,18 @@ entity replay_jobs {
 }
 
 entity ai_reassessment_jobs {
+  * id : uuid <<PK>>
+  --
+  requested_by : uuid <<FK>>
+  status : queued | running | completed | failed
+  total_count : int
+  processed_count : int
+  failed_count : int
+  skipped_count : int
+  created_at/updated_at : timestamptz
+}
+
+entity thread_reassessment_jobs {
   * id : uuid <<PK>>
   --
   requested_by : uuid <<FK>>
@@ -446,8 +498,17 @@ knowledge_rebuild_jobs ..> knowledge_generation_state : switches on success
 knowledge_items ||--o{ knowledge_items : parent/detail
 messages ||--o{ ai_feedback
 app_users ||--o{ ai_feedback
+wa_groups ||--o{ conversation_threads
+conversation_threads ||--o{ conversation_thread_messages
+messages ||--o{ conversation_thread_messages
+messages ||--o{ message_relations
+wa_groups ||--o{ message_relations
+app_users ||--o{ conversation_relation_feedback
+wa_groups ||--o{ conversation_relation_feedback
+messages ||--o{ conversation_relation_feedback
 app_users ||--o{ replay_jobs
 app_users ||--o{ ai_reassessment_jobs
+app_users ||--o{ thread_reassessment_jobs
 ai_learning_terms ||--o{ ai_learning_term_history
 wa_groups ||--o{ ai_learning_term_history
 wa_groups ..> ai_place_resolution_cache : language-scoped cache

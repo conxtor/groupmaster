@@ -161,6 +161,12 @@ const german = {
   reassessStart: "Alle Nachrichten neu bewerten",
   reassessStarting: "Startet …",
   reassessConfirm: "Alle gespeicherten Nachrichten mit dem aktuellen Lernmodell neu bewerten? Medien werden nicht erneut verarbeitet.",
+  threadReassessTitle: "Threads neu bewerten",
+  threadReassessHint: "Ermittelt die zusammengehörigen Nachrichten mit der aktuellen Thread-Heuristik neu. Nutzerfeedback bleibt erhalten.",
+  threadReassessStart: "Threads neu bewerten",
+  threadReassessStarting: "Thread-Neubewertung startet …",
+  threadReassessConfirm: "Alle Nachrichten-Threads mit der aktuellen Heuristik neu bewerten? Manuelles Nutzerfeedback bleibt erhalten.",
+  threadReassessConflict: "Eine Nachrichten- oder Thread-Neubewertung läuft bereits.",
   learningCategories: "Lernbegriffe nach Kategorie",
   learningCategoriesHint: "Sprache auswählen. Eine Kategorie öffnet die vollständige Verwaltung mit Suche, Paginierung und Mehrfachauswahl.",
   language: "Sprache",
@@ -281,8 +287,44 @@ const hermesTranslations: Record<Locale, Partial<Record<AdminKey, string>>> = {
   },
 };
 
+const threadReassessmentTranslations: Record<Locale, Partial<Record<AdminKey, string>>> = {
+  de: {},
+  es: {
+    threadReassessTitle: "Reevaluar hilos",
+    threadReassessHint: "Vuelve a identificar los mensajes relacionados con la heurística actual. El feedback del usuario se conserva.",
+    threadReassessStart: "Reevaluar hilos",
+    threadReassessStarting: "Iniciando reevaluación de hilos …",
+    threadReassessConfirm: "¿Reevaluar todos los hilos con la heurística actual? El feedback manual se conservará.",
+    threadReassessConflict: "Ya hay una reevaluación de mensajes o hilos en curso.",
+  },
+  ca: {
+    threadReassessTitle: "Reavaluar fils",
+    threadReassessHint: "Torna a identificar els missatges relacionats amb l'heurística actual. El feedback de l'usuari es conserva.",
+    threadReassessStart: "Reavalua fils",
+    threadReassessStarting: "S'està iniciant la reavaluació de fils …",
+    threadReassessConfirm: "Vols reavaluar tots els fils amb l'heurística actual? El feedback manual es conservarà.",
+    threadReassessConflict: "Ja hi ha una reavaluació de missatges o fils en curs.",
+  },
+  en: {
+    threadReassessTitle: "Reassess threads",
+    threadReassessHint: "Rebuilds related-message detection with the current thread heuristic. User feedback is preserved.",
+    threadReassessStart: "Reassess threads",
+    threadReassessStarting: "Starting thread reassessment …",
+    threadReassessConfirm: "Reassess all message threads with the current heuristic? Manual user feedback will be preserved.",
+    threadReassessConflict: "A message or thread reassessment is already running.",
+  },
+  fr: {
+    threadReassessTitle: "Réévaluer les fils",
+    threadReassessHint: "Réidentifie les messages liés avec l'heuristique actuelle. Les retours des utilisateurs sont conservés.",
+    threadReassessStart: "Réévaluer les fils",
+    threadReassessStarting: "Démarrage de la réévaluation des fils …",
+    threadReassessConfirm: "Réévaluer tous les fils avec l'heuristique actuelle ? Les retours manuels seront conservés.",
+    threadReassessConflict: "Une réévaluation des messages ou des fils est déjà en cours.",
+  },
+};
+
 export function adminTranslate(locale: Locale, key: AdminKey, values: TranslationValues = {}) {
-  const template = hermesTranslations[locale][key] ?? translations[locale][key] ?? german[key] ?? key;
+  const template = threadReassessmentTranslations[locale][key] ?? hermesTranslations[locale][key] ?? translations[locale][key] ?? german[key] ?? key;
   return template.replace(/\{(\w+)\}/g, (_, name: string) => String(values[name] ?? `{${name}}`));
 }
 

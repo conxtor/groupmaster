@@ -341,6 +341,24 @@ erneute Analyse der betroffenen Nachricht aus. Bei Knowledge-Korrekturen mit
 `alias`, `canonicalKey` und optional `topicKey` wird zusätzlich ein
 gruppengebundener kanonischer Begriff gelernt.
 
+### Thread-Erkennung und gruppenbezogenes Beziehungsfeedback
+
+Nachrichten werden zusätzlich gruppenbezogen auf implizite Zusammenhänge
+geprüft, auch wenn Nutzer keine Reply-Funktion verwenden. Die lokale Kaskade
+kombiniert zeitliche Nähe, gemeinsame Inhaltsbegriffe, Absender und vorhandene
+Reply-Referenzen. Hohe Treffer werden in PostgreSQL als erklärbare
+`conversation_threads` und `message_relations` gespeichert; dieselben
+Beziehungen können dadurch Events, Action Items und Knowledge-Quellen gemeinsam
+stützen, ohne unterschiedliche Gruppen zu vermischen.
+
+Im Dashboard erscheinen erkannte Thread-Nachrichten zusammengefasst. Die
+Aktionen **Zusammenhang bestätigen** und **Nachricht trennen** speichern ein
+historisches Feedback pro Nutzer und Gruppe. Eine Trennung wird bei späteren
+Analysen als dauerhafte Ausnahme berücksichtigt; eine Bestätigung kann auch
+eine Beziehung unterhalb der automatischen Schwelle herstellen. Die relevanten
+Schwellen und das Zeitfenster sind über `AI_THREAD_*` in
+`.env.example`, `.env.example-dockge` und `CONFIGURATION.md` konfigurierbar.
+
 Die neue Lernschicht liegt in `ai_learning_terms` und ist nach Sprache und
 optional nach Gruppe gebunden. Globale Systembegriffe bilden die Defaults;
 Feedback aus einer Gruppe erzeugt zusätzliche positive oder negative
@@ -661,6 +679,7 @@ Bootstrap-Administrator wird beim ersten erfolgreichen API-Start angelegt.
 - `GET /api/v1/admin/ai-learning/summary?language=de` für Kategorieanzahl und Lernmetriken
 - `POST /api/v1/admin/ai-learning/bulk` mit `{ "ids": ["..."], "action": "enable|disable|delete" }` für Mehrfachaktionen
 - `GET/POST /api/v1/admin/ai-learning/reassessment` für Status und Start der vollständigen Neubewertung
+- `GET/POST /api/v1/admin/ai-learning/thread-reassessment` für Status und Start der Neubewertung der Nachrichten-Threads
 - Admin-Betriebsübersicht unter `/admin`; die Benutzerverwaltung liegt separat unter `/admin/users`, das Lernmodell unter `/admin/ai-learning`.
 - `GET /api/v1/admin/observability?aiPage=1&aiPageSize=20` liefert die paginierte KI-Verarbeitungshistorie. Die dort angezeigte Dauer ist ausschließlich aktive Worker-Zeit; Warteschlange, Retry-Backoff und Neustartwartezeit werden nicht eingerechnet.
 - `GET /healthz` und `GET /readyz`
@@ -675,6 +694,7 @@ Nachricht wirken als konservativ gedeckelte, gewichtete Anker; Benutzerfeedback
 bleibt stärker. Ausschlusswörter werden nicht automatisch gelernt.
 - `GET /api/v1/messages?limit=100` (alle Nachrichten) oder mit
   `&relevant=true` (nur relevante Nachrichten)
+- `POST /api/v1/ai/feedback` mit `targetType=thread`, `targetKey=<relatedMessageId>` und `decision=accept|reject` für gruppenbezogenes Thread-Feedback
 - `GET /api/v1/knowledge` oder `GET /api/v1/knowledge?groupId=<selected-group>`
 - `POST /api/v1/audio/jobs` mit `messageId`, `mediaKey`, optional `mediaMime`
 - `GET /api/v1/replays` zeigt die eigenen Replay-Jobs
@@ -697,6 +717,13 @@ Consumer `WAGI_AI_REASSESSMENT`; dadurch bleibt der Live-Stream
 `WAGI_EVENTS` für neue Nachrichten und Medien getrennt. Ein konfigurierbarer
 Abstand zwischen den Nachrichten verhindert zusätzlich, dass die laufende
 Analyse unnötig verdrängt wird.
+
+Die Funktion **Threads neu bewerten** arbeitet unabhängig davon im separaten
+JetStream-Stream `WAGI_THREAD_REASSESSMENT` mit dem Durable Consumer
+`WAGI_AI_THREAD_REASSESSMENT`. Sie löscht und erstellt ausschließlich
+automatisch erkannte Thread-Beziehungen und Mitgliedschaften neu. Manuelle
+Verknüpfungen und Trennungen aus `conversation_relation_feedback` bleiben
+erhalten und werden bei der Neubewertung weiterhin berücksichtigt.
 
 ### Verarbeitung, Wiederanlauf und Dokumente
 

@@ -80,6 +80,19 @@ type aiReassessmentJobView struct {
 	CompletedAt    *time.Time `json:"completedAt,omitempty"`
 }
 
+type threadReassessmentJobView struct {
+	ID             string     `json:"id"`
+	Status         string     `json:"status"`
+	TotalCount     int        `json:"totalCount"`
+	ProcessedCount int        `json:"processedCount"`
+	FailedCount    int        `json:"failedCount"`
+	SkippedCount   int        `json:"skippedCount"`
+	Error          *string    `json:"error,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	StartedAt      *time.Time `json:"startedAt,omitempty"`
+	CompletedAt    *time.Time `json:"completedAt,omitempty"`
+}
+
 type aiLearningTermRequest struct {
 	GroupID        string  `json:"groupId"`
 	Language       string  `json:"language"`
@@ -129,6 +142,10 @@ func (a *app) adminAILearning(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "reassessment" {
 		a.adminAILearningReassessment(w, r)
+		return
+	}
+	if path == "thread-reassessment" {
+		a.adminThreadReassessment(w, r)
 		return
 	}
 	if path == "bulk" {
@@ -587,6 +604,91 @@ func (a *app) adminAILearningReassessment(w http.ResponseWriter, r *http.Request
 	if _, err := a.js.Publish("ai.reassessment.requested", payload); err != nil {
 		_, _ = a.db.Exec(r.Context(), "UPDATE ai_reassessment_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", view.ID, "event bus unavailable")
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "reassessment event could not be published"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, view)
+}
+
+func scanThreadReassessmentJob(row interface{ Scan(...any) error }) (threadReassessmentJobView, error) {
+	var view threadReassessmentJobView
+	err := row.Scan(&view.ID, &view.Status, &view.TotalCount, &view.ProcessedCount, &view.FailedCount, &view.SkippedCount, &view.Error, &view.CreatedAt, &view.StartedAt, &view.CompletedAt)
+	return view, err
+}
+
+func (a *app) adminThreadReassessment(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		rows, err := a.db.Query(r.Context(), `
+			SELECT id::text, status, total_count, processed_count, failed_count, skipped_count,
+			       error, created_at, started_at, completed_at
+			FROM thread_reassessment_jobs ORDER BY created_at DESC LIMIT 20`)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "thread reassessment jobs unavailable"})
+			return
+		}
+		defer rows.Close()
+		jobs := make([]threadReassessmentJobView, 0, 20)
+		for rows.Next() {
+			job, scanErr := scanThreadReassessmentJob(rows)
+			if scanErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "thread reassessment jobs unavailable"})
+				return
+			}
+			jobs = append(jobs, job)
+		}
+		writeJSON(w, http.StatusOK, jobs)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("allow", http.MethodGet+", "+http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var active threadReassessmentJobView
+	activeRow := a.db.QueryRow(r.Context(), `
+		SELECT id::text, status, total_count, processed_count, failed_count, skipped_count,
+		       error, created_at, started_at, completed_at
+		FROM thread_reassessment_jobs WHERE status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`)
+	if job, err := scanThreadReassessmentJob(activeRow); err == nil {
+		active = job
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "thread reassessment already running", "job": active})
+		return
+	}
+	activeMessageRow := a.db.QueryRow(r.Context(), `
+		SELECT id::text, status, total_count, processed_count, failed_count, skipped_count,
+		       error, created_at, started_at, completed_at
+		FROM ai_reassessment_jobs WHERE status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`)
+	if _, err := scanAILearningReassessmentJob(activeMessageRow); err == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "message reassessment already running"})
+		return
+	}
+	var total int
+	if err := a.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM messages m JOIN wa_groups g ON g.id=m.group_id`).Scan(&total); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "thread message count unavailable"})
+		return
+	}
+	user, ok := a.requireUser(w, r)
+	if !ok {
+		return
+	}
+	var view threadReassessmentJobView
+	err := a.db.QueryRow(r.Context(), `
+		INSERT INTO thread_reassessment_jobs (requested_by, total_count)
+		VALUES ($1::uuid,$2)
+		RETURNING id::text, status, total_count, processed_count, failed_count, skipped_count,
+		          error, created_at, started_at, completed_at`, user.ID, total).
+		Scan(&view.ID, &view.Status, &view.TotalCount, &view.ProcessedCount, &view.FailedCount, &view.SkippedCount, &view.Error, &view.CreatedAt, &view.StartedAt, &view.CompletedAt)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "thread reassessment could not be created"})
+		return
+	}
+	event := map[string]any{
+		"id": uuid.NewString(), "type": "ai.threads.reassessment.requested", "occurredAt": time.Now().UTC(), "source": "api",
+		"data": map[string]any{"threadReassessmentId": view.ID, "totalCount": total},
+	}
+	payload, _ := json.Marshal(event)
+	if _, err := a.js.Publish("ai.threads.reassessment.requested", payload); err != nil {
+		_, _ = a.db.Exec(r.Context(), "UPDATE thread_reassessment_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", view.ID, "event bus unavailable")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "thread reassessment event could not be published"})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, view)
