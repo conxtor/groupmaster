@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -54,6 +55,7 @@ type knowledgeRebuildJobView struct {
 	StartedAt      *time.Time `json:"startedAt,omitempty"`
 	CompletedAt    *time.Time `json:"completedAt,omitempty"`
 	UpdatedAt      time.Time  `json:"updatedAt"`
+	ReplaceExisting bool       `json:"replaceExisting"`
 }
 
 func parseKnowledgeTopicPage(value string, fallback int) int {
@@ -127,7 +129,7 @@ func scanKnowledgeTopicDefinition(row interface{ Scan(...any) error }) (knowledg
 
 func scanKnowledgeRebuildJob(row interface{ Scan(...any) error }) (knowledgeRebuildJobView, error) {
 	var view knowledgeRebuildJobView
-	err := row.Scan(&view.ID, &view.Status, &view.TotalCount, &view.ProcessedCount, &view.FailedCount, &view.SkippedCount, &view.Error, &view.CreatedAt, &view.StartedAt, &view.CompletedAt, &view.UpdatedAt)
+	err := row.Scan(&view.ID, &view.Status, &view.TotalCount, &view.ProcessedCount, &view.FailedCount, &view.SkippedCount, &view.Error, &view.CreatedAt, &view.StartedAt, &view.CompletedAt, &view.UpdatedAt, &view.ReplaceExisting)
 	return view, err
 }
 
@@ -275,7 +277,7 @@ func (a *app) deleteKnowledgeTopic(w http.ResponseWriter, r *http.Request, id uu
 
 func (a *app) adminKnowledgeRebuild(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		rows, err := a.db.Query(r.Context(), `SELECT id::text, status, total_count, processed_count, failed_count, skipped_count, error, created_at, started_at, completed_at, updated_at
+		rows, err := a.db.Query(r.Context(), `SELECT id::text, status, total_count, processed_count, failed_count, skipped_count, error, created_at, started_at, completed_at, updated_at, replace_existing
 			FROM knowledge_rebuild_jobs ORDER BY created_at DESC LIMIT 20`)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "knowledge rebuild jobs unavailable"})
@@ -299,8 +301,15 @@ func (a *app) adminKnowledgeRebuild(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
+	var request struct {
+		ReplaceExisting bool `json:"replaceExisting"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil && err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
 	var active knowledgeRebuildJobView
-	activeRow := a.db.QueryRow(r.Context(), `SELECT id::text, status, total_count, processed_count, failed_count, skipped_count, error, created_at, started_at, completed_at, updated_at
+	activeRow := a.db.QueryRow(r.Context(), `SELECT id::text, status, total_count, processed_count, failed_count, skipped_count, error, created_at, started_at, completed_at, updated_at, replace_existing
 		FROM knowledge_rebuild_jobs WHERE status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`)
 	if _, err := scanKnowledgeRebuildJob(activeRow); err == nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "knowledge rebuild already running", "job": active})
@@ -316,14 +325,14 @@ func (a *app) adminKnowledgeRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var view knowledgeRebuildJobView
-	err := a.db.QueryRow(r.Context(), `INSERT INTO knowledge_rebuild_jobs (requested_by, total_count) VALUES ($1::uuid,$2)
-		RETURNING id::text, status, total_count, processed_count, failed_count, skipped_count, error, created_at, started_at, completed_at, updated_at`, user.ID, total).
-		Scan(&view.ID, &view.Status, &view.TotalCount, &view.ProcessedCount, &view.FailedCount, &view.SkippedCount, &view.Error, &view.CreatedAt, &view.StartedAt, &view.CompletedAt, &view.UpdatedAt)
+	err := a.db.QueryRow(r.Context(), `INSERT INTO knowledge_rebuild_jobs (requested_by, total_count, replace_existing) VALUES ($1::uuid,$2,$3)
+		RETURNING id::text, status, total_count, processed_count, failed_count, skipped_count, error, created_at, started_at, completed_at, updated_at, replace_existing`, user.ID, total, request.ReplaceExisting).
+		Scan(&view.ID, &view.Status, &view.TotalCount, &view.ProcessedCount, &view.FailedCount, &view.SkippedCount, &view.Error, &view.CreatedAt, &view.StartedAt, &view.CompletedAt, &view.UpdatedAt, &view.ReplaceExisting)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "knowledge rebuild could not be created"})
 		return
 	}
-	event := map[string]any{"id": uuid.NewString(), "type": "knowledge.rebuild.requested", "occurredAt": time.Now().UTC(), "source": "api", "data": map[string]any{"rebuildId": view.ID, "totalCount": total}}
+	event := map[string]any{"id": uuid.NewString(), "type": "knowledge.rebuild.requested", "occurredAt": time.Now().UTC(), "source": "api", "data": map[string]any{"rebuildId": view.ID, "totalCount": total, "replaceExisting": request.ReplaceExisting}}
 	payload, _ := json.Marshal(event)
 	if _, err := a.js.Publish("knowledge.rebuild.requested", payload); err != nil {
 		_, _ = a.db.Exec(r.Context(), "UPDATE knowledge_rebuild_jobs SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid", view.ID, "event bus unavailable")

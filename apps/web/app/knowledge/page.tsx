@@ -67,6 +67,12 @@ function collectKnowledgeSources(items: KnowledgeItem[], target: Map<string, Kno
   }
 }
 
+function knowledgeMediaSources(items: KnowledgeItem[]) {
+  const sources = new Map<string, KnowledgeSourceMessage>();
+  collectKnowledgeSources(items, sources);
+  return [...sources.values()].filter((source) => source.kind === "document" || source.kind === "image");
+}
+
 function stabilizeKnowledgeItem(item: KnowledgeItem, previousSources: Map<string, KnowledgeSourceMessage>): KnowledgeItem {
   return {
     ...item,
@@ -136,19 +142,21 @@ function knowledgeSourceKind(kind: string): TranslationKey {
   return "text";
 }
 
-function shortDocumentSummary(value: string | undefined, fallback: string) {
-  const normalized = (value ?? "").replace(/\s+/g, " ").trim();
+function shortMediaExcerpt(value: string | undefined, fallback: string) {
+  const normalized = (value ?? "").replace(/\[Gespeicherter Medieninhalt\]/g, "").replace(/\s+/g, " ").trim();
   if (!normalized) return fallback;
-  return normalized.length > 240 ? `${normalized.slice(0, 237).trimEnd()}…` : normalized;
+  return normalized.length > 280 ? `${normalized.slice(0, 277).trimEnd()}…` : normalized;
 }
 
-function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSourceMessage; locale: Locale; t: Translator }) {
+function KnowledgeSourceMessage({ source, locale, t, showOriginalLink = true }: { source: KnowledgeSourceMessage; locale: Locale; t: Translator; showOriginalLink?: boolean }) {
   const preview = resolveMediaUrl(source.thumbnailUrl || source.imageUrl);
   const original = resolveMediaUrl(source.mediaUrl || source.imageUrl || source.thumbnailUrl);
   const video = resolveMediaUrl(source.mediaUrl);
   const displayText = source.kind === "document"
-    ? `${t("documentSummary")}: ${shortDocumentSummary(source.documentSummary || source.text, t("noText"))}`
-    : source.kind === "audio" && source.transcript ? source.transcript : source.text || source.transcript || t("noText");
+    ? `${t("documentSummary")}: ${shortMediaExcerpt(source.documentSummary || source.text, t("noText"))}`
+    : source.kind === "image"
+      ? shortMediaExcerpt(source.text || source.documentSummary, t("noText"))
+      : source.kind === "audio" && source.transcript ? source.transcript : source.text || source.transcript || t("noText");
   const [imageOpen, setImageOpen] = useState(false);
   const [videoOpen, setVideoOpen] = useState(false);
 
@@ -169,7 +177,7 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
       <time dateTime={source.receivedAt}>{formatKnowledgeDate(source.receivedAt, locale)}</time>
     </div>
     <p className="knowledgeSourceMessageText"><LinkifiedText text={displayText} /></p>
-    {source.kind === "document" && original && <p className="documentLink"><a href={original} target="_blank" rel="noopener noreferrer">{t("openDocument")}</a></p>}
+    {showOriginalLink && source.kind === "document" && original && <p className="documentLink"><a href={original} target="_blank" rel="noopener noreferrer">{t("openDocument")}</a></p>}
     {source.kind === "audio" && original && <AudioPlayer messageId={source.id} src={original} label={t("originalAudio")} unsupported={t("audioUnsupported")} />}
     {source.kind === "image" && preview && <figure className="knowledgeSourceMessageFigure">
       <button className="imagePreviewButton" type="button" onClick={() => setImageOpen(true)} aria-label={t("openImage")}>
@@ -198,6 +206,10 @@ function KnowledgeSourceMessage({ source, locale, t }: { source: KnowledgeSource
 
 function KnowledgeBranch({ item, locale, t, depth = 0 }: { item: KnowledgeItem; locale: Locale; t: Translator; depth?: number }) {
   const children = sortKnowledgeItems(item.children ?? []);
+  const mediaSources = knowledgeMediaSources([item]);
+  const mediaLinks = mediaSources.filter((source) => source.kind === "document" && Boolean(source.mediaUrl || source.imageUrl || source.thumbnailUrl));
+  const hasStoredMediaContent = item.content.includes("[Gespeicherter Medieninhalt]");
+  const displayContent = hasStoredMediaContent || mediaSources.length > 0 ? shortMediaExcerpt(item.content, t("noText")) : item.content;
   const [expanded, setExpanded] = useState(true);
   return <div className={`knowledgeNode knowledgeNodeDepth${Math.min(depth, 3)}`}>
     <div className="knowledgeNodeHead">
@@ -208,13 +220,17 @@ function KnowledgeBranch({ item, locale, t, depth = 0 }: { item: KnowledgeItem; 
       </div>
       <span className="knowledgeNodeConfidence">{Math.round(item.confidence * 100)}%</span>
     </div>
-    <p className="knowledgeNodeContent"><LinkifiedText text={item.content} /></p>
+    <p className="knowledgeNodeContent"><LinkifiedText text={displayContent} /></p>
+    {mediaLinks.length > 0 && <div className="documentLink">{mediaLinks.map((source) => {
+      const original = resolveMediaUrl(source.mediaUrl || source.imageUrl || source.thumbnailUrl);
+      return original ? <a key={`${source.id}-${source.kind}`} href={original} target="_blank" rel="noopener noreferrer">{t("openDocument")}</a> : null;
+    })}</div>}
     <div className="knowledgeNodeMeta">
       <span>{t("knowledgeSources", { count: item.sourceMessageIds.length })}</span>
       {children.length > 0 && <span>{t("knowledgeChildren", { count: children.length })}</span>}
     </div>
     {item.sourceMessages && item.sourceMessages.length > 0 && <div className="knowledgeSourceMessages">
-      {item.sourceMessages.map((source) => <KnowledgeSourceMessage key={source.id} source={source} locale={locale} t={t} />)}
+      {item.sourceMessages.map((source) => <KnowledgeSourceMessage key={source.id} source={source} locale={locale} t={t} showOriginalLink={mediaLinks.length === 0} />)}
     </div>}
     {expanded && children.length > 0 && <div className="knowledgeNodeChildren">{children.map((child) => <KnowledgeBranch key={child.id} item={child} locale={locale} t={t} depth={depth + 1} />)}</div>}
   </div>;
@@ -222,9 +238,18 @@ function KnowledgeBranch({ item, locale, t, depth = 0 }: { item: KnowledgeItem; 
 
 function KnowledgeTopicBranch({ topic, locale, t, nested = false }: { topic: KnowledgeTopic; locale: Locale; t: Translator; nested?: boolean }) {
   const items = sortKnowledgeItems(topic.items ?? []);
+  const mediaSources = knowledgeMediaSources(items);
+  const mediaLinks = mediaSources.filter((source) => source.kind === "document" && Boolean(source.mediaUrl || source.imageUrl || source.thumbnailUrl));
+  const displaySummary = mediaSources.length > 0 || topic.summary.includes("[Gespeicherter Medieninhalt]")
+    ? shortMediaExcerpt(topic.summary, t("noText"))
+    : topic.summary;
   return <section className={nested ? "knowledgeSubtopic" : "knowledgeRootTopic"}>
     <div className="knowledgeCardHead"><div><p className="eventGroup">{nested ? topic.title : topic.groupSubject}</p>{nested ? <h3><LinkifiedText text={topic.title} /></h3> : <h2><LinkifiedText text={topic.title} /></h2>}</div><span className="confidenceBadge">{Math.round(topic.confidence * 100)}%</span></div>
-    <p className="knowledgeSummary"><LinkifiedText text={topic.summary} /></p>
+    <p className="knowledgeSummary"><LinkifiedText text={displaySummary} /></p>
+    {mediaLinks.length > 0 && <div className="documentLink">{mediaLinks.map((source) => {
+      const original = resolveMediaUrl(source.mediaUrl || source.imageUrl || source.thumbnailUrl);
+      return original ? <a key={`${source.id}-${source.kind}`} href={original} target="_blank" rel="noopener noreferrer">{t("openDocument")}</a> : null;
+    })}</div>}
     <div className="knowledgeMeta"><span>{t("knowledgeSources", { count: topic.sourceMessageIds.length })}</span><span>{t("knowledgeItems", { count: countKnowledgeItems(items) })}</span></div>
     <div className="knowledgeHierarchy">{items.map((item) => <KnowledgeBranch key={item.id} item={item} locale={locale} t={t} />)}</div>
   </section>;

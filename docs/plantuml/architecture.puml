@@ -123,10 +123,18 @@ note right of ThreadReassessmentNATS
 end note
 
 note right of KnowledgeRebuildNATS
-  Nachrichtentexte, gespeicherte Transkripte,
-  OCR und Metadaten werden in einer neuen
-  Generation verarbeitet. Die alte Generation
+  Jede gespeicherte Nachricht der
+  ausgewählten Gruppen sowie vorhandene
+  Transkripte, OCR und Metadaten werden in
+  einer neuen Generation verarbeitet. Die alte Generation
   bleibt aktiv, bis der Lauf erfolgreich endet.
+  replaceExisting=false ist der Standard.
+  Bei replaceExisting=true werden nur
+  automatisch gelernte KB-Schlüsselwörter
+  neu aufgebaut; System-/Admin-Begriffe und
+  manuelle Ausschlüsse bleiben erhalten.
+  Die alte Generation wird erst nach Erfolg
+  entfernt. Keine Medienjobs.
 end note
 
 note right of WAConnector

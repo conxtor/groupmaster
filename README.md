@@ -52,6 +52,13 @@ Compose-Container werden Datenbank, NATS und MinIO über die internen
 Servicenamen erreicht; die Werte in `.env.example` sind für lokale Prozesse
 außerhalb von Compose gedacht.
 
+Die Laufzeitkonfiguration der Services liegt in separaten Env-Dateien. Für den
+lokalen Stack liegen sie in [`infra/docker/env/`](infra/docker/env/), für das
+Dockge-Deployment in [`env-dockge/`](env-dockge/). PostgreSQL und `migrate`
+bleiben als einzige Ausnahmen direkt in den Compose-Dateien konfiguriert. Die
+servicebezogenen Dateien enthalten nur Defaults und Variablenreferenzen;
+Zugangsdaten bleiben in `.env` beziehungsweise `.env-dockge`.
+
 Der Medienbucket wird nicht durch einen separaten Init-Container angelegt.
 Der `media-worker` stellt `MINIO_BUCKET` vor dem ersten Upload oder Cleanup
 idempotent sicher; der persistente MinIO-Speicher bleibt bei Neustarts erhalten.
@@ -308,6 +315,15 @@ wiederholte Ortsinformationen. Beim ersten Start dieser Heuristik wird die
 bisherige Knowledge-Base einmalig aus den ausgewählten Nachrichten neu erzeugt;
 die Version wird über `AI_KNOWLEDGE_VERSION` markiert.
 
+Die KB-Heuristik arbeitet zusätzlich mit Signalrollen: **starke** Begriffe
+dürfen einen Kandidaten eröffnen, **unterstützende** Begriffe müssen mit einem
+starken Signal zusammentreffen und **allgemeine** Begriffe zählen nicht allein.
+Automatisch gelernte Knowledge-Begriffe werden zunächst als vorläufige Signale
+gespeichert und erst nach wiederholtem Auftreten in derselben Gruppe und im
+selben Thema aktiviert. Eine Nachricht erzeugt standardmäßig höchstens einen
+KB-Themenkandidaten; kurze Termin-, Event- oder Action-Item-Nachrichten werden
+nicht zusätzlich als allgemeine KB-Erkenntnis gespeichert.
+
 Beiträge desselben erkannten Themas werden hierarchisch gespeichert: Ein
 übergeordneter Zusammenfassungs-Knoten bündelt die Quellen, darunter liegen
 die einzelnen Detailbeiträge. API und Web-Oberfläche sortieren Themen und
@@ -430,8 +446,23 @@ Die semantische Stufe verwendet standardmäßig
 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384 Dimensionen)
 lokal und speichert die Vektoren in pgvector. Das Modell wird
 beim ersten Start geladen und im Compose-Volume `ai_models` zwischengespeichert.
-Die Schwellenwerte lassen sich über `AI_SEMANTIC_DISCOVERY_THRESHOLD` und
-`AI_SEMANTIC_MERGE_THRESHOLD` anpassen.
+Die Schwellenwerte lassen sich über `AI_SEMANTIC_DISCOVERY_THRESHOLD`,
+`AI_SEMANTIC_DISCOVERY_MARGIN` und `AI_SEMANTIC_MERGE_THRESHOLD` anpassen.
+Semantische Discovery ist standardmäßig auf ein bereits lexikalisch belegtes
+Thema begrenzt und verlangt zusätzlich einen ausreichenden Abstand zum
+zweitbesten Thema.
+
+Auf der Seite `/admin/ai-learning` steht **KB neu bewerten** zur Verfügung.
+Diese Funktion baut die komplette KB der aktuell ausgewählten Gruppen in einer
+neuen, isolierten Generation neu auf. Jede gespeicherte Nachricht wird erneut
+verarbeitet; vorhandene Transkripte, OCR-Ergebnisse und Metadaten werden dabei
+als Analysekontext verwendet. Medien werden nicht erneut heruntergeladen,
+transkribiert oder analysiert. Die Option **Bestehende automatisch gelernte
+KB-Begriffe löschen und neu erzeugen** ist standardmäßig deaktiviert. Wird sie
+aktiviert, bleiben Systembegriffe, Administratoränderungen und manuelle
+Ausschlüsse erhalten. Der Neuaufbau läuft über den separaten Stream
+`WAGI_KB_REBUILD` und schaltet die neue vollständige Generation erst nach
+erfolgreichem Abschluss sichtbar.
 
 Unterthemen werden heuristisch aus dem Inhalt des jeweiligen Threads erzeugt.
 Ein bestehendes Unterthema wird nur bei ausreichender lexikalischer oder
@@ -679,6 +710,7 @@ Bootstrap-Administrator wird beim ersten erfolgreichen API-Start angelegt.
 - `GET /api/v1/admin/ai-learning/summary?language=de` für Kategorieanzahl und Lernmetriken
 - `POST /api/v1/admin/ai-learning/bulk` mit `{ "ids": ["..."], "action": "enable|disable|delete" }` für Mehrfachaktionen
 - `GET/POST /api/v1/admin/ai-learning/reassessment` für Status und Start der vollständigen Neubewertung
+- `GET/POST /api/v1/admin/ai-learning/knowledge-reassessment` für die KB-Neubewertung; POST akzeptiert optional `{ "replaceExisting": true }`
 - `GET/POST /api/v1/admin/ai-learning/thread-reassessment` für Status und Start der Neubewertung der Nachrichten-Threads
 - Admin-Betriebsübersicht unter `/admin`; die Benutzerverwaltung liegt separat unter `/admin/users`, das Lernmodell unter `/admin/ai-learning`.
 - `GET /api/v1/admin/observability?aiPage=1&aiPageSize=20` liefert die paginierte KI-Verarbeitungshistorie. Die dort angezeigte Dauer ist ausschließlich aktive Worker-Zeit; Warteschlange, Retry-Backoff und Neustartwartezeit werden nicht eingerechnet.

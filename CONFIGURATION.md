@@ -15,6 +15,26 @@ Für Dockge die Variablen in der Stack-Umgebung oder in `.env-dockge` setzen und
 `docker-compose-dockge.yaml` verwenden. Die lokalen Compose-Dateien und die
 Dockge-Datei sind absichtlich getrennt.
 
+### Service-spezifische Env-Dateien
+
+Die Laufzeitumgebung ist pro Service in externe, versionierbare Env-Dateien
+aufgeteilt. Die Datenbank und der einmalige `migrate`-Job bleiben absichtlich
+direkt in Compose definiert, damit ihre Initialisierung und Abhängigkeiten an
+einer Stelle sichtbar bleiben. Alle anderen Services laden ihre Variablen aus:
+
+| Stack | Verzeichnis |
+|---|---|
+| Lokaler Stack | [`infra/docker/env/`](infra/docker/env/) |
+| Dockge-Stack | [`env-dockge/`](env-dockge/) |
+
+Die Dateien enthalten keine Zugangsdaten. Ihre `${...}`-Referenzen werden beim
+Compose-Aufruf aus `.env` beziehungsweise `.env-dockge` aufgelöst. Für Dockge
+werden die produktiven Secrets daher weiterhin ausschließlich in der ignorierten
+Datei `.env-dockge` oder in der Stack-Umgebung gesetzt. Wird ein Service direkt
+gestartet, muss sein `env_file` zusammen mit der jeweiligen Compose-Datei
+verwendet werden; die Dateien sind nicht als Ersatz für die Stack-Umgebung
+gedacht.
+
 ## Öffentliche URL und Browser
 
 | Variable | Standard | Bedeutung |
@@ -193,6 +213,19 @@ Die Funktion **Threads neu bewerten** verwendet den separaten Stream
 steuern dessen Aufbewahrung und Ack-Zeitfenster. Automatische Beziehungen
 werden neu berechnet; manuelles Thread-Feedback bleibt erhalten.
 
+Auf `/admin/ai-learning` steht zusätzlich **KB neu bewerten** zur Verfügung.
+Diese Funktion baut die komplette KB der aktuell ausgewählten Gruppen in einer
+neuen Generation auf. Jede gespeicherte Nachricht wird erneut verarbeitet;
+vorhandene Texte, Transkripte, OCR-Daten und Metadaten werden als Kontext
+verwendet. Medien werden weder erneut geladen noch transkribiert. Die Option
+**Bestehende KB-Begriffe löschen und neu erzeugen** ist standardmäßig
+deaktiviert. Ohne diese Option wird die neue vollständige Generation parallel
+aufgebaut und anschließend aktiviert. Mit der Option werden nur automatisch
+gelernte, gruppengebundene KB-Schlüsselwörter neu aufgebaut; von System oder
+Administratoren gepflegte Begriffe sowie manuelle Ausschlüsse bleiben erhalten.
+Die alte sichtbare KB-Generation wird erst nach einem erfolgreichen Lauf
+entfernt.
+
 Es gibt keinen separaten Bucket-Initialisierungscontainer. Der `media-worker` prüft den
 jeweiligen Zielbucket vor Uploads und Bereinigungen und legt ihn bei Bedarf
 idempotent an. Bei aktivierter `MEDIA_BUCKET_MIGRATION_ENABLED` prüft die API beim
@@ -283,7 +316,8 @@ GramJS-Fallback.
 | `HF_TOKEN` | leer | Optionaler HF-Token für höhere Gratislimits. |
 | `HF_HUB_DISABLE_TELEMETRY` | `1` | Optionale Hugging-Face-Telemetrie deaktivieren. |
 | `HF_HUB_ETAG_TIMEOUT` | `10` | Timeout für Hugging-Face-Metadatenabfragen. |
-| `AI_SEMANTIC_DISCOVERY_THRESHOLD` / `AI_SEMANTIC_MERGE_THRESHOLD` | 0.84 / 0.18 | Themenerkennung und Zusammenführung. |
+| `AI_SEMANTIC_DISCOVERY_THRESHOLD` / `AI_SEMANTIC_MERGE_THRESHOLD` | 0.90 / 0.18 | Präzisionsschwelle für neue Themen und Distanzschwelle für die Zusammenführung. |
+| `AI_SEMANTIC_DISCOVERY_MARGIN` | 0.05 | Mindestabstand zum zweitbesten Thema; verhindert uneindeutige automatische Zuordnungen. |
 | `AI_PLACE_NER_ENABLED`, `AI_PLACE_NER_MODEL` | true / leer | NER-lite bzw. optionales spaCy-Modell für Ortskandidaten. |
 | `AI_PLACE_MIN_CONFIDENCE` | 0.70 | Mindestkonfidenz für akzeptierte Text-Orte. GPS-Orte umgehen diese Schwelle. |
 | `AI_PLACE_HERMES_ENABLED`, `AI_PLACE_HERMES_MIN_CONFIDENCE` | true / 0.78 | Hermes-Prüfung unsicherer Ortskandidaten. Sie greift nur bei aktivierter Hermes-Verbindung. |
@@ -307,6 +341,11 @@ GramJS-Fallback.
 | `AI_LEARNING_CONTEXT_BONUS` | 0.009 | Maximaler Zusatz durch bereits bekannte, gewichtete Begriffe derselben Nachricht. |
 | `AI_LEARNING_MAX_DELTA` | 0.015 | Obergrenze einer automatischen Verstärkung; Benutzerfeedback bleibt deutlich stärker. |
 | `AI_LEARNING_MAX_TERMS_PER_SIGNAL` | 8 | Maximale Anzahl neuer Begriffe je Kategorie bzw. Knowledge-Thema und Nachricht. |
+| `AI_KB_MIN_CONTENT_CHARS` / `AI_KB_MIN_CONTENT_TOKENS` | 48 / 6 | Mindestumfang einer Nachricht, bevor sie als Knowledge-Kandidat betrachtet wird. |
+| `AI_KB_MIN_STRONG_TERMS` / `AI_KB_MIN_SUPPORTING_TERMS` | 2 / 1 | Konservative Evidenzschwellen: zwei starke Begriffe oder ein starker plus ein unterstützender Begriff. |
+| `AI_KB_MAX_TOPICS_PER_MESSAGE` | 1 | Maximale Zahl der Knowledge-Themen je Nachricht; reduziert Mehrfachablage. |
+| `AI_KB_MIN_INFERRED_OCCURRENCES` | 2 | Wiederholungen im selben Gruppen-/Themenkontext, bevor ein automatisch gelernter Begriff aktiv wird. |
+| `AI_KB_MAX_INFERRED_TERMS_PER_TOPIC` | 2 | Obergrenze neuer, automatisch vorgeschlagener KB-Begriffe je Thema und Nachricht. |
 
 Hermes wird pro Nachricht höchstens einmal für Knowledge-Kandidaten und
 höchstens einmal für Ortskandidaten angefragt; beide Kandidatenmengen werden

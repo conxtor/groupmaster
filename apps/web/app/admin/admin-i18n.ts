@@ -239,6 +239,20 @@ const german = {
   topicSelect: "Thema auswählen …",
   missingTopic: "Thema fehlt",
   noTerms: "Keine Begriffe für diese Auswahl.",
+  kbReassessTitle: "KB neu bewerten",
+  kbReassessHint: "Baut die komplette KB der ausgewählten Gruppen aus allen gespeicherten Texten, Transkripten, OCR-Daten und Metadaten neu auf.",
+  kbReassessStart: "KB neu bewerten",
+  kbReassessStarting: "KB-Neubewertung wird gestartet …",
+  kbReassessConfirm: "Die komplette KB der ausgewählten Gruppen wird neu aufgebaut. Medien werden nicht erneut verarbeitet. Fortfahren?",
+  kbReassessReplace: "Bestehende automatisch gelernte KB-Begriffe löschen und neu erzeugen",
+  kbReassessReplaceHint: "Systembegriffe, Administratoränderungen und manuelle Ausschlüsse bleiben erhalten. Die bestehende sichtbare KB bleibt bis zum erfolgreichen Abschluss verfügbar.",
+  kbReassessReplaceConfirm: "Dies löscht automatisch gelernte KB-Begriffe und die alte KB-Generation nach erfolgreichem Neuaufbau. Fortfahren?",
+  kbReassessConflict: "Eine KB-, Nachrichten- oder Thread-Neubewertung läuft bereits.",
+  kbReassessNoDelete: "Bestehende KB-Begriffe beibehalten",
+  signalStrong: "Stark",
+  signalSupporting: "Unterstützend",
+  signalGeneric: "Allgemein",
+  signalProvisional: "Vorläufig",
 } as const;
 
 type AdminKey = keyof typeof german;
@@ -323,8 +337,24 @@ const threadReassessmentTranslations: Record<Locale, Partial<Record<AdminKey, st
   },
 };
 
+const kbPrecisionTranslations: Record<Locale, Partial<Record<AdminKey, string>>> = {
+  de: {},
+  es: {
+    kbReassessTitle: "Reconstruir la KB", kbReassessHint: "Reconstruye la KB completa de los grupos seleccionados a partir de textos, transcripciones, OCR y metadatos guardados.", kbReassessStart: "Reconstruir la KB", kbReassessStarting: "Iniciando reconstrucción de la KB …", kbReassessConfirm: "Se reconstruirá la KB completa de los grupos seleccionados. Los medios no se procesarán de nuevo. ¿Continuar?", kbReassessReplace: "Eliminar y volver a crear los términos de KB aprendidos automáticamente", kbReassessReplaceHint: "Se conservan los términos del sistema, los cambios del administrador y las exclusiones manuales. La KB visible actual se conserva hasta completar el proceso.", kbReassessReplaceConfirm: "Esto eliminará los términos aprendidos automáticamente y la generación anterior de la KB tras una reconstrucción correcta. ¿Continuar?", kbReassessConflict: "Ya hay una reconstrucción de KB, reevaluación de mensajes o hilos en curso.", kbReassessNoDelete: "Conservar los términos actuales de la KB", signalStrong: "Fuerte", signalSupporting: "De apoyo", signalGeneric: "General", signalProvisional: "Provisional",
+  },
+  ca: {
+    kbReassessTitle: "Reconstrueix la KB", kbReassessHint: "Reconstrueix la KB completa dels grups seleccionats a partir de textos, transcripcions, OCR i metadades desades.", kbReassessStart: "Reconstrueix la KB", kbReassessStarting: "S'està iniciant la reconstrucció de la KB …", kbReassessConfirm: "Es reconstruirà la KB completa dels grups seleccionats. Els mitjans no es processaran de nou. Vols continuar?", kbReassessReplace: "Elimina i torna a crear els termes de KB apresos automàticament", kbReassessReplaceHint: "Es conserven els termes del sistema, els canvis de l'administrador i les exclusions manuals. La KB visible actual es conserva fins que el procés acaba.", kbReassessReplaceConfirm: "Això eliminarà els termes apresos automàticament i la generació anterior de la KB després d'una reconstrucció correcta. Continuar?", kbReassessConflict: "Ja hi ha una reconstrucció de KB, reavaluació de missatges o fils en curs.", kbReassessNoDelete: "Conserva els termes actuals de la KB", signalStrong: "Fort", signalSupporting: "De suport", signalGeneric: "General", signalProvisional: "Provisional",
+  },
+  en: {
+    kbReassessTitle: "Rebuild KB", kbReassessHint: "Rebuilds the complete KB for selected groups from all stored text, transcripts, OCR and metadata.", kbReassessStart: "Rebuild KB", kbReassessStarting: "Starting KB rebuild …", kbReassessConfirm: "The complete KB for selected groups will be rebuilt. Media will not be processed again. Continue?", kbReassessReplace: "Delete and recreate automatically learned KB terms", kbReassessReplaceHint: "System terms, administrator changes and manual exclusions are preserved. The current visible KB remains available until the process completes successfully.", kbReassessReplaceConfirm: "This deletes automatically learned KB terms and the previous KB generation after a successful rebuild. Continue?", kbReassessConflict: "A KB rebuild, message reassessment or thread reassessment is already running.", kbReassessNoDelete: "Keep existing KB terms", signalStrong: "Strong", signalSupporting: "Supporting", signalGeneric: "Generic", signalProvisional: "Provisional",
+  },
+  fr: {
+    kbReassessTitle: "Reconstruire la base", kbReassessHint: "Reconstruit la base complète des groupes sélectionnés à partir des textes, transcriptions, OCR et métadonnées enregistrés.", kbReassessStart: "Reconstruire la base", kbReassessStarting: "Démarrage de la reconstruction …", kbReassessConfirm: "La base complète des groupes sélectionnés sera reconstruite. Les médias ne seront pas retraités. Continuer ?", kbReassessReplace: "Supprimer et recréer les termes appris automatiquement", kbReassessReplaceHint: "Les termes système, les modifications de l'administrateur et les exclusions manuelles sont conservés. La base visible reste disponible jusqu'à la réussite du processus.", kbReassessReplaceConfirm: "Les termes appris automatiquement et l'ancienne génération seront supprimés après une reconstruction réussie. Continuer ?", kbReassessConflict: "Une reconstruction de la base, une réévaluation des messages ou des fils est déjà en cours.", kbReassessNoDelete: "Conserver les termes actuels", signalStrong: "Fort", signalSupporting: "De soutien", signalGeneric: "Général", signalProvisional: "Provisoire",
+  },
+};
+
 export function adminTranslate(locale: Locale, key: AdminKey, values: TranslationValues = {}) {
-  const template = threadReassessmentTranslations[locale][key] ?? hermesTranslations[locale][key] ?? translations[locale][key] ?? german[key] ?? key;
+  const template = kbPrecisionTranslations[locale][key] ?? threadReassessmentTranslations[locale][key] ?? hermesTranslations[locale][key] ?? translations[locale][key] ?? german[key] ?? key;
   return template.replace(/\{(\w+)\}/g, (_, name: string) => String(values[name] ?? `{${name}}`));
 }
 

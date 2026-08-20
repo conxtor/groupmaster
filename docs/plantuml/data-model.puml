@@ -262,6 +262,7 @@ entity knowledge_rebuild_jobs {
   * id : uuid <<PK>>
   --
   generation_id : uuid
+  replace_existing : bool = false
   status : queued | running | completed | failed
   total/processed/failed/skipped : integer
   error : text
@@ -345,6 +346,7 @@ entity ai_learning_terms {
   term : text
   weight : numeric
   relevance_level : high | medium | low <<nullable>>
+  signal_role : strong | supporting | generic | provisional
   enabled : bool
   source : system | admin | feedback | inferred
   positive_count / negative_count : int

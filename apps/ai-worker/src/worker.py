@@ -52,8 +52,9 @@ HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 if not HF_TOKEN:
     os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 HF_MODEL_LOAD_INTERVAL_SECONDS = max(3600.0, float(os.getenv("AI_HF_MODEL_LOAD_INTERVAL_SECONDS", "86400")))
-SEMANTIC_DISCOVERY_THRESHOLD = float(os.getenv("AI_SEMANTIC_DISCOVERY_THRESHOLD", "0.84"))
+SEMANTIC_DISCOVERY_THRESHOLD = min(0.99, max(0.5, float(os.getenv("AI_SEMANTIC_DISCOVERY_THRESHOLD", "0.90"))))
 SEMANTIC_MERGE_THRESHOLD = float(os.getenv("AI_SEMANTIC_MERGE_THRESHOLD", "0.18"))
+SEMANTIC_DISCOVERY_MARGIN = min(0.25, max(0.0, float(os.getenv("AI_SEMANTIC_DISCOVERY_MARGIN", "0.05"))))
 HERMES_ENABLED = _HERMES_CONFIGURED
 HERMES_URL = os.getenv("AI_HERMES_URL", "").strip() or os.getenv("AI_ENDPOINT", "").strip()
 HERMES_API_KEY = os.getenv("AI_HERMES_API_KEY", "").strip() or os.getenv("AI_API_KEY", "").strip()
@@ -78,6 +79,13 @@ AI_LEARNING_INFERENCE_BASE_DELTA = max(0.0005, min(0.02, float(os.getenv("AI_LEA
 AI_LEARNING_CONTEXT_BONUS = max(0.0, min(0.02, float(os.getenv("AI_LEARNING_CONTEXT_BONUS", "0.009"))))
 AI_LEARNING_MAX_DELTA = max(AI_LEARNING_INFERENCE_BASE_DELTA, min(0.03, float(os.getenv("AI_LEARNING_MAX_DELTA", "0.015"))))
 AI_LEARNING_MAX_TERMS_PER_SIGNAL = max(1, min(16, int(os.getenv("AI_LEARNING_MAX_TERMS_PER_SIGNAL", "8"))))
+AI_KB_MIN_CONTENT_CHARS = max(28, int(os.getenv("AI_KB_MIN_CONTENT_CHARS", "48")))
+AI_KB_MIN_CONTENT_TOKENS = max(4, int(os.getenv("AI_KB_MIN_CONTENT_TOKENS", "6")))
+AI_KB_MIN_STRONG_TERMS = max(1, min(4, int(os.getenv("AI_KB_MIN_STRONG_TERMS", "2"))))
+AI_KB_MIN_SUPPORTING_TERMS = max(1, min(4, int(os.getenv("AI_KB_MIN_SUPPORTING_TERMS", "1"))))
+AI_KB_MAX_TOPICS_PER_MESSAGE = max(1, min(3, int(os.getenv("AI_KB_MAX_TOPICS_PER_MESSAGE", "1"))))
+AI_KB_MIN_INFERRED_OCCURRENCES = max(2, min(5, int(os.getenv("AI_KB_MIN_INFERRED_OCCURRENCES", "2"))))
+AI_KB_MAX_INFERRED_TERMS_PER_TOPIC = max(1, min(4, int(os.getenv("AI_KB_MAX_INFERRED_TERMS_PER_TOPIC", "2"))))
 # Places use a precision-first cascade. The lightweight detector is always
 # available; optional spaCy NER, geocoding and Hermes adjudication are added
 # only when explicitly configured.
@@ -1549,20 +1557,42 @@ def location_is_repeated(location: dict, context: list[dict]) -> bool:
     return count >= 2
 
 
+def is_kb_informative_text(text: str, stopwords: set[str] | None = None) -> bool:
+    words = re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", str(text or "").casefold())
+    content_words = [word for word in words if len(word) >= 4 and word not in (stopwords or set()) and not word.isnumeric()]
+    return len(str(text or "").strip()) >= AI_KB_MIN_CONTENT_CHARS and len(content_words) >= AI_KB_MIN_CONTENT_TOKENS
+
+
 def knowledge_topic_is_supported(topic_key: str, text: str, learning: dict | None = None) -> tuple[bool, int, int]:
     stopwords = set(learning_terms_for(learning, "exclusion"))
-    if not is_informative_text(text, stopwords):
+    if not is_kb_informative_text(text, stopwords):
         return False, 0, 0
     learned_rules = (learning or {}).get("keyword", {})
     rule = learned_rules.get(topic_key, {})
     keyword_terms = rule.get("keywords", [])
     detail_terms = rule.get("detail", [])
-    keyword_count = term_hits(text, tuple(keyword_terms))
-    detail_count = term_hits(text, tuple(detail_terms))
-    # The threshold is intentionally topic-agnostic. Topic-specific evidence
-    # belongs in the database and may be refined by administrators or the
-    # conservative learning loop; no topic area is privileged in code.
-    supported = (keyword_count >= 2) or (keyword_count >= 1 and detail_count >= 1)
+    roles = (learning or {}).get("keywordRoles", {}).get(topic_key, {})
+    strong_terms = tuple(term for term in keyword_terms if roles.get(str(term).casefold(), "strong") == "strong")
+    supporting_terms = tuple(
+        term for term in [*keyword_terms, *detail_terms]
+        if roles.get(str(term).casefold(), "supporting" if term in detail_terms else "strong") == "supporting"
+    )
+    generic_terms = tuple(
+        term for term in [*keyword_terms, *detail_terms]
+        if roles.get(str(term).casefold(), "supporting") == "generic"
+    )
+    strong_count = term_hits(text, strong_terms)
+    supporting_count = term_hits(text, supporting_terms)
+    generic_count = term_hits(text, generic_terms)
+    # Generic terms remain useful for admin visibility and future statistics,
+    # but never create a KB candidate on their own. A topic needs two strong
+    # anchors or one strong anchor plus an independent supporting signal.
+    keyword_count = strong_count
+    detail_count = supporting_count
+    supported = (
+        strong_count >= AI_KB_MIN_STRONG_TERMS
+        or (strong_count >= 1 and supporting_count >= AI_KB_MIN_SUPPORTING_TERMS)
+    ) and not (strong_count == 0 and supporting_count == 0 and generic_count > 0)
     return supported, keyword_count, detail_count
 
 
@@ -1659,7 +1689,7 @@ def related_knowledge_source_ids(message_id: str, normalized: str, context: list
 def knowledge_items_for_message(message_id: str, text: str, context: list[dict], entities: list[Entity], places: list[dict], language: str = "de", learning: dict | None = None) -> list[KnowledgeItem]:
     normalized = " ".join(text.split()).strip()
     stopwords = set(learning_terms_for(learning, "exclusion"))
-    if not normalized or not is_informative_text(normalized, stopwords):
+    if not normalized or not is_kb_informative_text(normalized, stopwords):
         return []
     matched: list[tuple[str, int, int]] = []
     topic_keys = [str(topic_key) for topic_key in (learning or {}).get("keyword", {}) if str(topic_key).strip()]
@@ -1677,6 +1707,26 @@ def knowledge_items_for_message(message_id: str, text: str, context: list[dict],
     )
     if location_topic and current_location and location_topic not in {topic_key for topic_key, _, _ in matched} and (location_is_repeated(current_location, context) or term_hits(normalized, tuple(place_terms)) >= 1):
         matched.append((location_topic, 1, 1))
+
+    # Events and action items have their own views. A short message that only
+    # describes a date, meeting or request must not be duplicated as a broad
+    # KB fact unless it also carries a concrete entity, place, URL or numeric
+    # detail that is useful beyond the event itself.
+    event_only = bool(multi_message_events(message_id, context, learning))
+    action_only = bool(multi_message_action_items(message_id, context, learning))
+    concrete_detail = bool(
+        entities
+        or places
+        or re.search(r"https?://|www\.|\b\d+[\w%/-]*\b", normalized, flags=re.IGNORECASE)
+    )
+    if (event_only or action_only) and not concrete_detail and len(normalized) < 180:
+        return []
+
+    # Keep the visible KB focused. If a message touches several broad topic
+    # areas, retain only the strongest lexical match instead of creating a
+    # copy in every matching taxonomy bucket.
+    matched.sort(key=lambda item: (item[1] * 2 + item[2], item[1], item[2]), reverse=True)
+    matched = matched[:AI_KB_MAX_TOPICS_PER_MESSAGE]
 
     result: list[KnowledgeItem] = []
     for topic_key, keyword_count, detail_count in matched:
@@ -1705,11 +1755,11 @@ def vector_to_pg(vector: list[float] | None) -> str | None:
     return "[" + ",".join(f"{value:.8f}" for value in vector) + "]"
 
 
-async def semantic_topic_match(db, encoder: EmbeddingProvider, text: str, language: str) -> tuple[str, float] | None:
+async def semantic_topic_match(db, encoder: EmbeddingProvider, text: str, language: str) -> tuple[str, float, float] | None:
     vector = await encoder.embed(text)
     if vector is None:
         return None
-    best: tuple[str, float] | None = None
+    candidates: list[tuple[str, float]] = []
     definitions = await db.fetch(
         """SELECT topic_key, description
            FROM knowledge_topic_definitions
@@ -1726,14 +1776,20 @@ async def semantic_topic_match(db, encoder: EmbeddingProvider, text: str, langua
         if prototype is None:
             continue
         similarity = sum(left * right for left, right in zip(vector, prototype))
-        if best is None or similarity > best[1]:
-            best = (topic_key, similarity)
-    return best
+        candidates.append((topic_key, similarity))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda candidate: candidate[1], reverse=True)
+    best = candidates[0]
+    second_similarity = candidates[1][1] if len(candidates) > 1 else 0.0
+    return best[0], best[1], best[1] - second_similarity
 
 
 async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: str | None, message_id: str, text: str, language: str, items: list[KnowledgeItem]) -> list[KnowledgeItem]:
     normalized = " ".join(text.split()).strip()
-    if not group_id or not is_informative_text(normalized):
+    # Semantic discovery is a precision fallback, not a second unrestricted
+    # topic classifier. Require one lexical KB candidate first.
+    if not group_id or not items or len(items) >= AI_KB_MAX_TOPICS_PER_MESSAGE or not is_kb_informative_text(normalized):
         return items
     try:
         configured_rows = await db.fetch(
@@ -1788,8 +1844,8 @@ async def semantic_enrich_knowledge(db, encoder: EmbeddingProvider, group_id: st
         score = 1.0 - float(existing["distance"])
     else:
         prototype = await semantic_topic_match(db, encoder, normalized, language)
-        if prototype and prototype[1] >= SEMANTIC_DISCOVERY_THRESHOLD:
-            topic_key, score = prototype
+        if prototype and prototype[1] >= SEMANTIC_DISCOVERY_THRESHOLD and prototype[2] >= SEMANTIC_DISCOVERY_MARGIN:
+            topic_key, score = prototype[0], prototype[1]
 
     if not topic_key or any(item.topicKey == topic_key for item in items):
         return items
@@ -2391,13 +2447,19 @@ async def configured_knowledge_topic_keys(db, language: str) -> list[str]:
 
 
 async def load_learning_terms(db, group_id: str | None, language: str) -> dict:
-    """Load editable global defaults plus stronger group-local terms."""
-    result: dict = {"relevance": {}, "event": {}, "action": {}, "place": {}, "exclusion": [], "keyword": {}, "topicRoles": {}, "excluded": []}
+    """Load editable global defaults plus stronger group-local terms.
+
+    Provisional inferred KB terms are intentionally not loaded into the live
+    detector. They are accumulated by ``record_inferred_learning`` and become
+    active only after repeated evidence in the same group and topic.
+    """
+    result: dict = {"relevance": {}, "event": {}, "action": {}, "place": {}, "exclusion": [], "keyword": {}, "keywordRoles": {}, "topicRoles": {}, "excluded": []}
     try:
         rows = await db.fetch(
-            """SELECT category, topic_key, term, weight
+            """SELECT category, topic_key, term, weight, signal_role, source
                FROM ai_learning_terms
                WHERE enabled=TRUE AND language=$1 AND (group_id IS NULL OR group_id=$2)
+                 AND NOT (category='keyword' AND signal_role='provisional')
                ORDER BY group_id NULLS FIRST, updated_at ASC""",
             language, group_id,
         )
@@ -2448,7 +2510,9 @@ async def load_learning_terms(db, group_id: str | None, language: str) -> dict:
             is_detail = topic_key.endswith(":detail")
             topic_key = topic_key.removesuffix(":detail")
             result["keyword"].setdefault(topic_key, {"keywords": [], "detail": []})
+            role = str(row["signal_role"] or "supporting").strip().lower()
             result["keyword"][topic_key]["detail" if is_detail else "keywords"].append(term)
+            result["keywordRoles"].setdefault(topic_key, {})[term] = role
         elif category == "exclusion":
             result["exclusion"].append(term)
         elif category in {"relevance", "event", "action", "place"}:
@@ -2464,6 +2528,47 @@ def inferred_learning_tokens(text: str, stopwords: set[str]) -> list[str]:
         token for token in tokens
         if 3 <= len(token) <= 80 and token not in stopwords and not token.isnumeric()
     ))
+
+
+def knowledge_inferred_tokens(text: str, stopwords: set[str], learning: dict, topic_key: str, analysis: Analysis) -> list[str]:
+    """Extract narrow KB candidates around an already matched topic anchor.
+
+    Learning from every token in a message was too permissive: a single
+    accepted sentence could turn names, verbs and incidental words into KB
+    terms. Restrict automatic keyword learning to content words close to a
+    known topic signal, plus validated entities and places.
+    """
+    topic = (learning.get("keyword") or {}).get(topic_key, {})
+    known_terms = [*topic.get("keywords", []), *topic.get("detail", [])]
+    roles = (learning.get("keywordRoles") or {}).get(topic_key, {})
+    generic = {str(term).casefold() for term in known_terms if roles.get(str(term).casefold()) == "generic"}
+    tokens = re.findall(r"[\wÀ-ÿÄÖÜäöüß-]+", str(text or "").casefold())
+    anchor_indexes = [
+        index for index, token in enumerate(tokens)
+        if any(has_term(token, str(term)) for term in known_terms if str(term).casefold() not in generic)
+    ]
+    candidate_indexes = {
+        candidate_index
+        for anchor_index in anchor_indexes
+        for candidate_index in range(max(0, anchor_index - 3), min(len(tokens), anchor_index + 4))
+    }
+    candidates: list[str] = []
+    for index in sorted(candidate_indexes):
+        token = tokens[index]
+        if len(token) < 4 or token in stopwords or token.isnumeric() or token in generic:
+            continue
+        if token in {str(term).casefold() for term in known_terms}:
+            continue
+        if token not in candidates:
+            candidates.append(token)
+    for entity in analysis.entities:
+        candidates.extend(inferred_learning_tokens(entity.name, stopwords))
+    for place in analysis.places:
+        candidates.extend(inferred_learning_tokens(str(place.get("name") or ""), stopwords))
+    return list(dict.fromkeys(
+        token for token in candidates
+        if len(token) >= 4 and token not in stopwords and not token.isnumeric() and token not in generic
+    ))[:AI_KB_MAX_INFERRED_TERMS_PER_TOPIC]
 
 
 async def record_inferred_learning(db, group_id: str | None, language: str, text: str, analysis: Analysis, learning: dict):
@@ -2520,6 +2625,7 @@ async def record_inferred_learning(db, group_id: str | None, language: str, text
         topic_key = str(item.topicKey or "").strip()
         if topic_key and item.confidence >= 0.72:
             add_signal("keyword", AI_LEARNING_INFERENCE_BASE_DELTA * 0.75, topic_key)
+            signal_terms[("keyword", topic_key)] = knowledge_inferred_tokens(text, stopwords, learning, topic_key, analysis)
 
     for (category, topic_key), delta in signals.items():
         # Do not repeatedly increase an already-known term merely because it
@@ -2531,23 +2637,28 @@ async def record_inferred_learning(db, group_id: str | None, language: str, text
             term for term in scoped_tokens
             if term not in known and not learning_term_is_excluded(learning, category, term, topic_key)
         ]
-        for term in candidates[:AI_LEARNING_MAX_TERMS_PER_SIGNAL]:
+        max_terms = AI_KB_MAX_INFERRED_TERMS_PER_TOPIC if category == "keyword" else AI_LEARNING_MAX_TERMS_PER_SIGNAL
+        for term in candidates[:max_terms]:
             topic_value = topic_key or ""
             row = await db.fetchrow(
                 """INSERT INTO ai_learning_terms
-                          (group_id, language, category, topic_key, term, weight, source, positive_count)
-                   VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,'inferred',1)
+                          (group_id, language, category, topic_key, term, weight, source, positive_count, enabled, signal_role)
+                   VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,'inferred',1,CASE WHEN $3='keyword' THEN FALSE ELSE TRUE END,
+                           CASE WHEN $3='keyword' THEN 'provisional' ELSE 'supporting' END)
                    ON CONFLICT DO NOTHING RETURNING id""",
                 group_id, language, category, topic_value, term, delta,
             )
             if not row:
                 await db.execute(
                     """UPDATE ai_learning_terms
-                       SET weight=GREATEST(-10, LEAST(10, weight+$6)), positive_count=positive_count+1, updated_at=NOW()
+                       SET weight=GREATEST(-10, LEAST(10, weight+$6)), positive_count=positive_count+1,
+                           signal_role=CASE WHEN category='keyword' AND positive_count+1 >= $7 THEN 'supporting' ELSE signal_role END,
+                           enabled=CASE WHEN category='keyword' AND positive_count+1 >= $7 THEN TRUE ELSE enabled END,
+                           updated_at=NOW()
                        WHERE group_id=$1 AND language=$2 AND category=$3
                          AND topic_key IS NOT DISTINCT FROM NULLIF($4,'')
-                         AND lower(term)=lower($5) AND source <> 'admin'""",
-                    group_id, language, category, topic_value, term, delta,
+                         AND lower(term)=lower($5) AND source='inferred'""",
+                    group_id, language, category, topic_value, term, delta, AI_KB_MIN_INFERRED_OCCURRENCES,
                 )
             await db.execute(
                 """INSERT INTO ai_learning_term_history
@@ -3260,7 +3371,14 @@ async def main():
             await retry_or_dead_letter(db, js, message, payload, "ai.threads.reassessment", error)
 
     async def on_knowledge_rebuild(message):
-        """Build a separate KB generation and switch it on only when complete."""
+        """Build the complete selected-group KB in isolation.
+
+        Every persisted message is analysed again, including stored transcript
+        and OCR text. The resulting topics, subtopics, items and graph edges
+        are written to a fresh generation; the active generation changes only
+        after the complete pass succeeds. This is deliberately separate from
+        the message-only reassessment stream.
+        """
         payload = {}
         rebuild_id = None
         generation_id = None
@@ -3268,6 +3386,7 @@ async def main():
             payload = json.loads(message.data)
             data = payload.get("data", payload)
             rebuild_id = str(data.get("rebuildId") or "")
+            replace_existing = bool(data.get("replaceExisting"))
             event_id = payload_id(payload, message.data)
             if not rebuild_id:
                 raise ValueError("rebuildId missing")
@@ -3281,6 +3400,27 @@ async def main():
                    WHERE id=$1::uuid AND status IN ('queued','running','failed')""",
                 rebuild_id, generation_id,
             )
+            if replace_existing:
+                # Preserve system/admin terms and all tombstones. Only
+                # automatically inferred KB terms are rebuilt from the
+                # persisted messages below; media is never downloaded again.
+                await db.execute(
+                    """INSERT INTO ai_learning_term_history
+                               (term_id, group_id, language, category, term, event_type, weight_delta, source)
+                       SELECT id, group_id, language, category, term, 'deleted', weight, 'knowledge-rebuild'
+                       FROM ai_learning_terms
+                       WHERE category='keyword' AND source='inferred' AND group_id IN
+                             (SELECT id FROM wa_groups WHERE is_selected=TRUE)"""
+                )
+                await db.execute(
+                    """DELETE FROM ai_learning_terms
+                       WHERE category='keyword' AND source='inferred' AND group_id IN
+                             (SELECT id FROM wa_groups WHERE is_selected=TRUE)"""
+                )
+            # Do not limit this query to messages missing an analysis. A KB
+            # rebuild must revisit every stored message in every currently
+            # selected group so removed terms and changed topic definitions
+            # can disappear from the newly built generation.
             rows = await db.fetch(
                 """SELECT m.id::text AS "messageId", m.group_id AS "groupId", COALESCE(m.text,'') AS text,
                           COALESCE(aj.transcript,'') AS transcript,
@@ -3319,7 +3459,7 @@ async def main():
                     did_process = await process_analysis(
                         db,
                         analyze_message,
-                        {"data": {"messageId": message_id, "groupId": row["groupId"], "text": rebuild_text, "force": True, "skipLearning": True, "skipRemoteReview": True, "knowledgeGeneration": generation_id}},
+                        {"data": {"messageId": message_id, "groupId": row["groupId"], "text": rebuild_text, "force": True, "skipLearning": not replace_existing, "skipRemoteReview": True, "knowledgeGeneration": generation_id}},
                         "knowledge-rebuild",
                         force=True,
                     )
@@ -3335,6 +3475,8 @@ async def main():
                        WHERE id=$1::uuid""",
                     rebuild_id, processed, failed, skipped,
                 )
+                if AI_REASSESSMENT_DELAY_SECONDS:
+                    await asyncio.sleep(AI_REASSESSMENT_DELAY_SECONDS)
             if failed:
                 await db.execute(
                     """UPDATE knowledge_rebuild_jobs SET status='failed', error=$2, completed_at=NOW(), updated_at=NOW()
@@ -3346,6 +3488,12 @@ async def main():
                     "UPDATE knowledge_generation_state SET active_generation_id=$1::uuid, updated_at=NOW() WHERE id=TRUE",
                     generation_id,
                 )
+                if replace_existing:
+                    # The new generation is visible first. Removing the old
+                    # generation afterwards keeps a failed rebuild fully
+                    # recoverable and removes old KB items in cascade.
+                    await db.execute("DELETE FROM ai_knowledge_edges WHERE generation_id <> $1::uuid", generation_id)
+                    await db.execute("DELETE FROM knowledge_topics WHERE generation_id <> $1::uuid", generation_id)
                 await db.execute(
                     "UPDATE knowledge_rebuild_jobs SET status='completed', completed_at=NOW(), updated_at=NOW() WHERE id=$1::uuid",
                     rebuild_id,

@@ -28,6 +28,7 @@ type aiLearningTermView struct {
 	RelevanceLevel *string   `json:"relevanceLevel,omitempty"`
 	Enabled        bool      `json:"enabled"`
 	Source         string    `json:"source"`
+	SignalRole     string    `json:"signalRole"`
 	PositiveCount  int       `json:"positiveCount"`
 	NegativeCount  int       `json:"negativeCount"`
 	CreatedAt      time.Time `json:"createdAt"`
@@ -101,6 +102,7 @@ type aiLearningTermRequest struct {
 	Term           string  `json:"term"`
 	Weight         float64 `json:"weight"`
 	RelevanceLevel string  `json:"relevanceLevel"`
+	SignalRole     string  `json:"signalRole"`
 	Enabled        *bool   `json:"enabled"`
 }
 
@@ -134,6 +136,14 @@ func normalizeLearningLevel(value string) string {
 	return ""
 }
 
+func normalizeLearningSignalRole(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "strong" || value == "supporting" || value == "generic" || value == "provisional" {
+		return value
+	}
+	return ""
+}
+
 func (a *app) adminAILearning(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/admin/ai-learning"), "/")
 	if path == "summary" {
@@ -146,6 +156,12 @@ func (a *app) adminAILearning(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "thread-reassessment" {
 		a.adminThreadReassessment(w, r)
+		return
+	}
+	if path == "knowledge-reassessment" {
+		// Keep the KB rebuild implementation and generation-safety rules in one
+		// place while exposing the action directly from the AI learning page.
+		a.adminKnowledgeRebuild(w, r)
 		return
 	}
 	if path == "bulk" {
@@ -273,7 +289,7 @@ func (a *app) listAILearning(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT t.id::text, t.group_id, g.subject, g.platform, g.chat_type, g.language,
 		       t.language, t.category, t.topic_key, t.term, t.weight, t.relevance_level,
-		       t.enabled, t.source, t.positive_count, t.negative_count, t.created_at, t.updated_at
+		       t.enabled, t.source, t.signal_role, t.positive_count, t.negative_count, t.created_at, t.updated_at
 		FROM ai_learning_terms t LEFT JOIN wa_groups g ON g.id=t.group_id
 		WHERE %s ORDER BY %s
 		LIMIT %s OFFSET %s`, where, orderBy, limitPlaceholder, offsetPlaceholder), queryArgs...)
@@ -285,7 +301,7 @@ func (a *app) listAILearning(w http.ResponseWriter, r *http.Request) {
 	result := make([]aiLearningTermView, 0, pageSize)
 	for rows.Next() {
 		var item aiLearningTermView
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.GroupPlatform, &item.GroupChatType, &item.GroupLanguage, &item.Language, &item.Category, &item.TopicKey, &item.Term, &item.Weight, &item.RelevanceLevel, &item.Enabled, &item.Source, &item.PositiveCount, &item.NegativeCount, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupSubject, &item.GroupPlatform, &item.GroupChatType, &item.GroupLanguage, &item.Language, &item.Category, &item.TopicKey, &item.Term, &item.Weight, &item.RelevanceLevel, &item.Enabled, &item.Source, &item.SignalRole, &item.PositiveCount, &item.NegativeCount, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "learning terms unavailable"})
 			return
 		}
@@ -489,7 +505,9 @@ func (a *app) adminAILearningBulk(w http.ResponseWriter, r *http.Request) {
 	} else {
 		enabled := request.Action == "enable"
 		resultTag, err = tx.Exec(r.Context(), `
-			UPDATE ai_learning_terms SET enabled=$1, source='admin', updated_at=NOW()
+			UPDATE ai_learning_terms SET enabled=$1,
+				signal_role=CASE WHEN $1 AND signal_role='provisional' THEN 'supporting' ELSE signal_role END,
+				source='admin', updated_at=NOW()
 			WHERE id = ANY($2::uuid[])`, enabled, ids)
 		if err == nil {
 			_, err = tx.Exec(r.Context(), `
@@ -701,6 +719,7 @@ func validateAILearningRequest(request aiLearningTermRequest) (aiLearningTermReq
 	request.TopicKey = strings.TrimSpace(request.TopicKey)
 	request.Term = strings.TrimSpace(request.Term)
 	request.RelevanceLevel = normalizeLearningLevel(request.RelevanceLevel)
+	request.SignalRole = normalizeLearningSignalRole(request.SignalRole)
 	if request.Category == "" || request.Term == "" || len(request.Term) > 160 {
 		return request, fmt.Errorf("category and term are required")
 	}
@@ -709,6 +728,13 @@ func validateAILearningRequest(request aiLearningTermRequest) (aiLearningTermReq
 	}
 	if request.Category != "relevance" && request.RelevanceLevel != "" {
 		return request, fmt.Errorf("relevanceLevel is only valid for relevance terms")
+	}
+	if request.Category == "keyword" {
+		if request.SignalRole == "" {
+			request.SignalRole = "strong"
+		}
+	} else {
+		request.SignalRole = "supporting"
 	}
 	if request.Weight < -10 || request.Weight > 10 {
 		return request, fmt.Errorf("weight must be between -10 and 10")
@@ -740,9 +766,9 @@ func (a *app) createAILearning(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err = a.db.QueryRow(r.Context(), `
-		INSERT INTO ai_learning_terms (group_id, language, category, topic_key, term, weight, relevance_level, enabled, source)
-		VALUES (NULLIF($1,''),$2,$3,NULLIF($4,''),$5,$6,NULLIF($7,''),$8,'admin') RETURNING id::text`,
-		request.GroupID, request.Language, request.Category, request.TopicKey, request.Term, request.Weight, request.RelevanceLevel, enabled).Scan(&id)
+		INSERT INTO ai_learning_terms (group_id, language, category, topic_key, term, weight, relevance_level, enabled, source, signal_role)
+		VALUES (NULLIF($1,''),$2,$3,NULLIF($4,''),$5,$6,NULLIF($7,''),$8,'admin',$9) RETURNING id::text`,
+		request.GroupID, request.Language, request.Category, request.TopicKey, request.Term, request.Weight, request.RelevanceLevel, enabled, request.SignalRole).Scan(&id)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "duplicate") {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "learning term already exists"})
@@ -785,8 +811,8 @@ func (a *app) updateAILearning(w http.ResponseWriter, r *http.Request, id uuid.U
 	}
 	result, err := a.db.Exec(r.Context(), `
 		UPDATE ai_learning_terms SET group_id=NULLIF($2,''), language=$3, category=$4, topic_key=NULLIF($5,''), term=$6,
-		weight=$7, relevance_level=NULLIF($8,''), enabled=$9, source='admin', updated_at=NOW() WHERE id=$1`,
-		id, request.GroupID, request.Language, request.Category, request.TopicKey, request.Term, request.Weight, request.RelevanceLevel, enabled)
+		weight=$7, relevance_level=NULLIF($8,''), enabled=$9, signal_role=$10, source='admin', updated_at=NOW() WHERE id=$1`,
+		id, request.GroupID, request.Language, request.Category, request.TopicKey, request.Term, request.Weight, request.RelevanceLevel, enabled, request.SignalRole)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "learning term could not be updated"})
 		return

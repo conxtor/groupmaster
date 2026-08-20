@@ -70,6 +70,8 @@ endif
 :Aussagekräftigen Titel aus dem\nThreadinhalt ableiten;
 :Neue Subtopic-Begriffe konservativ in\nknowledge_subtopic_terms lernen;
 :Nur klar überlappende Quellnachrichten\nim Unterthema zusammenführen;
+:KB-Kandidat nur bei informativem Text und\nstarker Evidenz zulassen;
+:Generische Begriffe nicht allein verwenden;\npro Nachricht höchstens ein Oberthema;
 
 if (Embeddings aktiviert?) then (ja)
   :fastembed multilingual lokal laden\nund pgvector-Abgleich durchführen;
@@ -123,10 +125,21 @@ fork again
   :Administrator startet KB-Neuaufbau;
   :knowledge.rebuild.requested in
   WAGI_KB_REBUILD lesen;
+  :Alle gespeicherten Nachrichten der
+  ausgewählten Gruppen erneut lesen;
   :Text, Transkript, OCR und Metadaten
   in neuer Generation analysieren;
   :Generation erst nach vollständigem Erfolg
   aktiv schalten; bei Fehler alte KB behalten;
+  if (Bestehende KB-Begriffe ersetzen?) then (ja)
+    :Nur automatisch gelernte KB-Schlüsselwörter
+    gruppenbezogen neu aufbauen;
+    :System-/Admin-Begriffe und Ausschlüsse
+    erhalten; alte Generation nach Erfolg löschen;
+  else (nein)
+    :Alte Generation außerhalb der sichtbaren
+    aktiven Generation behalten;
+  endif
   :Hermes standardmäßig überspringen;
 end fork;
 
