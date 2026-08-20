@@ -52,6 +52,19 @@ func scanReplayJob(row interface{ Scan(...any) error }) (replayJobView, error) {
 	return view, err
 }
 
+// replays lists and creates replay/backfill jobs for selected groups.
+// @Summary List or create replay jobs
+// @Tags replays
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param all query bool false "Administrators may include all users' jobs"
+// @Param body body replayRequest true "Replay range and groups"
+// @Success 200 {array} replayJobView
+// @Success 202 {object} replayJobView
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Router /replays [get]
 func (a *app) replays(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {

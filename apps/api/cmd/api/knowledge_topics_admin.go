@@ -44,17 +44,17 @@ type knowledgeTopicDefinitionRequest struct {
 }
 
 type knowledgeRebuildJobView struct {
-	ID             string     `json:"id"`
-	Status         string     `json:"status"`
-	TotalCount     int        `json:"totalCount"`
-	ProcessedCount int        `json:"processedCount"`
-	FailedCount    int        `json:"failedCount"`
-	SkippedCount   int        `json:"skippedCount"`
-	Error          *string    `json:"error,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	StartedAt      *time.Time `json:"startedAt,omitempty"`
-	CompletedAt    *time.Time `json:"completedAt,omitempty"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	ID              string     `json:"id"`
+	Status          string     `json:"status"`
+	TotalCount      int        `json:"totalCount"`
+	ProcessedCount  int        `json:"processedCount"`
+	FailedCount     int        `json:"failedCount"`
+	SkippedCount    int        `json:"skippedCount"`
+	Error           *string    `json:"error,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	StartedAt       *time.Time `json:"startedAt,omitempty"`
+	CompletedAt     *time.Time `json:"completedAt,omitempty"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 	ReplaceExisting bool       `json:"replaceExisting"`
 }
 
@@ -167,6 +167,18 @@ func (a *app) adminKnowledgeTopics(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// listKnowledgeTopics lists localized Knowledge Base topic definitions.
+// @Summary List Knowledge Base topic definitions
+// @Tags administration
+// @Produce json
+// @Security CookieAuth
+// @Param page query int false "Page number"
+// @Param pageSize query int false "Page size"
+// @Param language query string false "Language code"
+// @Param search query string false "Search topic key, title, or description"
+// @Success 200 {object} knowledgeTopicDefinitionPage
+// @Failure 403 {object} map[string]string
+// @Router /admin/knowledge/topics [get]
 func (a *app) listKnowledgeTopics(w http.ResponseWriter, r *http.Request) {
 	page := parseKnowledgeTopicPage(r.URL.Query().Get("page"), 1)
 	pageSize := parseKnowledgeTopicPageSize(r.URL.Query().Get("pageSize"))
@@ -215,6 +227,17 @@ func (a *app) listKnowledgeTopics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, knowledgeTopicDefinitionPage{Items: items, Page: page, PageSize: pageSize, Total: total, TotalPages: totalPages})
 }
 
+// createKnowledgeTopic creates a localized Knowledge Base topic definition.
+// @Summary Create Knowledge Base topic definition
+// @Tags administration
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param body body knowledgeTopicDefinitionRequest true "Topic definition"
+// @Success 201 {object} knowledgeTopicDefinitionView
+// @Failure 400 {object} map[string]string
+// @Failure 409 {object} map[string]string
+// @Router /admin/knowledge/topics [post]
 func (a *app) createKnowledgeTopic(w http.ResponseWriter, r *http.Request) {
 	var request knowledgeTopicDefinitionRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -241,6 +264,18 @@ func (a *app) createKnowledgeTopic(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, view)
 }
 
+// updateKnowledgeTopic updates a localized Knowledge Base topic definition.
+// @Summary Update Knowledge Base topic definition
+// @Tags administration
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param id path string true "Topic definition UUID"
+// @Param body body knowledgeTopicDefinitionRequest true "Topic definition"
+// @Success 200 {object} knowledgeTopicDefinitionView
+// @Failure 400 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /admin/knowledge/topics/{id} [patch]
 func (a *app) updateKnowledgeTopic(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
 	var request knowledgeTopicDefinitionRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -262,6 +297,15 @@ func (a *app) updateKnowledgeTopic(w http.ResponseWriter, r *http.Request, id uu
 	writeJSON(w, http.StatusOK, view)
 }
 
+// deleteKnowledgeTopic removes a localized Knowledge Base topic definition.
+// @Summary Delete Knowledge Base topic definition
+// @Tags administration
+// @Produce json
+// @Security CookieAuth
+// @Param id path string true "Topic definition UUID"
+// @Success 200 {object} map[string]interface{}
+// @Failure 404 {object} map[string]string
+// @Router /admin/knowledge/topics/{id} [delete]
 func (a *app) deleteKnowledgeTopic(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
 	result, err := a.db.Exec(r.Context(), "DELETE FROM knowledge_topic_definitions WHERE id=$1", id)
 	if err != nil {
@@ -275,6 +319,17 @@ func (a *app) deleteKnowledgeTopic(w http.ResponseWriter, r *http.Request, id uu
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id.String()})
 }
 
+// adminKnowledgeRebuild queues or lists full Knowledge Base rebuild jobs.
+// @Summary Rebuild Knowledge Base
+// @Tags administration
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param body body map[string]bool false "Rebuild options"
+// @Success 202 {object} knowledgeRebuildJobView
+// @Success 200 {array} knowledgeRebuildJobView
+// @Failure 409 {object} map[string]interface{}
+// @Router /admin/knowledge/topics/rebuild [post]
 func (a *app) adminKnowledgeRebuild(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		rows, err := a.db.Query(r.Context(), `SELECT id::text, status, total_count, processed_count, failed_count, skipped_count, error, created_at, started_at, completed_at, updated_at, replace_existing

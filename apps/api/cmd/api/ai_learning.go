@@ -231,6 +231,22 @@ func (a *app) adminAILearning(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 }
 
+// listAILearning lists searchable, paginated learning terms.
+// @Summary List AI learning terms
+// @Tags ai-learning
+// @Produce json
+// @Security CookieAuth
+// @Param language query string false "Language code"
+// @Param category query string false "Learning category"
+// @Param groupId query string false "Group UUID"
+// @Param search query string false "Search term, topic, group, or source"
+// @Param sort query string false "Sort field, currently weight"
+// @Param sortDirection query string false "asc or desc"
+// @Param page query int false "Page number"
+// @Param pageSize query int false "Page size"
+// @Success 200 {object} aiLearningPageView
+// @Failure 403 {object} map[string]string
+// @Router /admin/ai-learning [get]
 func (a *app) listAILearning(w http.ResponseWriter, r *http.Request) {
 	args := []any{}
 	conditions := []string{"1=1"}
@@ -326,6 +342,15 @@ func emptyLearningCounts() map[string]int {
 	return counts
 }
 
+// adminAILearningSummary returns category totals and time-series metrics.
+// @Summary Get AI learning summary
+// @Tags ai-learning
+// @Produce json
+// @Security CookieAuth
+// @Param language query string false "Language code"
+// @Success 200 {object} aiLearningSummaryView
+// @Failure 403 {object} map[string]string
+// @Router /admin/ai-learning/summary [get]
 func (a *app) adminAILearningSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("allow", http.MethodGet)
@@ -443,6 +468,16 @@ func (a *app) adminAILearningSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+// adminAILearningBulk applies an enable, disable, or delete action to terms.
+// @Summary Bulk update learning terms
+// @Tags ai-learning
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param body body aiLearningBulkRequest true "Bulk action"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Router /admin/ai-learning/bulk [post]
 func (a *app) adminAILearningBulk(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("allow", http.MethodPost)
@@ -557,6 +592,15 @@ func scanAILearningReassessmentJob(row interface{ Scan(...any) error }) (aiReass
 	return view, err
 }
 
+// adminAILearningReassessment starts or lists message reassessment jobs.
+// @Summary Reassess all messages
+// @Tags ai-learning
+// @Produce json
+// @Security CookieAuth
+// @Success 202 {object} aiReassessmentJobView
+// @Success 200 {array} aiReassessmentJobView
+// @Failure 409 {object} map[string]interface{}
+// @Router /admin/ai-learning/reassessment [post]
 func (a *app) adminAILearningReassessment(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		rows, err := a.db.Query(r.Context(), `
@@ -633,6 +677,15 @@ func scanThreadReassessmentJob(row interface{ Scan(...any) error }) (threadReass
 	return view, err
 }
 
+// adminThreadReassessment starts or lists inferred conversation-thread reassessment jobs.
+// @Summary Reassess inferred conversation threads
+// @Tags ai-learning
+// @Produce json
+// @Security CookieAuth
+// @Success 202 {object} threadReassessmentJobView
+// @Success 200 {array} threadReassessmentJobView
+// @Failure 409 {object} map[string]interface{}
+// @Router /admin/ai-learning/thread-reassessment [post]
 func (a *app) adminThreadReassessment(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		rows, err := a.db.Query(r.Context(), `
@@ -742,6 +795,17 @@ func validateAILearningRequest(request aiLearningTermRequest) (aiLearningTermReq
 	return request, nil
 }
 
+// createAILearning creates an explicit learning term.
+// @Summary Create AI learning term
+// @Tags ai-learning
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param body body aiLearningTermRequest true "Learning term"
+// @Success 201 {object} map[string]string
+// @Failure 400 {object} map[string]string
+// @Failure 409 {object} map[string]string
+// @Router /admin/ai-learning [post]
 func (a *app) createAILearning(w http.ResponseWriter, r *http.Request) {
 	var request aiLearningTermRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -794,6 +858,18 @@ func (a *app) createAILearning(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
+// updateAILearning updates an explicit learning term.
+// @Summary Update AI learning term
+// @Tags ai-learning
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param id path string true "Learning term UUID"
+// @Param body body aiLearningTermRequest true "Learning term"
+// @Success 200 {object} map[string]bool
+// @Failure 400 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /admin/ai-learning/{id} [patch]
 func (a *app) updateAILearning(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
 	var request aiLearningTermRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {

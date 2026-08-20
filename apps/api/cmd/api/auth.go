@@ -205,6 +205,14 @@ func (a *app) clearSession(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 }
 
+// authMe returns the current session user.
+// @Summary Get current user
+// @Tags authentication
+// @Produce json
+// @Security CookieAuth
+// @Success 200 {object} authenticatedUser
+// @Failure 401 {object} map[string]string
+// @Router /auth/me [get]
 func (a *app) authMe(w http.ResponseWriter, r *http.Request) {
 	user, err := a.userFromRequest(r)
 	if err != nil {
@@ -214,6 +222,17 @@ func (a *app) authMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, user)
 }
 
+// authProfile updates the current user's profile, locale, or password.
+// @Summary Update profile
+// @Tags authentication
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param body body profileUpdateRequest true "Profile changes"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Router /auth/profile [patch]
 func (a *app) authProfile(w http.ResponseWriter, r *http.Request) {
 	user, err := a.userFromRequest(r)
 	if err != nil {
@@ -327,6 +346,16 @@ func (a *app) authProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "email": email, "name": name, "locale": locale, "verificationRequired": emailChanged, "sessionRevoked": emailChanged || passwordChanged})
 }
 
+// authLogin authenticates a user and sets the session cookie.
+// @Summary Log in
+// @Tags authentication
+// @Accept json
+// @Produce json
+// @Param body body authRequest true "Login credentials"
+// @Success 200 {object} authenticatedUser
+// @Failure 401 {object} map[string]string
+// @Failure 403 {object} map[string]string
+// @Router /auth/login [post]
 func (a *app) authLogin(w http.ResponseWriter, r *http.Request) {
 	var request authRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -363,11 +392,28 @@ func (a *app) authLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, user)
 }
 
+// authLogout invalidates the current session cookie.
+// @Summary Log out
+// @Tags authentication
+// @Produce json
+// @Security CookieAuth
+// @Success 200 {object} map[string]bool
+// @Router /auth/logout [post]
 func (a *app) authLogout(w http.ResponseWriter, r *http.Request) {
 	a.clearSession(w, r)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// authRegister creates a user pending email verification.
+// @Summary Register account
+// @Tags authentication
+// @Accept json
+// @Produce json
+// @Param body body authRequest true "Registration data"
+// @Success 202 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 409 {object} map[string]string
+// @Router /auth/register [post]
 func (a *app) authRegister(w http.ResponseWriter, r *http.Request) {
 	var request authRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -444,6 +490,15 @@ func (a *app) sendAuthEmail(ctx context.Context, userID, recipient, name, locale
 	return a.email.send(emailCtx, recipient, subject, body)
 }
 
+// authVerifyEmail activates a user with a valid verification token.
+// @Summary Verify email
+// @Tags authentication
+// @Accept json
+// @Produce json
+// @Param body body authTokenRequest true "Verification token"
+// @Success 200 {object} map[string]bool
+// @Failure 400 {object} map[string]string
+// @Router /auth/verify-email [post]
 func (a *app) authVerifyEmail(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
@@ -480,6 +535,14 @@ func (a *app) authVerifyEmail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"verified": true})
 }
 
+// authResendVerification sends a new verification email without revealing account existence.
+// @Summary Resend verification email
+// @Tags authentication
+// @Accept json
+// @Produce json
+// @Param body body passwordResetRequest true "Email and locale"
+// @Success 202 {object} map[string]string
+// @Router /auth/email-verification/resend [post]
 func (a *app) authResendVerification(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
@@ -502,6 +565,14 @@ func (a *app) authResendVerification(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "if_account_exists_email_sent"})
 }
 
+// authRequestPasswordReset requests a localized password-reset email.
+// @Summary Request password reset
+// @Tags authentication
+// @Accept json
+// @Produce json
+// @Param body body passwordResetRequest true "Reset request"
+// @Success 202 {object} map[string]string
+// @Router /auth/password-reset/request [post]
 func (a *app) authRequestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
@@ -527,6 +598,15 @@ func (a *app) authRequestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "if_account_exists_email_sent"})
 }
 
+// authConfirmPasswordReset changes a password using a valid reset token.
+// @Summary Confirm password reset
+// @Tags authentication
+// @Accept json
+// @Produce json
+// @Param body body passwordResetConfirmRequest true "Reset confirmation"
+// @Success 200 {object} map[string]bool
+// @Failure 400 {object} map[string]string
+// @Router /auth/password-reset/confirm [post]
 func (a *app) authConfirmPasswordReset(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return

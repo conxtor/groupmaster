@@ -42,6 +42,7 @@ gedacht.
 | `WAGI_PUBLIC_URL` | `http://localhost:3000` | Öffentliche Basis-URL für Verifizierungs- und Passwort-Reset-Links. In Dockge: `https://conxtor.com`. |
 | `NEXT_PUBLIC_API_URL` | leer | Leer lassen, wenn Web und API über denselben Host unter `/api/` laufen. |
 | `WAGI_CORS_ORIGIN` | leer | Nur bei einem separaten Browser-Origin setzen. Bei Same-Origin-Proxy nicht erforderlich. |
+| `SWAGGER_HOST` | leer | Optionaler Host-Override für Swagger „Try it out“. Hinter dem Same-Origin-Reverse-Proxy leer lassen, damit der aktuelle öffentliche Host verwendet wird. |
 | `WAGI_COOKIE_SECURE` | false lokal, true produktiv | Secure-Flag der Session-Cookies; für HTTPS immer `true`. |
 | `PORT` | 8080 API | Interner HTTP-Port des jeweiligen Dienstes. |
 

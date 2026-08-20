@@ -21,6 +21,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+	httpSwagger "github.com/swaggo/http-swagger/v2"
+	docs "github.com/wagi/wa-group-intelligence/apps/api/docs"
 )
 
 type app struct {
@@ -42,6 +44,7 @@ type app struct {
 	minioBuckets                mediaBucketConfig
 	mediaBucketMigrationEnabled bool
 	email                       *emailService
+	instrumentation             *apiInstrumentation
 }
 
 type group struct {
@@ -55,6 +58,10 @@ type group struct {
 	ParentGroupID    *string   `json:"parentGroupId,omitempty"`
 	TopicID          *int64    `json:"topicId,omitempty"`
 	DiscoveredAt     time.Time `json:"discoveredAt"`
+}
+
+type groupSelectionRequest struct {
+	Selected bool `json:"selected"`
 }
 
 type message struct {
@@ -82,8 +89,8 @@ type message struct {
 	DeletedAt          *time.Time      `json:"deletedAt,omitempty"`
 	ReceivedAt         time.Time       `json:"receivedAt"`
 	HasMedia           bool            `json:"hasMedia"`
-	Analysis           json.RawMessage `json:"analysis,omitempty"`
-	Thread             json.RawMessage `json:"thread,omitempty"`
+	Analysis           json.RawMessage `json:"analysis,omitempty" swaggerignore:"true"`
+	Thread             json.RawMessage `json:"thread,omitempty" swaggerignore:"true"`
 }
 
 type audioJobRequest struct {
@@ -262,10 +269,24 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+// health returns a lightweight liveness response.
+// @Summary Liveness check
+// @Description Returns OK when the API process is running.
+// @Tags system
+// @Produce json
+// @Success 200 {object} map[string]string
+// @Router /healthz [get]
 func (a *app) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "api"})
 }
 
+// ready verifies the API's database and NATS dependencies.
+// @Summary Readiness check
+// @Tags system
+// @Produce json
+// @Success 200 {object} map[string]string
+// @Failure 503 {object} map[string]string
+// @Router /readyz [get]
 func (a *app) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
@@ -280,6 +301,14 @@ func (a *app) ready(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
+// groups lists groups visible to the authenticated user.
+// @Summary List visible groups
+// @Tags groups
+// @Produce json
+// @Security CookieAuth
+// @Success 200 {array} group
+// @Failure 401 {object} map[string]string
+// @Router /groups [get]
 func (a *app) groups(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -312,6 +341,25 @@ func (a *app) groups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, result)
 }
 
+// messages lists paginated messages from selected groups.
+// @Summary List messages
+// @Tags messages
+// @Produce json
+// @Security CookieAuth
+// @Param limit query int false "Page size (maximum 200)"
+// @Param offset query int false "Number of messages to skip"
+// @Param q query string false "Search term"
+// @Param groupId query string false "Filter by group ID"
+// @Param kind query string false "Filter by message kind"
+// @Param relevant query bool false "Only relevant messages"
+// @Param relevanceLevel query string false "Relevance level: high, medium, or low"
+// @Param event query bool false "Only messages with events"
+// @Param place query bool false "Only messages with places"
+// @Param from query string false "RFC3339 lower bound"
+// @Param to query string false "RFC3339 upper bound"
+// @Success 200 {array} message
+// @Failure 401 {object} map[string]string
+// @Router /messages [get]
 func (a *app) messages(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -476,6 +524,18 @@ func (a *app) mediaToken(messageID string, thumbnail bool, expires int64) string
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
+// mediaImage streams a signed media object or thumbnail.
+// @Summary Download media
+// @Tags media
+// @Security CookieAuth
+// @Param messageId path string true "Message UUID"
+// @Param thumbnail query int false "Use thumbnail when set to 1"
+// @Param expires query int64 true "Unix expiration timestamp"
+// @Param token query string true "Signed media token"
+// @Success 200 {file} binary
+// @Failure 401 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /media/{messageId} [get]
 func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -606,6 +666,15 @@ func (a *app) mediaImage(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, filepath.Base(filePath), info.ModTime(), file)
 }
 
+// knowledge returns the hierarchical Knowledge Base for selected groups.
+// @Summary List Knowledge Base topics
+// @Tags knowledge
+// @Produce json
+// @Security CookieAuth
+// @Param groupId query string false "Filter by group ID"
+// @Success 200 {array} knowledgeTopic
+// @Failure 401 {object} map[string]string
+// @Router /knowledge [get]
 func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -703,6 +772,17 @@ func (a *app) knowledge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, roots)
 }
 
+// aiFeedback records explicit user feedback for a message analysis.
+// @Summary Record AI feedback
+// @Tags ai
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param body body aiFeedbackRequest true "Feedback"
+// @Success 200 {object} map[string]bool
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Router /ai/feedback [post]
 func (a *app) aiFeedback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -986,6 +1066,17 @@ func mockImageURL(groupID string, text *string) string {
 	}
 }
 
+// selectGroup changes the authenticated user's subscription state for a group.
+// @Summary Select or deselect a group
+// @Tags groups
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param groupId path string true "Group ID"
+// @Param body body groupSelectionRequest true "Selection state"
+// @Success 200 {object} group
+// @Failure 404 {object} map[string]string
+// @Router /groups/{groupId}/select [post]
 func (a *app) selectGroup(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -993,9 +1084,7 @@ func (a *app) selectGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	groupID := strings.TrimPrefix(r.URL.Path, "/api/v1/groups/")
 	groupID = strings.TrimSuffix(groupID, "/select")
-	var body struct {
-		Selected bool `json:"selected"`
-	}
+	var body groupSelectionRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid JSON"})
 		return
@@ -1050,6 +1139,15 @@ func (a *app) audioJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 }
 
+// listAudioJobs lists audio processing jobs visible to the authenticated user.
+// @Summary List audio jobs
+// @Tags audio
+// @Produce json
+// @Security CookieAuth
+// @Param limit query int false "Maximum number of jobs (maximum 500)"
+// @Success 200 {array} audioJobView
+// @Failure 401 {object} map[string]string
+// @Router /audio/jobs [get]
 func (a *app) listAudioJobs(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -1092,6 +1190,17 @@ func (a *app) listAudioJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// createAudioJob queues an audio file for transcription.
+// @Summary Queue audio transcription
+// @Tags audio
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param body body audioJobRequest true "Audio job"
+// @Success 202 {object} audioJobView
+// @Failure 400 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /audio/jobs [post]
 func (a *app) createAudioJob(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -1152,6 +1261,15 @@ func (a *app) audioJobAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// retryAudioJob queues a failed audio job again.
+// @Summary Retry audio job
+// @Tags audio
+// @Produce json
+// @Security CookieAuth
+// @Param jobId path string true "Audio job UUID"
+// @Success 202 {object} audioJobView
+// @Failure 404 {object} map[string]string
+// @Router /audio/jobs/{jobId}/retry [post]
 func (a *app) retryAudioJob(w http.ResponseWriter, r *http.Request, jobID string) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -1188,6 +1306,18 @@ func (a *app) retryAudioJob(w http.ResponseWriter, r *http.Request, jobID string
 	writeJSON(w, http.StatusAccepted, item)
 }
 
+// updateAudioTranscript stores a corrected transcript and republishes the analysis event.
+// @Summary Correct audio transcript
+// @Tags audio
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param jobId path string true "Audio job UUID"
+// @Param body body audioTranscriptRequest true "Transcript correction"
+// @Success 200 {object} audioJobView
+// @Failure 400 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /audio/jobs/{jobId}/transcript [put]
 func (a *app) updateAudioTranscript(w http.ResponseWriter, r *http.Request, jobID string) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -1229,6 +1359,14 @@ func (a *app) updateAudioTranscript(w http.ResponseWriter, r *http.Request, jobI
 	writeJSON(w, http.StatusOK, item)
 }
 
+// status returns connector, audio, and AI processing status for the user.
+// @Summary Get processing status
+// @Tags system
+// @Produce json
+// @Security CookieAuth
+// @Success 200 {object} serviceStatusView
+// @Failure 401 {object} map[string]string
+// @Router /status [get]
 func (a *app) status(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -1331,13 +1469,6 @@ func (a *app) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (a *app) metrics(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("content-type", "text/plain; version=0.0.4")
-	fmt.Fprintln(w, "# HELP wagi_api_up API process health")
-	fmt.Fprintln(w, "# TYPE wagi_api_up gauge")
-	fmt.Fprintln(w, "wagi_api_up 1")
-}
-
 func cors(origin string, next http.Handler) http.Handler {
 	origin = strings.TrimSpace(origin)
 	if origin == "" {
@@ -1360,6 +1491,21 @@ func cors(origin string, next http.Handler) http.Handler {
 	})
 }
 
+// @title CONXTOR Messaging Group Intelligence API
+// @version 0.1.0
+// @description REST API for ingesting, analyzing, and presenting selected WhatsApp and Telegram group conversations.
+// @description The public deployment serves this API below the /api reverse-proxy prefix.
+// @termsOfService https://github.com/conxtor/groupmaster
+// @contact.name CONXTOR project
+// @contact.url https://github.com/conxtor/groupmaster
+// @license.name MIT
+// @license.url https://opensource.org/licenses/MIT
+// @BasePath /api/v1
+// @schemes http https
+// @securityDefinitions.apikey CookieAuth
+// @in cookie
+// @name wagi_session
+// @description Authenticated CONXTOR session cookie.
 func main() {
 	ctx := context.Background()
 	databaseURL := env("DATABASE_URL", "postgres://wagi_app:app@localhost:5432/app?sslmode=disable")
@@ -1399,7 +1545,13 @@ func main() {
 		minioBuckets:                newMediaBucketConfig(),
 		mediaBucketMigrationEnabled: envBool("MEDIA_BUCKET_MIGRATION_ENABLED", true),
 		email:                       newEmailService(),
+		instrumentation:             newAPIInstrumentation(),
 	}
+	docs.SwaggerInfo.Title = "CONXTOR Messaging Group Intelligence API"
+	docs.SwaggerInfo.Version = "0.1.0"
+	docs.SwaggerInfo.Host = strings.TrimSpace(os.Getenv("SWAGGER_HOST"))
+	docs.SwaggerInfo.BasePath = "/api/v1"
+	docs.SwaggerInfo.Schemes = []string{"http", "https"}
 	if err := a.migrateMediaBuckets(ctx); err != nil {
 		log.Fatal(err)
 	}
@@ -1407,8 +1559,20 @@ func main() {
 		log.Fatal(err)
 	}
 	mux := http.NewServeMux()
+	// Keep Swagger on the same origin and under the reverse-proxy prefix. The
+	// generated spec uses a relative host so Try it out follows the public host.
+	mux.Handle("/api/swagger/", httpSwagger.Handler(httpSwagger.URL("/api/swagger/doc.json")))
 	mux.HandleFunc("/healthz", a.health)
 	mux.HandleFunc("/readyz", a.ready)
+	// Keep the infrastructure paths above for Docker and reverse-proxy
+	// healthchecks, and expose matching versioned aliases for Swagger and
+	// callers using the public API prefix.
+	mux.HandleFunc("/api/v1/healthz", a.health)
+	mux.HandleFunc("/api/v1/readyz", a.ready)
+	// Expose the Prometheus endpoint through the same reverse-proxy prefix as
+	// the rest of the versioned API. Keep /metrics for internal scrapers that
+	// address the API container directly.
+	mux.HandleFunc("/api/v1/metrics", a.metrics)
 	mux.HandleFunc("/metrics", a.metrics)
 	mux.HandleFunc("/api/v1/auth/me", a.authMe)
 	mux.HandleFunc("/api/v1/auth/profile", requireAuthenticated(a, a.authProfile))
@@ -1440,5 +1604,5 @@ func main() {
 	mux.HandleFunc("/api/v1/replays", requireAuthenticated(a, a.replays))
 	port := env("PORT", "8080")
 	log.Printf("wagi api listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, cors(a.corsOrigin, mux)))
+	log.Fatal(http.ListenAndServe(":"+port, a.instrumentHTTP(cors(a.corsOrigin, mux))))
 }

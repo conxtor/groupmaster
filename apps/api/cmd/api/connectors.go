@@ -298,6 +298,15 @@ func (a *app) onboardingSlots(platform string) int {
 	return a.waOnboardingSlots
 }
 
+// connectorAccounts lists the current user's connector accounts.
+// @Summary List connector accounts
+// @Tags connectors
+// @Produce json
+// @Security CookieAuth
+// @Param all query bool false "Administrators may include all accounts"
+// @Success 200 {array} connectorAccountView
+// @Failure 401 {object} map[string]string
+// @Router /connectors/accounts [get]
 func (a *app) connectorAccounts(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -361,6 +370,18 @@ func (a *app) connectorAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, item)
 }
 
+// connectorAccountAction updates a connector account or delegates QR operations.
+// @Summary Update connector account
+// @Tags connectors
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param accountId path string true "Connector account UUID"
+// @Param body body map[string]string true "Status or label update"
+// @Success 200 {object} connectorAccountView
+// @Failure 400 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /connectors/accounts/{accountId} [patch]
 func (a *app) connectorAccountAction(w http.ResponseWriter, r *http.Request) {
 	user, ok := a.requireUser(w, r)
 	if !ok {
@@ -415,6 +436,16 @@ func (a *app) connectorAccountAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+// connectorAccountQR starts or reads the user-bound QR onboarding session.
+// @Summary Get or start connector QR onboarding
+// @Tags connectors
+// @Produce json
+// @Security CookieAuth
+// @Param accountId path string true "Connector account UUID"
+// @Success 200 {object} connectorQRView
+// @Failure 400 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /connectors/accounts/{accountId}/qr [get]
 func (a *app) connectorAccountQR(w http.ResponseWriter, r *http.Request, accountID string, user *authenticatedUser) {
 	if _, err := uuid.Parse(accountID); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid connector account"})

@@ -28,6 +28,7 @@ Danach:
 - Knowledge Base: http://localhost:3000/knowledge
 - Go API über denselben Einstiegspunkt: http://localhost:3000/readyz
 - Connector-Einrichtung: http://localhost:3000/connectors
+- Swagger UI: http://localhost:3000/api/swagger/index.html
 - Connector-Status: in der Connector-Einrichtung unter `/connectors`
 - NATS und MinIO: intern im Docker-Netz, standardmäßig ohne Host-Portfreigabe
 
@@ -36,6 +37,14 @@ Die API-Route ist unter `/api/` erreichbar, zum Beispiel
 Port 3000 werden im Compose-Standard nicht direkt auf den Host veröffentlicht;
 NGINX leitet intern `/api/` an die API und alle übrigen Anfragen an die
 Web-App weiter.
+
+Die interaktive Swagger-UI wird ebenfalls über denselben Reverse-Proxy
+ausgeliefert. Lokal ist sie unter
+`http://localhost:3000/api/swagger/index.html` erreichbar, im Dockge-Deployment
+unter `https://conxtor.com/api/swagger/index.html`. Die OpenAPI-Definition liegt
+unter `/api/swagger/doc.json`. `SWAGGER_HOST` bleibt bei diesem Same-Origin-
+Setup leer, damit „Try it out“ automatisch den aktuell verwendeten Host und
+das HTTPS-Schema nutzt.
 
 ## Konfiguration
 
@@ -714,7 +723,8 @@ Bootstrap-Administrator wird beim ersten erfolgreichen API-Start angelegt.
 - `GET/POST /api/v1/admin/ai-learning/thread-reassessment` für Status und Start der Neubewertung der Nachrichten-Threads
 - Admin-Betriebsübersicht unter `/admin`; die Benutzerverwaltung liegt separat unter `/admin/users`, das Lernmodell unter `/admin/ai-learning`.
 - `GET /api/v1/admin/observability?aiPage=1&aiPageSize=20` liefert die paginierte KI-Verarbeitungshistorie. Die dort angezeigte Dauer ist ausschließlich aktive Worker-Zeit; Warteschlange, Retry-Backoff und Neustartwartezeit werden nicht eingerechnet.
-- `GET /healthz` und `GET /readyz`
+- `GET /healthz` und `GET /readyz` für Infrastruktur-Checks; die Swagger/API-Aliase
+  sind `GET /api/v1/healthz` und `GET /api/v1/readyz`
 - `GET /api/v1/groups`
 - `PUT /api/v1/groups/{groupId}/select` mit `{ "selected": true|false }`
 - Die Gruppenverwaltung erfolgt ausschließlich nutzerbezogen unter `/groups`; Administratoren verwalten dort keine Gruppenrechte mehr.
@@ -732,7 +742,16 @@ bleibt stärker. Ausschlusswörter werden nicht automatisch gelernt.
 - `GET /api/v1/replays` zeigt die eigenen Replay-Jobs
 - `POST /api/v1/replays` startet einen Replay/Backfill für ausgewählte Gruppen:
   `{ "groupIds": ["..."], "from": "2026-08-01T00:00:00Z", "to": "2026-08-08T00:00:00Z", "includeMedia": true }`
-- `GET /metrics`
+- `GET /api/v1/metrics` liefert Prometheus-Metriken im Textformat. Für interne
+  Scraper bleibt der direkte API-Pfad `GET /metrics` erhalten.
+
+Der Metrics-Endpunkt enthält neben `wagi_api_up` unter anderem Prozesslaufzeit
+und HTTP-Requests, Statusklassen und Antwortdauer, PostgreSQL-Erreichbarkeit und
+Pool-Auslastung, Nachrichten-/Gruppen-/Analysebestände, Audio-/KI-/Medienjobs,
+Connector-Konten und aktive Leases, Receive-Cursor, NATS-Verkehr sowie
+JetStream-Streams und Consumer-Pendings. Fehler einzelner optionaler Abfragen
+werden als `wagi_api_metrics_query_failed` ausgewiesen, ohne den gesamten Scrape
+zu verhindern.
 
 Replay verarbeitet nur Gruppen, auf die der angemeldete Nutzer Zugriff hat und
 die er ausgewählt hat. Der Zeitraum ist auf 366 Tage begrenzt. Nachrichten und

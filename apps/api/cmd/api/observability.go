@@ -210,6 +210,17 @@ var observabilityConsumers = map[string][]string{
 	"WAGI_KB_REBUILD":   {"WAGI_KB_REBUILD"},
 }
 
+// adminObservability returns operational counters for processing loops, pools,
+// queues, JetStream consumers, MinIO, and recent AI work.
+// @Summary Get administration observability
+// @Tags administration
+// @Produce json
+// @Security CookieAuth
+// @Param aiPage query int false "AI history page"
+// @Param aiPageSize query int false "AI history page size"
+// @Success 200 {object} adminObservabilityView
+// @Failure 403 {object} map[string]string
+// @Router /admin/observability [get]
 func (a *app) adminObservability(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("allow", http.MethodGet)

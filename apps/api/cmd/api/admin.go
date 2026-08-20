@@ -51,6 +51,14 @@ func (a *app) adminUsers(w http.ResponseWriter, r *http.Request) {
 	a.updateAdminUser(w, r, strings.Trim(path, "/"))
 }
 
+// listAdminUsers lists all accounts and their current roles/status.
+// @Summary List users
+// @Tags administration
+// @Produce json
+// @Security CookieAuth
+// @Success 200 {array} adminUserView
+// @Failure 403 {object} map[string]string
+// @Router /admin/users [get]
 func (a *app) listAdminUsers(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.Query(r.Context(), `
 		SELECT u.id::text, u.email, u.name, u.status,
@@ -77,6 +85,18 @@ func (a *app) listAdminUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// createAdminUser creates an administrator-managed, already verified account.
+// @Summary Create user
+// @Tags administration
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param body body adminCreateUserRequest true "User data"
+// @Success 201 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 403 {object} map[string]string
+// @Failure 409 {object} map[string]string
+// @Router /admin/users [post]
 func (a *app) createAdminUser(w http.ResponseWriter, r *http.Request) {
 	var request adminCreateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -133,6 +153,19 @@ func (a *app) createAdminUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"id": userID, "email": email, "name": name, "role": request.Role, "status": request.Status})
 }
 
+// updateAdminUser changes a user's role and status.
+// @Summary Update user role/status
+// @Tags administration
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param id path string true "User UUID"
+// @Param body body roleRequest true "Role and status"
+// @Success 200 {object} map[string]bool
+// @Failure 400 {object} map[string]string
+// @Failure 403 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /admin/users/{id} [patch]
 func (a *app) updateAdminUser(w http.ResponseWriter, r *http.Request, userID string) {
 	var request roleRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {

@@ -1,0 +1,2685 @@
+basePath: /api/v1
+definitions:
+  main.adminCreateUserRequest:
+    properties:
+      email:
+        type: string
+      locale:
+        type: string
+      name:
+        type: string
+      password:
+        type: string
+      role:
+        type: string
+      status:
+        type: string
+    type: object
+  main.adminObservabilityView:
+    properties:
+      activeLeases:
+        items:
+          $ref: '#/definitions/main.connectorLeaseView'
+        type: array
+      aiProcessingHistory:
+        items:
+          $ref: '#/definitions/main.aiProcessingHistoryView'
+        type: array
+      aiProcessingPage:
+        type: integer
+      aiProcessingPageSize:
+        type: integer
+      aiProcessingTotal:
+        type: integer
+      aiProcessingTotalPages:
+        type: integer
+      connectorPools:
+        items:
+          $ref: '#/definitions/main.connectorPoolView'
+        type: array
+      generatedAt:
+        type: string
+      hermes:
+        $ref: '#/definitions/main.hermesObservabilityView'
+      minio:
+        $ref: '#/definitions/main.minioObservabilityView'
+      nats:
+        $ref: '#/definitions/main.natsObservabilityView'
+      processingLoops:
+        items:
+          $ref: '#/definitions/main.processingLoopView'
+        type: array
+      queues:
+        items:
+          $ref: '#/definitions/main.observabilityQueueView'
+        type: array
+      recentLeases:
+        items:
+          $ref: '#/definitions/main.connectorLeaseHistoryView'
+        type: array
+      streams:
+        items:
+          $ref: '#/definitions/main.jetStreamView'
+        type: array
+      summary:
+        $ref: '#/definitions/main.observabilitySummary'
+    type: object
+  main.adminUserView:
+    properties:
+      createdAt:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+      lastConnectedAt:
+        type: string
+      name:
+        type: string
+      roles:
+        items:
+          type: string
+        type: array
+      status:
+        type: string
+    type: object
+  main.aiFeedbackRequest:
+    properties:
+      correction:
+        additionalProperties: {}
+        type: object
+      decision:
+        type: string
+      groupId:
+        type: string
+      messageId:
+        type: string
+      note:
+        type: string
+      targetKey:
+        type: string
+      targetType:
+        type: string
+    type: object
+  main.aiLearningBulkRequest:
+    properties:
+      action:
+        type: string
+      ids:
+        items:
+          type: string
+        type: array
+    type: object
+  main.aiLearningCategorySummaryView:
+    properties:
+      activeCount:
+        type: integer
+      category:
+        type: string
+      count:
+        type: integer
+      learned7d:
+        type: integer
+      learned24h:
+        type: integer
+      learned30d:
+        type: integer
+    type: object
+  main.aiLearningPageView:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/main.aiLearningTermView'
+        type: array
+      page:
+        type: integer
+      pageSize:
+        type: integer
+      total:
+        type: integer
+      totalPages:
+        type: integer
+    type: object
+  main.aiLearningSeriesPoint:
+    properties:
+      bucket:
+        type: string
+      counts:
+        additionalProperties:
+          type: integer
+        type: object
+    type: object
+  main.aiLearningSummaryView:
+    properties:
+      categories:
+        items:
+          $ref: '#/definitions/main.aiLearningCategorySummaryView'
+        type: array
+      daily:
+        items:
+          $ref: '#/definitions/main.aiLearningSeriesPoint'
+        type: array
+      hourly:
+        items:
+          $ref: '#/definitions/main.aiLearningSeriesPoint'
+        type: array
+    type: object
+  main.aiLearningTermRequest:
+    properties:
+      category:
+        type: string
+      enabled:
+        type: boolean
+      groupId:
+        type: string
+      language:
+        type: string
+      relevanceLevel:
+        type: string
+      signalRole:
+        type: string
+      term:
+        type: string
+      topicKey:
+        type: string
+      weight:
+        type: number
+    type: object
+  main.aiLearningTermView:
+    properties:
+      category:
+        type: string
+      createdAt:
+        type: string
+      enabled:
+        type: boolean
+      groupChatType:
+        type: string
+      groupId:
+        type: string
+      groupLanguage:
+        type: string
+      groupPlatform:
+        type: string
+      groupSubject:
+        type: string
+      id:
+        type: string
+      language:
+        type: string
+      negativeCount:
+        type: integer
+      positiveCount:
+        type: integer
+      relevanceLevel:
+        type: string
+      signalRole:
+        type: string
+      source:
+        type: string
+      term:
+        type: string
+      topicKey:
+        type: string
+      updatedAt:
+        type: string
+      weight:
+        type: number
+    type: object
+  main.aiProcessingHistoryView:
+    properties:
+      attempts:
+        type: integer
+      createdAt:
+        type: string
+      durationMilliseconds:
+        description: |-
+          DurationMilliseconds is active worker time only. Queueing, retry
+          backoff and restart recovery time are intentionally excluded.
+        type: integer
+      durationSeconds:
+        type: integer
+      error:
+        type: string
+      groupSubject:
+        type: string
+      id:
+        type: string
+      mediaType:
+        type: string
+      messageId:
+        type: string
+      model:
+        type: string
+      status:
+        type: string
+      updatedAt:
+        type: string
+    type: object
+  main.aiProcessingView:
+    properties:
+      completed:
+        type: integer
+      model:
+        type: string
+      pending:
+        type: integer
+      promptVersion:
+        type: string
+      total:
+        type: integer
+      updatedAt:
+        type: string
+    type: object
+  main.aiReassessmentJobView:
+    properties:
+      completedAt:
+        type: string
+      createdAt:
+        type: string
+      error:
+        type: string
+      failedCount:
+        type: integer
+      id:
+        type: string
+      processedCount:
+        type: integer
+      skippedCount:
+        type: integer
+      startedAt:
+        type: string
+      status:
+        type: string
+      totalCount:
+        type: integer
+    type: object
+  main.audioJobRequest:
+    properties:
+      mediaKey:
+        type: string
+      mediaMime:
+        type: string
+      messageId:
+        type: string
+    type: object
+  main.audioJobView:
+    properties:
+      attempts:
+        type: integer
+      confidence:
+        type: number
+      error:
+        type: string
+      groupId:
+        type: string
+      groupSubject:
+        type: string
+      id:
+        type: string
+      language:
+        type: string
+      mediaKey:
+        type: string
+      mediaMime:
+        type: string
+      messageId:
+        type: string
+      nextAttemptAt:
+        type: string
+      status:
+        type: string
+      transcript:
+        type: string
+      updatedAt:
+        type: string
+    type: object
+  main.audioTranscriptRequest:
+    properties:
+      confidence:
+        type: number
+      language:
+        type: string
+      transcript:
+        type: string
+    type: object
+  main.authRequest:
+    properties:
+      email:
+        type: string
+      locale:
+        type: string
+      name:
+        type: string
+      password:
+        type: string
+    type: object
+  main.authTokenRequest:
+    properties:
+      token:
+        type: string
+    type: object
+  main.authenticatedUser:
+    properties:
+      email:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      preferredLocale:
+        type: string
+      roles:
+        items:
+          type: string
+        type: array
+    type: object
+  main.connectorAccountRequest:
+    properties:
+      label:
+        type: string
+      platform:
+        type: string
+    type: object
+  main.connectorAccountView:
+    properties:
+      externalAccountId:
+        type: string
+      id:
+        type: string
+      label:
+        type: string
+      lastConnectedAt:
+        type: string
+      lastError:
+        type: string
+      lastSyncAt:
+        type: string
+      platform:
+        type: string
+      status:
+        type: string
+      updatedAt:
+        type: string
+    type: object
+  main.connectorLeaseHistoryView:
+    properties:
+      accountId:
+        type: string
+      accountStatus:
+        type: string
+      durationSeconds:
+        type: integer
+      endReason:
+        type: string
+      endedAt:
+        type: string
+      id:
+        type: string
+      leaseKind:
+        type: string
+      leaseUntil:
+        type: string
+      platform:
+        type: string
+      startedAt:
+        type: string
+      state:
+        type: string
+      userEmail:
+        type: string
+      userId:
+        type: string
+      userName:
+        type: string
+      workerId:
+        type: string
+    type: object
+  main.connectorLeaseView:
+    properties:
+      accountId:
+        type: string
+      accountStatus:
+        type: string
+      leaseKind:
+        type: string
+      leaseUntil:
+        type: string
+      platform:
+        type: string
+      remainingSeconds:
+        type: integer
+      userEmail:
+        type: string
+      userId:
+        type: string
+      userName:
+        type: string
+      workerId:
+        type: string
+    type: object
+  main.connectorPoolView:
+    properties:
+      activeOnboarding:
+        type: integer
+      activeProcessing:
+        type: integer
+      availableOnboarding:
+        type: integer
+      availableProcessing:
+        type: integer
+      onboardingCapacity:
+        type: integer
+      onboardingWaitSeconds:
+        type: integer
+      onboardingWaiting:
+        type: integer
+      platform:
+        type: string
+      processingCapacity:
+        type: integer
+      processingWaitSeconds:
+        type: integer
+      processingWaiting:
+        type: integer
+    type: object
+  main.connectorQRView:
+    properties:
+      accountId:
+        type: string
+      connected:
+        type: boolean
+      expiresAt:
+        type: string
+      lastError:
+        type: string
+      leaseKind:
+        type: string
+      platform:
+        type: string
+      qr:
+        type: string
+      queueLength:
+        type: integer
+      queuePosition:
+        type: integer
+      requestId:
+        type: string
+      status:
+        type: string
+      updatedAt:
+        type: string
+      waitReason:
+        type: string
+    type: object
+  main.connectorStatusView:
+    properties:
+      connector:
+        type: string
+      detail:
+        type: string
+      lastError:
+        type: string
+      queueLength:
+        type: integer
+      queuePosition:
+        type: integer
+      status:
+        type: string
+      updatedAt:
+        type: string
+      waitReason:
+        type: string
+    type: object
+  main.group:
+    properties:
+      chatType:
+        type: string
+      discoveredAt:
+        type: string
+      id:
+        type: string
+      isSelected:
+        type: boolean
+      language:
+        type: string
+      parentGroupId:
+        type: string
+      participantCount:
+        type: integer
+      platform:
+        type: string
+      subject:
+        type: string
+      topicId:
+        type: integer
+    type: object
+  main.groupSelectionRequest:
+    properties:
+      selected:
+        type: boolean
+    type: object
+  main.hermesObservabilityView:
+    properties:
+      last24Hours:
+        $ref: '#/definitions/main.hermesUsageSummaryView'
+      usage:
+        items:
+          $ref: '#/definitions/main.hermesUsageView'
+        type: array
+    type: object
+  main.hermesUsageSummaryView:
+    properties:
+      errors:
+        type: integer
+      httpAttempts:
+        type: integer
+      logicalRequests:
+        type: integer
+      remoteCandidates:
+        type: integer
+      skippedCandidates:
+        type: integer
+    type: object
+  main.hermesUsageView:
+    properties:
+      bucketStart:
+        type: string
+      candidateCount:
+        type: integer
+      errorCount:
+        type: integer
+      httpAttempts:
+        type: integer
+      logicalRequests:
+        type: integer
+      operation:
+        type: string
+      outcome:
+        type: string
+      trigger:
+        type: string
+    type: object
+  main.jetStreamConsumerView:
+    properties:
+      ackPending:
+        type: integer
+      filterSubject:
+        type: string
+      maxDeliver:
+        type: integer
+      name:
+        type: string
+      pending:
+        type: integer
+      redelivered:
+        type: integer
+      waiting:
+        type: integer
+    type: object
+  main.jetStreamView:
+    properties:
+      bytes:
+        type: integer
+      consumers:
+        items:
+          $ref: '#/definitions/main.jetStreamConsumerView'
+        type: array
+      error:
+        type: string
+      firstSequence:
+        type: integer
+      lastSequence:
+        type: integer
+      messages:
+        type: integer
+      name:
+        type: string
+      status:
+        type: string
+      storage:
+        type: string
+      subjects:
+        items:
+          type: string
+        type: array
+    type: object
+  main.knowledgeItem:
+    properties:
+      children:
+        items:
+          $ref: '#/definitions/main.knowledgeItem'
+        type: array
+      confidence:
+        type: number
+      content:
+        type: string
+      id:
+        type: string
+      itemRole:
+        type: string
+      itemType:
+        type: string
+      sourceMessageIds:
+        items:
+          type: string
+        type: array
+      sourceMessages:
+        items:
+          $ref: '#/definitions/main.knowledgeSourceMessage'
+        type: array
+      updatedAt:
+        type: string
+    type: object
+  main.knowledgeRebuildJobView:
+    properties:
+      completedAt:
+        type: string
+      createdAt:
+        type: string
+      error:
+        type: string
+      failedCount:
+        type: integer
+      id:
+        type: string
+      processedCount:
+        type: integer
+      replaceExisting:
+        type: boolean
+      skippedCount:
+        type: integer
+      startedAt:
+        type: string
+      status:
+        type: string
+      totalCount:
+        type: integer
+      updatedAt:
+        type: string
+    type: object
+  main.knowledgeSourceMessage:
+    properties:
+      documentSummary:
+        type: string
+      groupId:
+        type: string
+      hasMedia:
+        type: boolean
+      id:
+        type: string
+      imageUrl:
+        type: string
+      kind:
+        type: string
+      mediaMime:
+        type: string
+      mediaStatus:
+        type: string
+      mediaUrl:
+        type: string
+      receivedAt:
+        type: string
+      senderJid:
+        type: string
+      senderName:
+        type: string
+      text:
+        type: string
+      thumbnailUrl:
+        type: string
+    type: object
+  main.knowledgeTopic:
+    properties:
+      confidence:
+        type: number
+      groupId:
+        type: string
+      groupSubject:
+        type: string
+      id:
+        type: string
+      items:
+        items:
+          $ref: '#/definitions/main.knowledgeItem'
+        type: array
+      parentTopicId:
+        type: string
+      sourceMessageIds:
+        items:
+          type: string
+        type: array
+      subtopicKey:
+        type: string
+      subtopics:
+        items:
+          $ref: '#/definitions/main.knowledgeTopic'
+        type: array
+      summary:
+        type: string
+      title:
+        type: string
+      topicKey:
+        type: string
+      updatedAt:
+        type: string
+    type: object
+  main.knowledgeTopicDefinitionPage:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/main.knowledgeTopicDefinitionView'
+        type: array
+      page:
+        type: integer
+      pageSize:
+        type: integer
+      total:
+        type: integer
+      totalPages:
+        type: integer
+    type: object
+  main.knowledgeTopicDefinitionRequest:
+    properties:
+      description:
+        type: string
+      enabled:
+        type: boolean
+      language:
+        type: string
+      sortOrder:
+        type: integer
+      title:
+        type: string
+      topicKey:
+        type: string
+    type: object
+  main.knowledgeTopicDefinitionView:
+    properties:
+      createdAt:
+        type: string
+      description:
+        type: string
+      enabled:
+        type: boolean
+      id:
+        type: string
+      language:
+        type: string
+      sortOrder:
+        type: integer
+      title:
+        type: string
+      topicKey:
+        type: string
+      updatedAt:
+        type: string
+    type: object
+  main.message:
+    properties:
+      audioAttempts:
+        type: integer
+      audioError:
+        type: string
+      audioJobId:
+        type: string
+      audioNextAttemptAt:
+        type: string
+      audioStatus:
+        type: string
+      deletedAt:
+        type: string
+      groupId:
+        type: string
+      groupSubject:
+        type: string
+      hasMedia:
+        type: boolean
+      id:
+        type: string
+      imageUrl:
+        type: string
+      kind:
+        type: string
+      mediaStatus:
+        type: string
+      mediaUrl:
+        type: string
+      ocrText:
+        type: string
+      platform:
+        type: string
+      receivedAt:
+        type: string
+      replyToWaMessageId:
+        type: string
+      senderJid:
+        type: string
+      senderName:
+        type: string
+      text:
+        type: string
+      thumbnailUrl:
+        type: string
+      transcript:
+        type: string
+      waMessageId:
+        type: string
+    type: object
+  main.minioBucketObservabilityView:
+    properties:
+      bucket:
+        type: string
+      bucketExists:
+        type: boolean
+      connected:
+        type: boolean
+      error:
+        type: string
+      lastModified:
+        type: string
+      objectCount:
+        type: integer
+      totalBytes:
+        type: integer
+    type: object
+  main.minioObservabilityView:
+    properties:
+      bucket:
+        type: string
+      bucketExists:
+        type: boolean
+      buckets:
+        items:
+          $ref: '#/definitions/main.minioBucketObservabilityView'
+        type: array
+      connected:
+        type: boolean
+      endpoint:
+        type: string
+      error:
+        type: string
+      lastModified:
+        type: string
+      objectCount:
+        type: integer
+      totalBytes:
+        type: integer
+    type: object
+  main.natsObservabilityView:
+    properties:
+      connected:
+        type: boolean
+      inBytes:
+        type: integer
+      inMessages:
+        type: integer
+      outBytes:
+        type: integer
+      outMessages:
+        type: integer
+      reconnects:
+        type: integer
+      servers:
+        items:
+          type: string
+        type: array
+    type: object
+  main.observabilityLabelCount:
+    properties:
+      count:
+        type: integer
+      label:
+        type: string
+    type: object
+  main.observabilityQueueView:
+    properties:
+      active:
+        type: integer
+      capacity:
+        type: integer
+      kind:
+        type: string
+      oldestWaitSeconds:
+        type: integer
+      platform:
+        type: string
+      waiting:
+        type: integer
+    type: object
+  main.observabilitySummary:
+    properties:
+      activeUsers:
+        type: integer
+      adminUsers:
+        type: integer
+      disabledUsers:
+        type: integer
+      groups:
+        type: integer
+      groupsByPlatform:
+        items:
+          $ref: '#/definitions/main.observabilityLabelCount'
+        type: array
+      lastMessageAt:
+        type: string
+      messages:
+        type: integer
+      messagesByKind:
+        items:
+          $ref: '#/definitions/main.observabilityLabelCount'
+        type: array
+      processingFailures:
+        type: integer
+      recentMessages:
+        type: integer
+      relevantMessages:
+        type: integer
+      selectedGroups:
+        type: integer
+      users:
+        type: integer
+    type: object
+  main.passwordResetConfirmRequest:
+    properties:
+      newPassword:
+        type: string
+      token:
+        type: string
+    type: object
+  main.passwordResetRequest:
+    properties:
+      email:
+        type: string
+      locale:
+        type: string
+    type: object
+  main.processingLoopView:
+    properties:
+      completed:
+        type: integer
+      failed:
+        type: integer
+      name:
+        type: string
+      oldestWaitSeconds:
+        type: integer
+      processing:
+        type: integer
+      queued:
+        type: integer
+      retry:
+        type: integer
+      total:
+        type: integer
+    type: object
+  main.profileUpdateRequest:
+    properties:
+      currentPassword:
+        type: string
+      email:
+        type: string
+      locale:
+        type: string
+      name:
+        type: string
+      newPassword:
+        type: string
+    type: object
+  main.replayJobView:
+    properties:
+      completedAt:
+        type: string
+      createdAt:
+        type: string
+      error:
+        type: string
+      failedCount:
+        type: integer
+      from:
+        type: string
+      groupIds:
+        items:
+          type: string
+        type: array
+      id:
+        type: string
+      includeMedia:
+        type: boolean
+      processedCount:
+        type: integer
+      startedAt:
+        type: string
+      status:
+        type: string
+      to:
+        type: string
+      totalCount:
+        type: integer
+    type: object
+  main.replayRequest:
+    properties:
+      from:
+        type: string
+      groupIds:
+        items:
+          type: string
+        type: array
+      includeMedia:
+        type: boolean
+      to:
+        type: string
+    type: object
+  main.roleRequest:
+    properties:
+      role:
+        type: string
+      status:
+        type: string
+    type: object
+  main.serviceStatusView:
+    properties:
+      aiProcessing:
+        $ref: '#/definitions/main.aiProcessingView'
+      audioJobs:
+        additionalProperties:
+          type: integer
+        type: object
+      connectors:
+        items:
+          $ref: '#/definitions/main.connectorStatusView'
+        type: array
+      recentAudioErrors:
+        items:
+          $ref: '#/definitions/main.audioJobView'
+        type: array
+    type: object
+  main.threadReassessmentJobView:
+    properties:
+      completedAt:
+        type: string
+      createdAt:
+        type: string
+      error:
+        type: string
+      failedCount:
+        type: integer
+      id:
+        type: string
+      processedCount:
+        type: integer
+      skippedCount:
+        type: integer
+      startedAt:
+        type: string
+      status:
+        type: string
+      totalCount:
+        type: integer
+    type: object
+info:
+  contact:
+    name: CONXTOR project
+    url: https://github.com/conxtor/groupmaster
+  description: |-
+    REST API for ingesting, analyzing, and presenting selected WhatsApp and Telegram group conversations.
+    The public deployment serves this API below the /api reverse-proxy prefix.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: https://github.com/conxtor/groupmaster
+  title: CONXTOR Messaging Group Intelligence API
+  version: 0.1.0
+paths:
+  /admin/ai-learning:
+    get:
+      parameters:
+      - description: Language code
+        in: query
+        name: language
+        type: string
+      - description: Learning category
+        in: query
+        name: category
+        type: string
+      - description: Group UUID
+        in: query
+        name: groupId
+        type: string
+      - description: Search term, topic, group, or source
+        in: query
+        name: search
+        type: string
+      - description: Sort field, currently weight
+        in: query
+        name: sort
+        type: string
+      - description: asc or desc
+        in: query
+        name: sortDirection
+        type: string
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Page size
+        in: query
+        name: pageSize
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.aiLearningPageView'
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List AI learning terms
+      tags:
+      - ai-learning
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Learning term
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.aiLearningTermRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Create AI learning term
+      tags:
+      - ai-learning
+  /admin/ai-learning/{id}:
+    delete:
+      parameters:
+      - description: Learning term UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Delete AI learning term
+      tags:
+      - ai-learning
+    patch:
+      consumes:
+      - application/json
+      parameters:
+      - description: Learning term UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Learning term
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.aiLearningTermRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Update AI learning term
+      tags:
+      - ai-learning
+  /admin/ai-learning/bulk:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Bulk action
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.aiLearningBulkRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Bulk update learning terms
+      tags:
+      - ai-learning
+  /admin/ai-learning/reassessment:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.aiReassessmentJobView'
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List message reassessment jobs
+      tags:
+      - ai-learning
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.aiReassessmentJobView'
+            type: array
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/main.aiReassessmentJobView'
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Reassess all messages
+      tags:
+      - ai-learning
+  /admin/ai-learning/summary:
+    get:
+      parameters:
+      - description: Language code
+        in: query
+        name: language
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.aiLearningSummaryView'
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Get AI learning summary
+      tags:
+      - ai-learning
+  /admin/ai-learning/thread-reassessment:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.threadReassessmentJobView'
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List thread reassessment jobs
+      tags:
+      - ai-learning
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.threadReassessmentJobView'
+            type: array
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/main.threadReassessmentJobView'
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Reassess inferred conversation threads
+      tags:
+      - ai-learning
+  /admin/knowledge/topics:
+    get:
+      parameters:
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Page size
+        in: query
+        name: pageSize
+        type: integer
+      - description: Language code
+        in: query
+        name: language
+        type: string
+      - description: Search topic key, title, or description
+        in: query
+        name: search
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.knowledgeTopicDefinitionPage'
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List Knowledge Base topic definitions
+      tags:
+      - administration
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Topic definition
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.knowledgeTopicDefinitionRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/main.knowledgeTopicDefinitionView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Create Knowledge Base topic definition
+      tags:
+      - administration
+  /admin/knowledge/topics/{id}:
+    delete:
+      parameters:
+      - description: Topic definition UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Delete Knowledge Base topic definition
+      tags:
+      - administration
+    patch:
+      consumes:
+      - application/json
+      parameters:
+      - description: Topic definition UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Topic definition
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.knowledgeTopicDefinitionRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.knowledgeTopicDefinitionView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Update Knowledge Base topic definition
+      tags:
+      - administration
+  /admin/knowledge/topics/rebuild:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.knowledgeRebuildJobView'
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List Knowledge Base rebuild jobs
+      tags:
+      - administration
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Rebuild options
+        in: body
+        name: body
+        schema:
+          additionalProperties:
+            type: boolean
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.knowledgeRebuildJobView'
+            type: array
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/main.knowledgeRebuildJobView'
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Rebuild Knowledge Base
+      tags:
+      - administration
+  /admin/observability:
+    get:
+      parameters:
+      - description: AI history page
+        in: query
+        name: aiPage
+        type: integer
+      - description: AI history page size
+        in: query
+        name: aiPageSize
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.adminObservabilityView'
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Get administration observability
+      tags:
+      - administration
+  /admin/users:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.adminUserView'
+            type: array
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List users
+      tags:
+      - administration
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: User data
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.adminCreateUserRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Create user
+      tags:
+      - administration
+  /admin/users/{id}:
+    patch:
+      consumes:
+      - application/json
+      parameters:
+      - description: User UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Role and status
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.roleRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Update user role/status
+      tags:
+      - administration
+  /ai/feedback:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Feedback
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.aiFeedbackRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Record AI feedback
+      tags:
+      - ai
+  /audio/jobs:
+    get:
+      parameters:
+      - description: Maximum number of jobs (maximum 500)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.audioJobView'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List audio jobs
+      tags:
+      - audio
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Audio job
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.audioJobRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/main.audioJobView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Queue audio transcription
+      tags:
+      - audio
+  /audio/jobs/{jobId}/retry:
+    post:
+      parameters:
+      - description: Audio job UUID
+        in: path
+        name: jobId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/main.audioJobView'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Retry audio job
+      tags:
+      - audio
+  /audio/jobs/{jobId}/transcript:
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Audio job UUID
+        in: path
+        name: jobId
+        required: true
+        type: string
+      - description: Transcript correction
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.audioTranscriptRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.audioJobView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Correct audio transcript
+      tags:
+      - audio
+  /auth/email-verification/resend:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Email and locale
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.passwordResetRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Resend verification email
+      tags:
+      - authentication
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Login credentials
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.authRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.authenticatedUser'
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Log in
+      tags:
+      - authentication
+  /auth/logout:
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Log out
+      tags:
+      - authentication
+  /auth/me:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.authenticatedUser'
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Get current user
+      tags:
+      - authentication
+  /auth/password-reset/confirm:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Reset confirmation
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.passwordResetConfirmRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Confirm password reset
+      tags:
+      - authentication
+  /auth/password-reset/request:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Reset request
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.passwordResetRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Request password reset
+      tags:
+      - authentication
+  /auth/profile:
+    patch:
+      consumes:
+      - application/json
+      parameters:
+      - description: Profile changes
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.profileUpdateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Update profile
+      tags:
+      - authentication
+  /auth/register:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Registration data
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.authRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Register account
+      tags:
+      - authentication
+  /auth/verify-email:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Verification token
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.authTokenRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Verify email
+      tags:
+      - authentication
+  /connectors/accounts:
+    get:
+      parameters:
+      - description: Administrators may include all accounts
+        in: query
+        name: all
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.connectorAccountView'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List connector accounts
+      tags:
+      - connectors
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Connector account
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.connectorAccountRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/main.connectorAccountView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Create connector account
+      tags:
+      - connectors
+  /connectors/accounts/{accountId}:
+    patch:
+      consumes:
+      - application/json
+      parameters:
+      - description: Connector account UUID
+        in: path
+        name: accountId
+        required: true
+        type: string
+      - description: Status or label update
+        in: body
+        name: body
+        required: true
+        schema:
+          additionalProperties:
+            type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.connectorAccountView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Update connector account
+      tags:
+      - connectors
+  /connectors/accounts/{accountId}/qr:
+    get:
+      parameters:
+      - description: Connector account UUID
+        in: path
+        name: accountId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.connectorQRView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Get or start connector QR onboarding
+      tags:
+      - connectors
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Connector account UUID
+        in: path
+        name: accountId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/main.connectorQRView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Start connector QR onboarding
+      tags:
+      - connectors
+  /groups:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.group'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List visible groups
+      tags:
+      - groups
+  /groups/{groupId}/select:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Group ID
+        in: path
+        name: groupId
+        required: true
+        type: string
+      - description: Selection state
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.groupSelectionRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.group'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Select or deselect a group
+      tags:
+      - groups
+  /healthz:
+    get:
+      description: Returns OK when the API process is running.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Liveness check
+      tags:
+      - system
+  /knowledge:
+    get:
+      parameters:
+      - description: Filter by group ID
+        in: query
+        name: groupId
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.knowledgeTopic'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List Knowledge Base topics
+      tags:
+      - knowledge
+  /media/{messageId}:
+    get:
+      parameters:
+      - description: Message UUID
+        in: path
+        name: messageId
+        required: true
+        type: string
+      - description: Use thumbnail when set to 1
+        in: query
+        name: thumbnail
+        type: integer
+      - description: Unix expiration timestamp
+        format: int64
+        in: query
+        name: expires
+        required: true
+        type: integer
+      - description: Signed media token
+        in: query
+        name: token
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: file
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Download media
+      tags:
+      - media
+  /messages:
+    get:
+      parameters:
+      - description: Page size (maximum 200)
+        in: query
+        name: limit
+        type: integer
+      - description: Number of messages to skip
+        in: query
+        name: offset
+        type: integer
+      - description: Search term
+        in: query
+        name: q
+        type: string
+      - description: Filter by group ID
+        in: query
+        name: groupId
+        type: string
+      - description: Filter by message kind
+        in: query
+        name: kind
+        type: string
+      - description: Only relevant messages
+        in: query
+        name: relevant
+        type: boolean
+      - description: 'Relevance level: high, medium, or low'
+        in: query
+        name: relevanceLevel
+        type: string
+      - description: Only messages with events
+        in: query
+        name: event
+        type: boolean
+      - description: Only messages with places
+        in: query
+        name: place
+        type: boolean
+      - description: RFC3339 lower bound
+        in: query
+        name: from
+        type: string
+      - description: RFC3339 upper bound
+        in: query
+        name: to
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.message'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List messages
+      tags:
+      - messages
+  /metrics:
+    get:
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      summary: Get API metrics
+      tags:
+      - system
+  /readyz:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "503":
+          description: Service Unavailable
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Readiness check
+      tags:
+      - system
+  /replays:
+    get:
+      consumes:
+      - application/json
+      parameters:
+      - description: Administrators may include all users' jobs
+        in: query
+        name: all
+        type: boolean
+      - description: Replay range and groups
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.replayRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/main.replayJobView'
+            type: array
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/main.replayJobView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: List or create replay jobs
+      tags:
+      - replays
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Replay range and groups
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/main.replayRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/main.replayJobView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Create replay job
+      tags:
+      - replays
+  /status:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.serviceStatusView'
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - CookieAuth: []
+      summary: Get processing status
+      tags:
+      - system
+schemes:
+- http
+- https
+securityDefinitions:
+  CookieAuth:
+    description: Authenticated CONXTOR session cookie.
+    in: cookie
+    name: wagi_session
+    type: apiKey
+swagger: "2.0"
