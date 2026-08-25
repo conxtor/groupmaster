@@ -34,11 +34,16 @@ Außerdem müssen `conxtor.com` (A und gegebenenfalls AAAA) auf den Server zeige
 
 Die Compose-Varianten enthalten keinen separaten Bucket-Initialisierungsdienst. Der `media-worker` prüft den jeweiligen typabhängigen Bucket (`MINIO_BUCKET_IMAGES`, `MINIO_BUCKET_VIDEOS`, `MINIO_BUCKET_AUDIO`, `MINIO_BUCKET_DOCUMENTS` oder `MINIO_BUCKET_OTHER`) vor Medienzugriffen und legt ihn bei Bedarf idempotent an. Die API führt bei aktiviertem `MEDIA_BUCKET_MIGRATION_ENABLED` beim Start einmalig die wiederaufnehmbare Migration aus dem Legacy-Bucket `MINIO_BUCKET` aus. Ein Neustart löscht weder Buckets noch vorhandene Objekte. Die Dockge-Variante verwendet eigene, benannte Volumes (`wagi_dockge_*`) für Datenbank, JetStream, MinIO, Medien, Connector-Sessions und Modelle. Dadurch werden lokale Testdaten nicht verwendet und ein Stack-Neustart löscht keine persistenten Daten.
 
-Der Telegram-Dienst wird in beiden Compose-Welten aus `apps/tg-connector-go/Dockerfile` gebaut beziehungsweise als `wagi-tg-connector` aus GHCR geladen. Die Implementierung nutzt Go 1.25 und `gotd/td` für direkte MTProto-Verbindungen. Sessions und Cursor bleiben in PostgreSQL. Es gibt keinen Telegram-Bot- oder GramJS-Fallback; QR-Login und Nachrichtenabruf laufen ausschließlich über die persönliche MTProto-Session.
+Der Telegram-Dienst wird in beiden Compose-Welten aus `apps/tg-connector-go/Dockerfile` gebaut beziehungsweise als `wagi-tg-connector` aus GHCR geladen. Die Implementierung nutzt Go 1.25 und `gotd/td` für direkte MTProto-Verbindungen. Sessions und Cursor bleiben in PostgreSQL. Es gibt keinen Telegram-Bot- oder GramJS-Fallback; QR-Login und Nachrichtenabruf laufen ausschließlich über die persönliche MTProto-Session. Der sieben­tägige `TG_BACKFILL_DAYS`-Zeitraum gilt nur für neue Auswahlen oder fehlende Cursor; reguläre Pool-Läufe verwenden den Telegram-Message-ID-Cursor.
 
 Der Consumer-WhatsApp-Konnektor `wagi-wa-connector-whatsmeow` ist der einzige
 WhatsApp-Konnektor im Stack. Das Image wird lokal aus
 `apps/wa-connector-go/Dockerfile` gebaut oder aus GHCR geladen. Onboarding und
 Processing verwenden die Dienste `wa-connector` und `wa-connector-worker`; die
 whatsmeow-SQLStore verwendet die Migration `024_whatsmeow_storage.sql` und das
-PostgreSQL-Schema `wa_whatsmeow`. Es wird kein Auth-Dateivolume benötigt.
+PostgreSQL-Schema `wa_whatsmeow`. Es wird kein Auth-Dateivolume benötigt. Der
+WhatsApp-Connector speichert pro Nutzer und Gruppe einen persistenten
+Synchronisationscursor. `WA_BACKFILL_DAYS` gilt nur für die erstmalige
+Gruppenauswahl; normale Reconnects verwenden `WA_RECONNECT_CATCHUP_DAYS` als
+kurzes Überlappungsfenster und filtern bereits bekannte Nachrichten anhand des
+Cursors.

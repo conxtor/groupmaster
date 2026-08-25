@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 )
@@ -54,29 +53,6 @@ func (a *app) close() {
 	}
 	if a.db != nil {
 		a.db.Close()
-	}
-}
-
-func (a *app) prepareInitialBackfill(ctx context.Context) {
-	var completed *time.Time
-	err := a.db.QueryRow(ctx, "SELECT initial_backfill_completed_at FROM connector_states WHERE connector='telegram'").Scan(&completed)
-	a.mu.Lock()
-	a.initialBackfill = errors.Is(err, pgx.ErrNoRows) || completed == nil
-	a.mu.Unlock()
-	if a.initialBackfill {
-		_, _ = a.db.Exec(ctx, `INSERT INTO connector_states (connector,status,first_activated_at,initial_backfill_started_at,initial_backfill_days)
-VALUES ('telegram','starting',NOW(),NOW(),$1)
-ON CONFLICT (connector) DO UPDATE SET initial_backfill_started_at=COALESCE(connector_states.initial_backfill_started_at,NOW()),initial_backfill_days=$1,updated_at=NOW()`, a.cfg.InitialBackfillDays)
-	}
-}
-
-func (a *app) completeInitialBackfill(ctx context.Context) {
-	a.mu.Lock()
-	wasInitial := a.initialBackfill
-	a.initialBackfill = false
-	a.mu.Unlock()
-	if wasInitial {
-		_, _ = a.db.Exec(ctx, "UPDATE connector_states SET initial_backfill_completed_at=NOW(),updated_at=NOW() WHERE connector='telegram'")
 	}
 }
 
@@ -205,7 +181,6 @@ func (a *app) runProcessing(ctx context.Context) {
 }
 
 func (a *app) run(ctx context.Context) {
-	a.prepareInitialBackfill(ctx)
 	a.startSubscriptions(ctx)
 	if a.cfg.APIID <= 0 || a.cfg.APIHash == "" {
 		a.setStatus(ctx, "degraded", "TG_API_ID und TG_API_HASH fehlen; Direct Telegram bleibt deaktiviert", nil)

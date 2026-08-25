@@ -90,11 +90,9 @@ func (a *app) runWhatsAppCycle(parent context.Context, onboarding bool) error {
 	if err != nil {
 		return err
 	}
-	configureHistorySync(a.cfg)
-	client := whatsmeow.NewClient(device, waLog.Stdout("whatsmeow", "INFO", false))
-	client.AutoTrustIdentity = true
-	connected := make(chan struct{}, 1)
 	selected := map[string]bool{}
+	initialGroups := []string{}
+	recoverySync := false
 	if !onboarding {
 		groups, selectErr := a.selectedGroups(cycleCtx)
 		if selectErr != nil {
@@ -103,7 +101,15 @@ func (a *app) runWhatsAppCycle(parent context.Context, onboarding bool) error {
 		for _, groupID := range groups {
 			selected[groupID] = true
 		}
+		initialGroups, recoverySync, err = a.syncPlan(cycleCtx, groups)
+		if err != nil {
+			return err
+		}
 	}
+	configureHistorySync(a.cfg, len(initialGroups) > 0, recoverySync)
+	client := whatsmeow.NewClient(device, waLog.Stdout("whatsmeow", "INFO", false))
+	client.AutoTrustIdentity = true
+	connected := make(chan struct{}, 1)
 	client.AddEventHandler(func(evt any) {
 		a.handleWhatsAppEvent(cycleCtx, client, selected, evt, connected)
 	})
@@ -211,10 +217,56 @@ func (a *app) runWhatsAppCycle(parent context.Context, onboarding bool) error {
 		a.setStatus(cycleCtx, "ready", "WhatsApp verbunden; keine Gruppe ausgewählt", nil)
 		return nil
 	}
-	a.setStatus(cycleCtx, "syncing", fmt.Sprintf("Backfill der letzten %d Tage für %d ausgewählte Gruppe(n)", a.cfg.BackfillDays, len(selected)), nil)
-	a.requestHistory(cycleCtx, client, mapKeys(selected))
+	initialGroups, recoverySync, err = a.syncPlan(cycleCtx, mapKeys(selected))
+	if err != nil {
+		return err
+	}
+	selectedGroupIDs := mapKeys(selected)
+	for _, groupID := range selectedGroupIDs {
+		state, stateErr := lease.loadSyncState(cycleCtx, groupID)
+		if stateErr != nil {
+			return stateErr
+		}
+		mode := "incremental"
+		if state.InitialBackfillRequired {
+			mode = "initial_backfill"
+		} else if !state.LastReceivedAt.IsZero() && state.LastReceivedAt.Before(time.Now().UTC().Add(-time.Duration(a.cfg.ReconnectCatchupDays)*24*time.Hour)) {
+			mode = "recovery"
+		}
+		if err := lease.beginSync(cycleCtx, groupID, mode); err != nil {
+			return err
+		}
+	}
+	modeDetail := fmt.Sprintf("Inkrementelle Synchronisation für %d ausgewählte Gruppe(n)", len(selected))
+	if len(initialGroups) > 0 {
+		modeDetail = fmt.Sprintf("Initial-Backfill der letzten %d Tage für %d neue Gruppe(n), danach inkrementelle Synchronisation", a.cfg.BackfillDays, len(initialGroups))
+	} else if recoverySync {
+		modeDetail = fmt.Sprintf("Recovery-Synchronisation für %d ausgewählte Gruppe(n)", len(selected))
+	}
+	a.setStatus(cycleCtx, "syncing", modeDetail, nil)
+	log.Printf("whatsapp processing selected_groups=%d initial_groups=%d recovery=%t account=%s", len(selected), len(initialGroups), recoverySync, lease.account.ID)
+	if len(initialGroups) > 0 {
+		if err := a.requestHistory(cycleCtx, client, initialGroups); err != nil {
+			return err
+		}
+	}
 	if a.cfg.SyncGrace > 0 {
 		time.Sleep(a.cfg.SyncGrace)
+	}
+	for _, groupID := range selectedGroupIDs {
+		state, stateErr := lease.loadSyncState(cycleCtx, groupID)
+		if stateErr != nil {
+			return stateErr
+		}
+		mode := "incremental"
+		if state.InitialBackfillRequired {
+			mode = "initial_backfill"
+		} else if !state.LastReceivedAt.IsZero() && state.LastReceivedAt.Before(time.Now().UTC().Add(-time.Duration(a.cfg.ReconnectCatchupDays)*24*time.Hour)) {
+			mode = "recovery"
+		}
+		if err := lease.completeSync(cycleCtx, groupID, mode, syncStats{}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

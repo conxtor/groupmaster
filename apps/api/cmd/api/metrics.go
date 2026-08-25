@@ -273,23 +273,26 @@ func (a *app) metrics(w http.ResponseWriter, r *http.Request) {
 			{"wagi_api_selected_groups_by_platform_total", "Selected groups by platform", "platform", `SELECT platform, COUNT(*)::bigint FROM wa_groups WHERE is_selected GROUP BY platform ORDER BY platform`, "selected_groups_by_platform"},
 			{"wagi_api_messages_by_kind_total", "Stored messages by kind", "kind", `SELECT kind, COUNT(*)::bigint FROM messages GROUP BY kind ORDER BY kind`, "messages_by_kind"},
 			{"wagi_api_message_analyses_by_relevance_total", "Message analyses by relevance level", "relevance_level", `SELECT COALESCE(relevance_level,'unknown'), COUNT(*)::bigint FROM message_analyses GROUP BY 1 ORDER BY 1`, "analyses_by_relevance"},
-			{"wagi_api_connector_accounts", "Connector accounts by platform and status", "platform_status", `SELECT platform || ':' || status, COUNT(*)::bigint FROM connector_accounts GROUP BY platform, status ORDER BY platform, status`, "connector_accounts"},
-			{"wagi_api_connector_leases", "Active connector leases by platform and kind", "platform_kind", `SELECT ca.platform || ':' || COALESCE(cl.lease_kind,'processing'), COUNT(*)::bigint FROM connector_leases cl JOIN connector_accounts ca ON ca.id=cl.account_id WHERE cl.lease_until > NOW() GROUP BY ca.platform, cl.lease_kind ORDER BY ca.platform, cl.lease_kind`, "connector_leases"},
-			{"wagi_api_connector_onboarding_requests", "Connector onboarding requests by platform and status", "platform_status", `SELECT platform || ':' || status, COUNT(*)::bigint FROM connector_onboarding_requests GROUP BY platform, status ORDER BY platform, status`, "connector_onboarding_requests"},
-		}
+				{"wagi_api_connector_accounts", "Connector accounts by platform and status", "platform_status", `SELECT platform || ':' || status, COUNT(*)::bigint FROM connector_accounts GROUP BY platform, status ORDER BY platform, status`, "connector_accounts"},
+				{"wagi_api_connector_leases", "Active connector leases by platform and kind", "platform_kind", `SELECT ca.platform || ':' || COALESCE(cl.lease_kind,'processing'), COUNT(*)::bigint FROM connector_leases cl JOIN connector_accounts ca ON ca.id=cl.account_id WHERE cl.lease_until > NOW() GROUP BY ca.platform, cl.lease_kind ORDER BY ca.platform, cl.lease_kind`, "connector_leases"},
+				{"wagi_api_connector_onboarding_requests", "Connector onboarding requests by platform and status", "platform_status", `SELECT platform || ':' || status, COUNT(*)::bigint FROM connector_onboarding_requests GROUP BY platform, status ORDER BY platform, status`, "connector_onboarding_requests"},
+				{"wagi_api_connector_sync_modes", "Connector cursor synchronization modes", "mode", `SELECT COALESCE(last_sync_mode,'unknown'), COUNT(*)::bigint FROM connector_cursors GROUP BY 1 ORDER BY 1`, "connector_sync_modes"},
+			}
 		for _, family := range labelFamilies {
 			if !a.emitLabelFamily(ctx, w, family.metric, family.help, family.label, family.query) {
 				queryFailures = append(queryFailures, family.source)
 			}
 		}
 
-		var cursorCount, pendingCursorCount int64
-		if err := a.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE last_received_at IS NULL) FROM connector_cursors`).Scan(&cursorCount, &pendingCursorCount); err != nil {
+		var cursorCount, pendingCursorCount, initialBackfillCount, incompleteSyncCount int64
+		if err := a.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE last_received_at IS NULL), COUNT(*) FILTER (WHERE initial_backfill_required), COUNT(*) FILTER (WHERE last_sync_completed_at IS NULL) FROM connector_cursors`).Scan(&cursorCount, &pendingCursorCount, &initialBackfillCount, &incompleteSyncCount); err != nil {
 			queryFailures = append(queryFailures, "connector_cursors")
 		} else {
 			writePrometheusHeader(w, "wagi_api_connector_cursors", "Connector receive cursors", "gauge")
 			writePrometheusLabeledGauge(w, "wagi_api_connector_cursors", `state="total"`, cursorCount)
 			writePrometheusLabeledGauge(w, "wagi_api_connector_cursors", `state="without_message_timestamp"`, pendingCursorCount)
+			writePrometheusLabeledGauge(w, "wagi_api_connector_cursors", `state="initial_backfill_required"`, initialBackfillCount)
+			writePrometheusLabeledGauge(w, "wagi_api_connector_cursors", `state="sync_incomplete"`, incompleteSyncCount)
 		}
 
 		var mediaBytes int64

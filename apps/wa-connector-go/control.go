@@ -57,6 +57,19 @@ type connectorLease struct {
 	stopRenewal  context.CancelFunc
 }
 
+type syncState struct {
+	InitialBackfillRequired bool
+	LastExternalMessageID   string
+	LastReceivedAt          time.Time
+	LastSequenceNo          int
+}
+
+type syncStats struct {
+	ProviderFetched int
+	PersistedNew    int
+	Duplicates      int
+}
+
 func (l *connectorLease) startRenewal(onError func(error)) {
 	if l == nil {
 		return
@@ -139,6 +152,52 @@ ON CONFLICT (account_id,group_id) DO UPDATE SET
 last_external_message_id=CASE WHEN COALESCE(EXCLUDED.last_sequence_no,0)>=COALESCE(connector_cursors.last_sequence_no,0) THEN EXCLUDED.last_external_message_id ELSE connector_cursors.last_external_message_id END,
 last_received_at=CASE WHEN COALESCE(EXCLUDED.last_sequence_no,0)>=COALESCE(connector_cursors.last_sequence_no,0) THEN EXCLUDED.last_received_at ELSE connector_cursors.last_received_at END,
 last_sequence_no=GREATEST(COALESCE(EXCLUDED.last_sequence_no,0),COALESCE(connector_cursors.last_sequence_no,0)),updated_at=NOW()`, l.account.ID, groupID, externalID, receivedAt, sequence)
+	return err
+}
+
+func (l *connectorLease) loadSyncState(ctx context.Context, groupID string) (syncState, error) {
+	state := syncState{InitialBackfillRequired: true}
+	var external *string
+	var receivedAt *time.Time
+	var sequence *int
+	err := l.db.QueryRow(ctx, `SELECT initial_backfill_required,last_external_message_id,last_received_at,last_sequence_no
+FROM connector_cursors WHERE account_id=$1::uuid AND group_id=$2`, l.account.ID, groupID).
+		Scan(&state.InitialBackfillRequired, &external, &receivedAt, &sequence)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return state, nil
+	}
+	if err != nil {
+		return state, err
+	}
+	if external != nil {
+		state.LastExternalMessageID = *external
+	}
+	if receivedAt != nil {
+		state.LastReceivedAt = receivedAt.UTC()
+	}
+	if sequence != nil {
+		state.LastSequenceNo = *sequence
+	}
+	return state, nil
+}
+
+func (l *connectorLease) beginSync(ctx context.Context, groupID, mode string) error {
+	_, err := l.db.Exec(ctx, `INSERT INTO connector_cursors (account_id,group_id,initial_backfill_required,last_sync_started_at,last_sync_mode)
+VALUES ($1::uuid,$2,$3,NOW(),$4)
+ON CONFLICT (account_id,group_id) DO UPDATE SET
+last_sync_started_at=NOW(),last_sync_mode=$4,
+initial_backfill_started_at=CASE WHEN $3 THEN COALESCE(connector_cursors.initial_backfill_started_at,NOW()) ELSE connector_cursors.initial_backfill_started_at END,
+updated_at=NOW()`, l.account.ID, groupID, mode == "initial_backfill", mode)
+	return err
+}
+
+func (l *connectorLease) completeSync(ctx context.Context, groupID, mode string, stats syncStats) error {
+	_, err := l.db.Exec(ctx, `UPDATE connector_cursors SET
+last_sync_completed_at=NOW(),last_sync_mode=$3,last_provider_fetched=$4,last_persisted_new=$5,last_duplicates=$6,
+initial_backfill_required=CASE WHEN $3='initial_backfill' THEN FALSE ELSE initial_backfill_required END,
+initial_backfill_completed_at=CASE WHEN $3='initial_backfill' THEN COALESCE(initial_backfill_completed_at,NOW()) ELSE initial_backfill_completed_at END,
+updated_at=NOW()
+WHERE account_id=$1::uuid AND group_id=$2`, l.account.ID, groupID, mode, stats.ProviderFetched, stats.PersistedNew, stats.Duplicates)
 	return err
 }
 
@@ -501,6 +560,15 @@ ON CONFLICT (user_id,group_id) DO UPDATE SET is_selected=EXCLUDED.is_selected`, 
 		return
 	}
 	if selected {
+		// A missing cursor identifies a genuinely new subscription. Existing
+		// cursors are deliberately retained so re-selecting a group resumes
+		// incrementally instead of starting another seven-day backfill.
+		if _, err := a.db.Exec(ctx, `INSERT INTO connector_cursors (account_id,group_id,initial_backfill_required)
+SELECT id,$2,TRUE FROM connector_accounts WHERE user_id=$1::uuid AND platform='whatsapp'
+ON CONFLICT (account_id,group_id) DO NOTHING`, userID, groupID); err != nil {
+			log.Printf("whatsapp sync cursor initialization failed group=%s user=%s error=%v", groupID, userID, err)
+			return
+		}
 		_, _ = a.db.Exec(ctx, `UPDATE connector_accounts SET next_sync_at=NOW(),updated_at=NOW() WHERE platform='whatsapp' AND user_id=$1::uuid AND status NOT IN ('disabled','stopped')`, userID)
 	}
 	log.Printf("whatsapp group selection persisted group=%s selected=%t user=%s", groupID, selected, userID)

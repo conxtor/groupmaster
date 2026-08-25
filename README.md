@@ -203,6 +203,7 @@ WA_BACKFILL_GROUP_DELAY_MS=1500
 WA_HISTORY_PAGE_SIZE=50
 WA_HISTORY_REQUEST_DELAY_MS=500
 WA_SYNC_GRACE_SECONDS=60
+WA_RECONNECT_CATCHUP_DAYS=1
 WA_WHATSMEOW_SQL_SCHEMA=wa_whatsmeow
 WA_DATABASE_SSLMODE=disable
 WA_MEDIA_DOWNLOAD_ATTEMPTS=3
@@ -219,9 +220,14 @@ Die lokale PostgreSQL-Compose-Datenbank läuft ohne TLS; deshalb bleibt
 `WA_DATABASE_SSLMODE=disable` lokal erforderlich. Für eine PostgreSQL-Instanz
 mit aktivierter TLS-Verbindung den Wert auf `require` oder `verify-full` setzen.
 
-Bei der ersten Aktivierung und bei jedem Systemneustart werden nur Nachrichten
-innerhalb des Zeitfensters `WA_BACKFILL_DAYS` verarbeitet. Die History-Abfragen
-werden mit `WA_HISTORY_PAGE_SIZE`, `WA_HISTORY_REQUEST_DELAY_MS`,
+Bei der erstmaligen Auswahl einer Gruppe werden einmalig Nachrichten innerhalb
+des Zeitfensters `WA_BACKFILL_DAYS` verarbeitet. Danach verwenden die Worker
+den pro Nutzer und Gruppe gespeicherten Cursor. Beim erneuten Verbinden wird
+maximal `WA_RECONNECT_CATCHUP_DAYS` Tage History als Überlappung angefordert
+und anhand dieses Cursors gefiltert. Wenn der Cursor länger als dieses
+Zeitfenster veraltet ist, wird der Lauf als `recovery` behandelt und das größere
+Backfill-Fenster nur zur Lückenwiederherstellung verwendet. Die History-
+Abfragen werden mit `WA_HISTORY_PAGE_SIZE`, `WA_HISTORY_REQUEST_DELAY_MS`,
 `WA_BACKFILL_THROTTLE_MS` und `WA_BACKFILL_GROUP_DELAY_MS` gedrosselt. Nach dem
 Erreichen des aktuellen Nachrichtenstands gibt der Worker seine Lease an den
 Pool zurück.
@@ -279,9 +285,11 @@ Gruppenauswahl-Events enthalten die Nutzerbindung; der zugehörige Telegram-
 Account wird dadurch auch ohne aktive Lease für den nächsten Processing-Lauf
 fällig gesetzt.
 
-Bei jedem Processing-Lauf werden maximal die letzten `TG_BACKFILL_DAYS` Tage
-gedrosselt gelesen. Die gespeicherten Cursor verhindern, dass der gesamte
-Backlog bei jedem Poolwechsel erneut verarbeitet wird. Nach dem Erreichen des
+Bei der erstmaligen Auswahl einer Gruppe werden einmalig maximal die letzten
+`TG_BACKFILL_DAYS` Tage gedrosselt gelesen. Danach verwendet jeder Lauf
+`MinID` mit dem gespeicherten Telegram-Message-ID-Cursor und verarbeitet nur
+neue Nachrichten. Ein fehlender Cursor löst wieder einen Initial-Backfill aus;
+ein manueller Replay/Backfill bleibt davon getrennt. Nach dem Erreichen des
 aktuellen Nachrichtenstands gibt der Worker die Account-Lease automatisch
 frei. Die Liste wird durch jeden vollständigen Dialog-Snapshot aktualisiert;
 verlassene Gruppen und Topics werden aus der Auswahl entfernt und bei
@@ -851,12 +859,10 @@ bestimmten Worker kann `WA_CONNECTOR_ACCOUNT_ID` bzw. `TG_CONNECTOR_ACCOUNT_ID`
 gespeichert. Der aktuelle MVP verwendet dafür noch keine KMS-Schlüssel und
 benötigt deshalb zusätzlichen Datenbank-/Secret-Schutz.
 
-Die Worker speichern pro Connector-Konto und Gruppe `connector_cursors`. Beim
-Neustart wird weiterhin der Sieben-Tage-Zeitraum gedrosselt geprüft, bereits
-verarbeitete Telegram-Nachrichten werden aber ab dem gespeicherten Telegram-
-Message-ID-Cursor fortgesetzt. Bei WhatsApp dient der persistierte Cursor der
-Nachvollziehbarkeit und die whatsmeow-History-Abfrage zusätzlich der
-Duplikatvermeidung. Gruppen werden automatisch dem Nutzerkonto zugeordnet;
+Die Worker speichern pro Connector-Konto und Gruppe `connector_cursors` mit
+Initial-Backfill-Status, Laufmodus, Laufzeiten und Zählern. Nur ein neuer
+Cursor startet den sieben­tägigen Initial-Backfill; vorhandene Cursor werden
+inkrementell fortgesetzt. Gruppen werden automatisch dem Nutzerkonto zugeordnet;
 die Auswahl in `/groups` ist pro Nutzer getrennt gespeichert. Entfernte
 Gruppen werden aus dessen Auswahl und – falls kein anderer Nutzer mehr Zugriff
 hat – mitsamt Nachrichten und Medienbereinigung entfernt.

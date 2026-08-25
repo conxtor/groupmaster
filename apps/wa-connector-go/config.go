@@ -12,6 +12,7 @@ type config struct {
 	DatabaseURL           string
 	NATSURL               string
 	BackfillDays          int
+	ReconnectCatchupDays  int
 	BackfillThrottle      time.Duration
 	BackfillGroupDelay    time.Duration
 	HistoryPageSize       int
@@ -71,6 +72,7 @@ func loadConfig() config {
 		DatabaseURL:           envString("DATABASE_URL", "postgres://wagi_app:app@localhost:5432/app?sslmode=disable"),
 		NATSURL:               envString("NATS_URL", "nats://localhost:4222"),
 		BackfillDays:          maxInt(1, envInt("WA_BACKFILL_DAYS", 7)),
+		ReconnectCatchupDays:  maxInt(1, envInt("WA_RECONNECT_CATCHUP_DAYS", 1)),
 		BackfillThrottle:      time.Duration(maxInt(0, envInt("WA_BACKFILL_THROTTLE_MS", 250))) * time.Millisecond,
 		BackfillGroupDelay:    time.Duration(maxInt(0, envInt("WA_BACKFILL_GROUP_DELAY_MS", 1500))) * time.Millisecond,
 		HistoryPageSize:       maxInt(10, envInt("WA_HISTORY_PAGE_SIZE", 50)),

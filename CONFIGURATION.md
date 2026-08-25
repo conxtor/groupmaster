@@ -246,6 +246,7 @@ MinIO-Datenträger bleibt bei Neustarts erhalten.
 | `WA_ONBOARDING_SLOTS` | 1 | Freie QR-Onboarding-Plätze. |
 | `WA_CONNECTOR_ACCOUNT_ID` | leer | Optionaler Account für Einzeltests. |
 | `WA_BACKFILL_DAYS` | 7 | Neustart-/Aktivierungszeitfenster. |
+| `WA_RECONNECT_CATCHUP_DAYS` | 1 | Kurzes History-Überlappungsfenster bei normalen Reconnects; der Cursor filtert bereits bekannte Nachrichten. |
 | `WA_BACKFILL_THROTTLE_MS` / `WA_BACKFILL_GROUP_DELAY_MS` | 250 / 1500 | Backfill-Pausen. |
 | `WA_HISTORY_PAGE_SIZE` | 50 | Maximale Zahl von Nachrichten je History-Anfrage. |
 | `WA_HISTORY_REQUEST_DELAY_MS` | 500 | Pause zwischen angeforderten History-Seiten. |
@@ -276,7 +277,7 @@ Adaptergrenze unterstellt.
 | `TG_ONBOARDING_SLOTS` | 1 | Freie QR-Onboarding-Plätze. |
 | `TG_API_ID` / `TG_API_HASH` | leer | Zugangsdaten von my.telegram.org/apps. |
 | `TG_CONNECTOR_ACCOUNT_ID` | leer | Optionales Konto für gezielte Einzeltests. |
-| `TG_BACKFILL_DAYS` | 7 | Neustart-/Aktivierungszeitfenster. |
+| `TG_BACKFILL_DAYS` | 7 | Einmaliges Initial-Backfill bei neuer Gruppenauswahl oder fehlendem Cursor. |
 | `TG_BACKFILL_THROTTLE_MS` / `TG_BACKFILL_GROUP_DELAY_MS` | 500 / 2000 | Backfill-Pausen. |
 | `TG_PORT` | 3002 | Interner Status-/QR-Port. |
 | `TG_STATE_DIR` | `/data/tg-state` | Kompatibilitätsvolume; Sessiondaten werden primär in PostgreSQL gespeichert. |
@@ -291,6 +292,22 @@ vollständig verwaiste Chats löscht der Connector zusätzlich
 Nachrichten-, Analyse-, Event-, Knowledge-Base- und Jobdaten werden über die
 PostgreSQL-Kaskade entfernt. Eine unvollständige Snapshot-Aktualisierung löst
 keine Bereinigung aus.
+
+### Inkrementelle Synchronisation
+
+`connector_cursors` speichert den letzten Nachrichtenstand getrennt nach
+Nutzerkonto und Gruppe beziehungsweise Telegram-Topic. Eine neue Auswahl legt
+einen Cursor mit `initial_backfill_required` an. Nach erfolgreichem
+Initial-Backfill wird dieser Schalter deaktiviert; spätere Pool-Läufe sind
+inkrementell. Abgewählte Gruppen behalten ihren Cursor, sodass eine spätere
+erneute Auswahl ab dem letzten Stand fortsetzen kann.
+
+Die Connector-Logs unterscheiden Initial-Backfill, inkrementelle Läufe und
+Recovery-Läufe. Fehler beim Lesen oder Speichern eines Cursors lassen den Lauf
+fehlschlagen, damit der nächste Pool-Durchlauf nicht fälschlich als erfolgreich
+abgeschlossen markiert wird. Der API-Endpunkt `/api/v1/metrics` stellt die
+Cursorzustände und Synchronisationsmodi zusätzlich als Prometheus-Metriken
+bereit.
 
 Das Compose-Image wird aus `apps/tg-connector-go/Dockerfile` gebaut. Es nutzt
 Go 1.25, `gotd/td` und ein minimales Alpine-Laufzeitimage; der Build erzwingt

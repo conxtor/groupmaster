@@ -319,14 +319,25 @@ func (a *app) backfillGroup(ctx context.Context, groupID string) error {
 	if err != nil || !selected {
 		return err
 	}
-	cursor, err := lease.loadCursor(ctx, groupID)
+	state, err := lease.loadSyncState(ctx, groupID)
 	if err != nil {
 		return err
 	}
-	cutoff := time.Now().Add(-time.Duration(a.cfg.BackfillDays) * 24 * time.Hour)
+	mode := "incremental"
+	if state.InitialBackfillRequired {
+		mode = "initial_backfill"
+	}
+	if err := lease.beginSync(ctx, groupID, mode); err != nil {
+		return err
+	}
+	cursor := state.LastSequenceNo
+	cutoff := time.Time{}
+	if mode == "initial_backfill" {
+		cutoff = time.Now().Add(-time.Duration(a.cfg.BackfillDays) * 24 * time.Hour)
+	}
 	offsetID := 0
 	fetched, recent, topicMatches, persisted := 0, 0, 0, 0
-	log.Printf("telegram backfill group=%s title=%q chat_type=%s topic_id=%d topic_top=%d cursor=%d", groupID, entity.Title, entity.ChatType, entity.TopicID, entity.TopicTopMessageID, cursor)
+	log.Printf("telegram sync group=%s title=%q chat_type=%s topic_id=%d topic_top=%d mode=%s cursor=%d", groupID, entity.Title, entity.ChatType, entity.TopicID, entity.TopicTopMessageID, mode, cursor)
 	for page := 0; page < 20; page++ {
 		var result tg.MessagesMessagesClass
 		var requestErr error
@@ -371,7 +382,7 @@ func (a *app) backfillGroup(ctx context.Context, groupID string) error {
 			if oldestDate.IsZero() || messageDate.Before(oldestDate) {
 				oldestDate = messageDate
 			}
-			if messageDate.Before(cutoff) {
+			if !cutoff.IsZero() && messageDate.Before(cutoff) {
 				continue
 			}
 			recent++
@@ -388,7 +399,7 @@ func (a *app) backfillGroup(ctx context.Context, groupID string) error {
 				time.Sleep(a.cfg.BackfillThrottle)
 			}
 		}
-		if oldest == 0 || len(messages) < 100 || oldest <= cursor || !oldestDate.IsZero() && oldestDate.Before(cutoff) {
+		if oldest == 0 || len(messages) < 100 || oldest <= cursor || !cutoff.IsZero() && !oldestDate.IsZero() && oldestDate.Before(cutoff) {
 			break
 		}
 		offsetID = oldest
@@ -396,7 +407,10 @@ func (a *app) backfillGroup(ctx context.Context, groupID string) error {
 			time.Sleep(a.cfg.BackfillGroupDelay)
 		}
 	}
-	log.Printf("telegram backfill finished group=%s fetched=%d recent=%d topic_matches=%d persisted=%d cursor=%d", groupID, fetched, recent, topicMatches, persisted, cursor)
+	if err := lease.completeSync(ctx, groupID, mode, syncStats{ProviderFetched: fetched, PersistedNew: persisted}); err != nil {
+		return err
+	}
+	log.Printf("telegram sync finished group=%s mode=%s fetched=%d recent=%d topic_matches=%d persisted=%d cursor=%d", groupID, mode, fetched, recent, topicMatches, persisted, cursor)
 	return nil
 }
 
@@ -585,7 +599,7 @@ func (a *app) persistMessage(ctx context.Context, entity *telegramEntity, messag
 	var existingID, existingHash, existingMediaStatus *string
 	_ = a.db.QueryRow(ctx, "SELECT id::text,content_hash,media_status FROM messages WHERE group_id=$1 AND wa_message_id=$2", entity.GroupID, waMessageID).Scan(&existingID, &existingHash, &existingMediaStatus)
 	if existingHash != nil && *existingHash == contentHash && (media == nil || existingMediaStatus != nil && *existingMediaStatus == "completed") {
-		return nil
+		return lease.saveCursor(ctx, entity.GroupID, strconv.Itoa(message.ID), time.Unix(int64(message.Date), 0), message.ID)
 	}
 	objectPath := ""
 	if media != nil {
@@ -638,8 +652,7 @@ RETURNING id::text`, messageID, media.Key, media.Mime, objectPath).Scan(&jobID);
 			}
 		}
 	}
-	_ = lease.saveCursor(ctx, entity.GroupID, strconv.Itoa(message.ID), time.Unix(int64(message.Date), 0), message.ID)
-	return nil
+	return lease.saveCursor(ctx, entity.GroupID, strconv.Itoa(message.ID), time.Unix(int64(message.Date), 0), message.ID)
 }
 
 func telegramMessageContentHash(parts ...string) string {
@@ -788,17 +801,16 @@ func (a *app) runTelegramCycle(parent context.Context, onboarding *onboardingInf
 		if err != nil {
 			return err
 		}
-		a.setStatus(ctx, "syncing", fmt.Sprintf("Backfill der letzten %d Tage für %d ausgewählte Gruppe(n)", a.cfg.BackfillDays, len(groups)), nil)
-		log.Printf("telegram processing selected_groups=%d backfill_days=%d account=%s", len(groups), a.cfg.BackfillDays, lease.account.ID)
+		a.setStatus(ctx, "syncing", fmt.Sprintf("Inkrementelle Synchronisation für %d ausgewählte Gruppe(n); neue Gruppen erhalten einmalig den %d-Tage-Backfill", len(groups), a.cfg.BackfillDays), nil)
+		log.Printf("telegram processing selected_groups=%d incremental_cursor_sync=true initial_backfill_days=%d account=%s", len(groups), a.cfg.BackfillDays, lease.account.ID)
 		for index, groupID := range groups {
 			if index > 0 && a.cfg.BackfillGroupDelay > 0 {
 				time.Sleep(a.cfg.BackfillGroupDelay)
 			}
 			if err := a.backfillGroup(ctx, groupID); err != nil {
-				log.Printf("telegram backfill failed for %s: %v", groupID, err)
+				return fmt.Errorf("telegram sync failed for %s: %w", groupID, err)
 			}
 		}
-		a.completeInitialBackfill(ctx)
 		now = time.Now().UTC()
 		a.mu.Lock()
 		a.connectedAt = &now

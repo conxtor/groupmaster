@@ -31,7 +31,6 @@ type config struct {
 	PoolRetryDelay       time.Duration
 	StartDelay           time.Duration
 	GroupRefreshInterval time.Duration
-	InitialBackfillDays  int
 }
 
 func envString(key, fallback string) string {
@@ -89,7 +88,6 @@ func loadConfig() config {
 		PoolRetryDelay:       time.Duration(maxInt(5_000, envInt("CONNECTOR_POOL_RETRY_DELAY_MS", 20_000))) * time.Millisecond,
 		StartDelay:           time.Duration(maxInt(0, envInt("CONNECTOR_START_DELAY_MS", 0))) * time.Millisecond,
 		GroupRefreshInterval: time.Duration(maxInt(30_000, envInt("GROUP_REFRESH_INTERVAL_MS", 60_000))) * time.Millisecond,
-		InitialBackfillDays:  maxInt(1, envInt("TG_BACKFILL_DAYS", 7)),
 	}
 }
 

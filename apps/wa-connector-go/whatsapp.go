@@ -49,17 +49,50 @@ func (a *app) newWhatsmeowStore(ctx context.Context) (*sqlstore.Container, error
 	return sqlstore.New(ctx, "postgres", whatsmeowDatabaseURL(a.cfg.DatabaseURL, a.cfg.SQLSchema), waLog.Noop)
 }
 
-func configureHistorySync(cfg config) {
+func configureHistorySync(cfg config, initialBackfill, recovery bool) {
 	if store.DeviceProps == nil || store.DeviceProps.HistorySyncConfig == nil {
 		return
 	}
-	days := uint32(maxInt(1, cfg.BackfillDays))
+	daysValue := cfg.ReconnectCatchupDays
+	mode := "incremental"
+	if initialBackfill || recovery {
+		daysValue = cfg.BackfillDays
+		if recovery {
+			mode = "recovery"
+		} else {
+			mode = "initial_backfill"
+		}
+	}
+	days := uint32(maxInt(1, daysValue))
 	pageSize := uint32(maxInt(10, cfg.HistoryPageSize))
 	store.DeviceProps.HistorySyncConfig.FullSyncDaysLimit = proto.Uint32(days)
 	store.DeviceProps.HistorySyncConfig.RecentSyncDaysLimit = proto.Uint32(days)
 	store.DeviceProps.HistorySyncConfig.InitialSyncMaxMessagesPerChat = proto.Uint32(pageSize)
 	store.DeviceProps.HistorySyncConfig.OnDemandReady = proto.Bool(true)
 	store.DeviceProps.HistorySyncConfig.CompleteOnDemandReady = proto.Bool(true)
+	log.Printf("whatsapp history sync configured mode=%s days=%d page_size=%d", mode, days, pageSize)
+}
+
+func (a *app) syncPlan(ctx context.Context, groupIDs []string) (initial []string, recovery bool, err error) {
+	lease := a.currentLease()
+	if lease == nil {
+		return nil, false, errors.New("whatsapp sync plan without account lease")
+	}
+	recoveryCutoff := time.Now().UTC().Add(-time.Duration(a.cfg.ReconnectCatchupDays) * 24 * time.Hour)
+	for _, groupID := range groupIDs {
+		state, stateErr := lease.loadSyncState(ctx, groupID)
+		if stateErr != nil {
+			return nil, false, stateErr
+		}
+		if state.InitialBackfillRequired {
+			initial = append(initial, groupID)
+			continue
+		}
+		if !state.LastReceivedAt.IsZero() && state.LastReceivedAt.Before(recoveryCutoff) {
+			recovery = true
+		}
+	}
+	return initial, recovery, nil
 }
 
 func (a *app) discoverGroups(ctx context.Context, client *whatsmeow.Client) (map[string]bool, error) {
@@ -250,6 +283,7 @@ func (a *app) handleHistorySync(ctx context.Context, client *whatsmeow.Client, s
 	}
 	matchedConversations := 0
 	persistedMessages := 0
+	skippedBeforeCursor := 0
 	for _, conversation := range history.GetConversations() {
 		if conversation == nil || !selected[conversation.GetID()] {
 			continue
@@ -257,6 +291,15 @@ func (a *app) handleHistorySync(ctx context.Context, client *whatsmeow.Client, s
 		matchedConversations++
 		chat, err := types.ParseJID(conversation.GetID())
 		if err != nil {
+			continue
+		}
+		lease := a.currentLease()
+		if lease == nil {
+			continue
+		}
+		state, stateErr := lease.loadSyncState(ctx, conversation.GetID())
+		if stateErr != nil {
+			log.Printf("whatsapp history cursor load failed group=%s error=%v", conversation.GetID(), stateErr)
 			continue
 		}
 		for _, historyMessage := range conversation.GetMessages() {
@@ -268,7 +311,15 @@ func (a *app) handleHistorySync(ctx context.Context, client *whatsmeow.Client, s
 				log.Printf("whatsapp history message parse failed chat=%s error=%v", chat, parseErr)
 				continue
 			}
-			if !event.Info.Timestamp.IsZero() && event.Info.Timestamp.Before(time.Now().Add(-time.Duration(a.cfg.BackfillDays)*24*time.Hour)) {
+			// Reconnect history can overlap the previous lease. Process only
+			// messages newer than the per-group cursor; equal timestamps remain
+			// eligible because WhatsApp timestamps are not unique and the DB
+			// uniqueness constraint handles the overlap safely.
+			if !state.InitialBackfillRequired && !state.LastReceivedAt.IsZero() && event.Info.Timestamp.Before(state.LastReceivedAt) {
+				skippedBeforeCursor++
+				continue
+			}
+			if state.InitialBackfillRequired && !event.Info.Timestamp.IsZero() && event.Info.Timestamp.Before(time.Now().Add(-time.Duration(a.cfg.BackfillDays)*24*time.Hour)) {
 				continue
 			}
 			if err := a.persistMessage(ctx, client, event); err != nil {
@@ -284,7 +335,7 @@ func (a *app) handleHistorySync(ctx context.Context, client *whatsmeow.Client, s
 			time.Sleep(a.cfg.BackfillGroupDelay)
 		}
 	}
-	log.Printf("whatsapp history sync received type=%s conversations=%d selected=%d persisted=%d", history.GetSyncType().String(), len(history.GetConversations()), matchedConversations, persistedMessages)
+	log.Printf("whatsapp history sync received type=%s conversations=%d selected=%d persisted=%d skipped_before_cursor=%d", history.GetSyncType().String(), len(history.GetConversations()), matchedConversations, persistedMessages, skippedBeforeCursor)
 }
 
 func extractWhatsAppMessage(message *waE2E.Message) (kind, text, mime, fileName string, media whatsmeow.DownloadableMessage, hasMedia bool, replyID string) {
@@ -509,10 +560,10 @@ func extensionForMIME(mime string) string {
 	}
 }
 
-func (a *app) requestHistory(ctx context.Context, client *whatsmeow.Client, groupIDs []string) {
+func (a *app) requestHistory(ctx context.Context, client *whatsmeow.Client, groupIDs []string) error {
 	lease := a.currentLease()
 	if lease == nil {
-		return
+		return errors.New("whatsapp history request without account lease")
 	}
 	cutoff := time.Now().Add(-time.Duration(a.cfg.BackfillDays) * 24 * time.Hour)
 	for _, groupID := range groupIDs {
@@ -529,6 +580,7 @@ func (a *app) requestHistory(ctx context.Context, client *whatsmeow.Client, grou
 			info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, IsGroup: true}, ID: types.MessageID(""), Timestamp: time.Now()}
 			if _, requestErr := client.SendPeerMessage(ctx, client.BuildHistorySyncRequest(info, a.cfg.HistoryPageSize)); requestErr != nil {
 				log.Printf("whatsapp initial history request failed group=%s days=%d error=%v", groupID, a.cfg.BackfillDays, requestErr)
+				return requestErr
 			} else {
 				log.Printf("whatsapp initial history request sent group=%s days=%d page_size=%d", groupID, a.cfg.BackfillDays, a.cfg.HistoryPageSize)
 			}
@@ -552,6 +604,7 @@ func (a *app) requestHistory(ctx context.Context, client *whatsmeow.Client, grou
 		info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: senderJID, IsGroup: true}, ID: types.MessageID(externalID), Timestamp: receivedAt}
 		if _, err := client.SendPeerMessage(ctx, client.BuildHistorySyncRequest(info, a.cfg.HistoryPageSize)); err != nil {
 			log.Printf("whatsapp history request failed group=%s oldest=%s error=%v", groupID, externalID, err)
+			return err
 		} else {
 			log.Printf("whatsapp history request sent group=%s before=%s page_size=%d", groupID, externalID, a.cfg.HistoryPageSize)
 		}
@@ -559,6 +612,7 @@ func (a *app) requestHistory(ctx context.Context, client *whatsmeow.Client, grou
 			time.Sleep(a.cfg.HistoryRequestDelay)
 		}
 	}
+	return nil
 }
 
 // rawMessageOrMessage makes the raw payload safe for both live and history
