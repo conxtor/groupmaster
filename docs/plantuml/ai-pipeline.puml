@@ -7,9 +7,17 @@ start
 :JetStream Durable Consumer\nWAGI_AI_MESSAGES liefert Event;
 :event_inbox beansprucht Event idempotent;
 :ai_jobs anlegen / Retrystatus setzen;
-:Nachricht + zeitnahen Gruppenkontext\naus PostgreSQL laden;
-:Implizite Thread-Kandidaten\nmit Zeitnähe, Token-Overlap und\nReply-/Absender-Evidenz bewerten;
-:Hohe Treffer als relation\nmit Score und Evidence speichern;\nTrenn-Feedback als Sperre anwenden;
+:Nachricht + nächste Gruppennachrichten\nmit gespeicherten Transkripten laden;
+:Gruppen-Advisory-Lock / Transaktion;\nTexte aktualisieren, alte Mitgliedschaften,\nReply-Eltern und Feedback-Endpunkte ergänzen;
+if (Vollständiger Kontext innerhalb Arbeitsgrenze?) then (ja)
+  :Lokaler Thread-Konsolidierer\nInhaltsgewichtung + URLs + Zeitnähe;\nReply-/Feedback-Komponenten bilden;
+  :Mehrdeutige Kandidaten zurückstellen;\nKohäsion vor Zusammenführung prüfen;\nUnlink-Regeln auch transitiv erzwingen;
+  :Threads atomar zusammenführen / aufteilen;\nRoot, Konfidenz, Version und Evidenz ersetzen;
+  :Nur angenommenen Thread-Kontext\nan die Analyse weitergeben;
+else (nein)
+  :Persistierung zurückstellen, context-limit loggen;\nAnalyse nur der aktuellen Nachricht;
+endif
+:Transaktion beenden;\nkeine zusätzlichen Hermes-Aufrufe;
 
 if (Medientyp?) then (Audio)
   :media.audio.requested;
@@ -115,9 +123,7 @@ fork again
   :Administrator startet Thread-Neubewertung;
   :ai.threads.reassessment.requested in
   WAGI_THREAD_REASSESSMENT lesen;
-  :Automatische Thread-Kanten und
-  Mitgliedschaften aus Nachrichtenfenstern
-  neu berechnen;
+  :Denselben lokalen Konsolidierer verwenden;\nNachrichtenfenster unter Gruppensperre\natomar ersetzen statt global zu löschen;
   :Manuelles Link-/Unlink-Feedback
   erhalten;
   :Thread-Fortschritt und Status speichern;

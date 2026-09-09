@@ -336,6 +336,15 @@ entity conversation_relation_feedback {
   created_at : timestamptz
 }
 
+note right of conversation_thread_messages
+  Konsolidierer ersetzt betroffene Mitgliedschaften
+  atomar unter einer Gruppensperre.
+  Älteste Nachricht = root; Evidenz enthält
+  version=consolidator-v1 und Kohäsionssignale.
+  Neueste Feedback-Entscheidung je Paar zählt;
+  Unlink darf nicht transitiv umgangen werden.
+end note
+
 entity ai_learning_terms {
   * id : uuid <<PK>>
   --

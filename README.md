@@ -376,18 +376,31 @@ gruppengebundener kanonischer Begriff gelernt.
 
 ### Thread-Erkennung und gruppenbezogenes Beziehungsfeedback
 
-Nachrichten werden zusätzlich gruppenbezogen auf implizite Zusammenhänge
-geprüft, auch wenn Nutzer keine Reply-Funktion verwenden. Die lokale Kaskade
-kombiniert zeitliche Nähe, gemeinsame Inhaltsbegriffe, Absender und vorhandene
-Reply-Referenzen. Hohe Treffer werden in PostgreSQL als erklärbare
-`conversation_threads` und `message_relations` gespeichert; dieselben
-Beziehungen können dadurch Events, Action Items und Knowledge-Quellen gemeinsam
-stützen, ohne unterschiedliche Gruppen zu vermischen.
+Nachrichten werden durch einen lokalen **Thread-Konsolidierer** gruppenbezogen
+geprüft, auch wenn Nutzer keine Reply-Funktion verwenden. Er bewertet ein
+begrenztes Nachrichtenfenster gemeinsam: gemeinsame Inhaltsbegriffe (mit
+geringerem Gewicht für häufige Begriffe), konkrete URLs, Zeitnähe und echte
+Reply-Referenzen. Einzelne gemeinsame Wörter und reine zeitliche Nähe reichen
+nicht. Mehrdeutige Nachrichten bleiben zunächst unzugeordnet. Eine mögliche
+Zusammenführung muss außerdem durch genügend Mitglieder beider Teil-Threads
+gestützt werden; ein einzelner Brückenbeitrag verbindet nicht automatisch zwei
+Diskussionen. Telegram-Forum-Topic-Header gelten nicht als Gesprächsantwort.
+
+Die nächsten Nachrichten zum Analysezeitpunkt und vorhandene Audio-Transkripte
+bilden den Ausgangskontext. Frühere Mitgliedschaften, Reply-Eltern und
+Feedback-Endpunkte werden innerhalb der Arbeitsgrenze ergänzt. Automatische
+Beziehungen und Mitgliedschaften werden unter einer PostgreSQL-Gruppensperre
+atomar ersetzt: spätere Texte, korrigierte Transkripte oder Nutzerfeedback können
+Threads neu aufteilen. Version, Score und Evidenz bleiben in
+`conversation_thread_messages` und `message_relations` nachvollziehbar. Events,
+Action Items, Konfliktprüfung und KB-Quellenauswahl erhalten nur den angenommenen
+Thread-Kontext. Der Konsolidierer benötigt keine zusätzliche Datenbank,
+Modell-Downloads oder Hermes-Aufrufe.
 
 Im Dashboard erscheinen erkannte Thread-Nachrichten zusammengefasst. Die
 Aktionen **Zusammenhang bestätigen** und **Nachricht trennen** speichern ein
 historisches Feedback pro Nutzer und Gruppe. Eine Trennung wird bei späteren
-Analysen als dauerhafte Ausnahme berücksichtigt; eine Bestätigung kann auch
+Analysen auch gegen indirekte Zusammenführungen berücksichtigt; eine Bestätigung kann auch
 eine Beziehung unterhalb der automatischen Schwelle herstellen. Die relevanten
 Schwellen und das Zeitfenster sind über `AI_THREAD_*` in
 `.env.example`, `.env.example-dockge` und `CONFIGURATION.md` konfigurierbar.
@@ -779,10 +792,23 @@ Analyse unnötig verdrängt wird.
 
 Die Funktion **Threads neu bewerten** arbeitet unabhängig davon im separaten
 JetStream-Stream `WAGI_THREAD_REASSESSMENT` mit dem Durable Consumer
-`WAGI_AI_THREAD_REASSESSMENT`. Sie löscht und erstellt ausschließlich
-automatisch erkannte Thread-Beziehungen und Mitgliedschaften neu. Manuelle
+`WAGI_AI_THREAD_REASSESSMENT`. Sie verwendet denselben Konsolidierer wie die
+Live-Analyse und ersetzt betroffene Thread-Fenster jeweils atomar. Es gibt keine
+globale Löschung der Threads vor Beginn des Jobs. Manuelle
 Verknüpfungen und Trennungen aus `conversation_relation_feedback` bleiben
-erhalten und werden bei der Neubewertung weiterhin berücksichtigt.
+erhalten und werden bei der Neubewertung weiterhin berücksichtigt. Die Funktion
+verbessert bestehende Dashboard-Gruppierungen; bereits gespeicherte Event- und
+KB-Ergebnisse werden dadurch nicht rückwirkend neu extrahiert. Dafür anschließend
+**Alle Nachrichten neu bewerten** bzw. **KB neu bewerten** verwenden.
+
+Bei Überschreitung von `AI_THREAD_CONSOLIDATION_MAX_MESSAGES` wird die Änderung
+der unvollständig geladenen Threads zurückgestellt und als `context-limit`
+protokolliert; solche Nachrichten zählen bei der Neubewertung als übersprungen.
+Der Analysekontext enthält dann nur die aktuelle Nachricht. Die Grenze kann
+gezielt erhöht werden (maximal 400), um größere bestehende Threads neu zu prüfen.
+Die Heuristik bevorzugt Präzision: reine Bestätigungen ohne Reply oder gemeinsamen
+Inhalt und sprachlich völlig anders formulierte Fortsetzungen können unzugeordnet
+bleiben. Regressionstests: `python3 -m unittest discover -s apps/ai-worker/tests -v`.
 
 ### Verarbeitung, Wiederanlauf und Dokumente
 

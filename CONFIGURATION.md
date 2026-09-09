@@ -322,12 +322,16 @@ GramJS-Fallback.
 | `AI_MODEL`, `AI_PROVIDER` | heuristic-mvp / hybrid | Analyseprofil und Provider. |
 | `AI_ENDPOINT`, `AI_API_KEY` | leer | Optionaler AI-Adapter. |
 | `AI_PROMPT_VERSION`, `AI_KNOWLEDGE_VERSION` | cascade-v5-places | Prompt-/Schema-Versionen. |
-| `AI_CONTEXT_MAX_MESSAGES` | 80 | Kontextfenster. |
+| `AI_CONTEXT_MAX_MESSAGES` | 80 | Zahl der zeitlich nächsten Ausgangskandidaten; höchstens `AI_THREAD_CONSOLIDATION_MAX_MESSAGES`. |
 | `AI_EVENT_WINDOW_HOURS` / `AI_EVENT_MIN_CONFIDENCE` | 36 / 0.70 | Event-Fenster und Mindestkonfidenz. |
 | `AI_THREAD_WINDOW_HOURS` | 18 | Zeitfenster, in dem Nachrichten einer Gruppe als mögliche Fortsetzung betrachtet werden. |
-| `AI_THREAD_MAX_CANDIDATES` | 6 | Maximale Zahl der stärksten Thread-Kandidaten je Nachricht. |
+| `AI_THREAD_MAX_CANDIDATES` | 6 | Zahl der stärksten konkurrierenden Kandidaten im Mehrdeutigkeitsvergleich. |
 | `AI_THREAD_AUTO_LINK_THRESHOLD` | 0.50 | Mindestscore für eine automatische, persistierte Thread-Beziehung. Explizite Antworten werden unabhängig davon verknüpft. |
-| `AI_THREAD_CONTEXT_THRESHOLD` | 0.42 | Niedrigere Schwelle für Thread-Kontext, der Events und Knowledge-Auswertungen unterstützen darf. |
+| `AI_THREAD_CONTEXT_THRESHOLD` | 0.42 | Mindestunterstützung einer Paarung bei der Prüfung der Thread-Kohäsion; erweitert allein keinen Analysekontext. |
+| `AI_THREAD_CONSOLIDATION_MIN_SCORE` | 0.62 | Mindestscore einer automatischen Zusammenführung; effektiv mindestens `AI_THREAD_AUTO_LINK_THRESHOLD`. |
+| `AI_THREAD_CONSOLIDATION_MARGIN` | 0.08 | Mindestabstand zu einem konkurrierenden, thematisch anderen Thread. Kleinere Abstände führen zur Enthaltung. |
+| `AI_THREAD_CONSOLIDATION_COHESION` | 0.60 | Erforderlicher Anteil unterstützender Paarungen zwischen Reply-/Feedback-Komponenten; verhindert transitive Brückenzusammenführungen. |
+| `AI_THREAD_CONSOLIDATION_MAX_MESSAGES` | 160 | Obergrenze des vollständigen Arbeitskontexts inklusive alter Thread-Mitglieder, Reply-Eltern und Feedback-Endpunkte (20–400). Bei Überschreitung keine Teilaktualisierung, Warnung `context-limit`, Neubewertung zählt als übersprungen. |
 | `AI_EMBEDDINGS_ENABLED` | true | Embeddings aktivieren. |
 | `AI_EMBEDDING_MODEL`, `AI_EMBEDDING_CACHE_DIR` | MiniLM / fastembed cache | Modell und Cache. |
 | `AI_HF_MODEL_LOAD_INTERVAL_SECONDS` | 86400 | Mindestabstand zu Hugging Face. |
@@ -383,22 +387,37 @@ Inferenz.
 
 ### Zusammenhängende Nachrichten ohne Reply-Funktion
 
-Der AI-Worker führt zusätzlich eine gruppenbezogene, erklärbare Thread-Kaskade
-aus. Sie bewertet zeitliche Nähe, gemeinsame Inhaltsbegriffe, gleichen Absender
-und vorhandene Reply-Referenzen. Nur Beziehungen oberhalb von
-`AI_THREAD_AUTO_LINK_THRESHOLD` werden dauerhaft in
-`conversation_threads`, `conversation_thread_messages` und
-`message_relations` gespeichert. Der niedrigere
-`AI_THREAD_CONTEXT_THRESHOLD` darf den Kontext für Events, Action Items und
-Knowledge-Quellen erweitern, erzeugt aber noch keine dauerhafte Beziehung.
+Der AI-Worker konsolidiert Nachrichtenfenster gemeinsam und lokal. Er kombiniert
+Inhaltsüberschneidung, Häufigkeitsgewichtung innerhalb des Fensters, exakte URLs,
+Zeitnähe, Absender und echte Replies. Ausschlusswörter und Floskeln stammen
+weiter aus der Datenbank. Ein einzelnes Wort reicht nicht; mehrdeutige Zuordnungen
+werden zurückgestellt. Vor einer Zusammenführung müssen die beteiligten
+Teil-Threads ausreichend gegenseitige Unterstützung aufweisen. Telegram-Forum-
+Topic-Zugehörigkeit wird dabei nicht als explizite Antwort behandelt.
+
+Live-Analyse, Transkriptaktualisierungen, Feedback und **Threads neu bewerten**
+verwenden denselben Konsolidierer. Die bisherigen Mitgliedschaften und Scores
+werden innerhalb einer Transaktion mit gruppenbezogener Advisory-Sperre ersetzt,
+sodass auch Aufteilungen und sinkende Konfidenzen möglich sind. Die älteste
+Nachricht ist der Root, bestehende Thread-IDs werden nach Überschneidung möglichst
+beibehalten. Nur die so angenommenen Mitglieder fließen in Event-/Action-/KB-
+Quellenauswahl und Konfliktprüfung ein. Die Evidenz enthält `consolidator-v1`.
+Es gibt keine zusätzlichen Hermes-Anfragen, Modelle oder Medienjobs.
 
 Im Dashboard kann der Nutzer pro erkannter Beziehung **Zusammenhang bestätigen**
 oder **Nachricht trennen** wählen. Diese Rückmeldung wird mit Nutzer und Gruppe
 in `conversation_relation_feedback` historisiert. Eine Trennung blockiert die
-automatische Wiederaufnahme desselben Nachrichtenpaares; eine Bestätigung kann
+automatische Wiederaufnahme desselben Nachrichtenpaares auch über Zwischenknoten;
+die neueste Entscheidung je Paar zählt. Eine Bestätigung kann
 auch zwei Nachrichten verknüpfen, die den automatischen Schwellwert nicht
 erreicht haben. Das Feedback ist somit immer auf die betreffende Gruppe
-begrenzt und beeinflusst keine andere Gruppe.
+begrenzt und beeinflusst keine andere Gruppe. Widersprüchliche Link-Ketten dürfen
+eine aktuelle Trennung nicht umgehen. Bei überschrittener Arbeitsgrenze bleibt
+der gespeicherte Thread unverändert und die Analyse nutzt nur die aktuelle
+Nachricht. Vorhandene Event-/KB-Inhalte werden erst durch **Alle Nachrichten neu
+bewerten** bzw. **KB neu bewerten** rückwirkend mit dem neuen Kontext aufgebaut.
+Alle vier Konsolidierungsoptionen werden über die AI-Worker-`env_file` sowohl
+lokal als auch im Dockge-Deployment übergeben.
 
 Die Seite `/admin/ai-learning` zeigt die Kategorien Relevanz, Events, Action Items,
 Orte, Knowledge-Schlüsselwort und Ausschlusswort mit ihren aktuellen und zeitlichen

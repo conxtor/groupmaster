@@ -1,400 +1,212 @@
-"""Conservative, explainable conversation threading for one group.
-
-The connector protocols only expose an explicit reply for some messages. This
-module adds a small PostgreSQL-backed relation graph for ordinary follow-up
-messages. It intentionally uses time, content overlap and reply evidence only;
-the graph can be corrected by group-scoped user feedback and every automatic
-edge keeps its evidence.
-"""
+"""Transactional PostgreSQL storage for the local thread consolidator."""
 
 from __future__ import annotations
 
 import json
-import math
-import os
+import logging
 import re
-from datetime import datetime, timezone
+from uuid import NAMESPACE_URL, uuid5
+
+from thread_consolidation import (
+    CONSOLIDATION_MAX_MESSAGES, THREAD_WINDOW_HOURS, VERSION, Consolidation,
+    annotate_consolidation, as_datetime, consolidate_messages, identities,
+    reply_target,
+)
+
+log = logging.getLogger("wagi-ai-worker.threads")
+
+# Use existing transcripts, never request media processing for consolidation.
+MESSAGE_SELECT = '''SELECT m.id::text AS id, m.group_id AS "groupId",
+    m.wa_message_id AS "waMessageId", m.sender_jid AS "senderJid", m.kind,
+    COALESCE(NULLIF(aj.transcript,''),m.text) AS text,
+    m.received_at AS "receivedAt", m.deleted_at AS "deletedAt", m.raw
+    FROM messages m
+    LEFT JOIN LATERAL (
+      SELECT transcript FROM audio_jobs WHERE message_id=m.id
+      AND status='completed' AND NULLIF(transcript,'') IS NOT NULL
+      ORDER BY updated_at DESC LIMIT 1
+    ) aj ON TRUE'''
 
 
-THREAD_WINDOW_HOURS = max(2.0, float(os.getenv("AI_THREAD_WINDOW_HOURS", "18")))
-THREAD_MAX_CANDIDATES = max(2, min(12, int(os.getenv("AI_THREAD_MAX_CANDIDATES", "6"))))
-THREAD_AUTO_LINK_THRESHOLD = min(0.92, max(0.45, float(os.getenv("AI_THREAD_AUTO_LINK_THRESHOLD", "0.50"))))
-THREAD_CONTEXT_THRESHOLD = min(0.90, max(0.30, float(os.getenv("AI_THREAD_CONTEXT_THRESHOLD", "0.42"))))
-TOKEN_RE = re.compile(r"[\wÀ-ÿÄÖÜäöüß-]+", re.IGNORECASE)
-
-
-def _as_datetime(value) -> datetime | None:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-
-
-def _tokens(text: str, stopwords: set[str] | None = None) -> set[str]:
-    ignored = stopwords or set()
-    return {
-        token.casefold()
-        for token in TOKEN_RE.findall(str(text or ""))
-        if len(token) >= 3 and token.casefold() not in ignored and not token.isnumeric()
-    }
-
-
-def _identities(item: dict) -> set[str]:
-    group_id = str(item.get("groupId") or "")
-    values = {str(item.get("id") or ""), str(item.get("waMessageId") or "")}
-    if group_id and item.get("waMessageId"):
-        values.add(f"{group_id}:{item['waMessageId']}")
-    return {value for value in values if value}
-
-
-def _reply_target(item: dict) -> str | None:
-    value = item.get("replyToWaMessageId")
-    return str(value) if value else None
-
-
-def _hours_between(left: dict, right: dict) -> float:
-    left_time = _as_datetime(left.get("receivedAt"))
-    right_time = _as_datetime(right.get("receivedAt"))
-    if not left_time or not right_time:
-        return 0.0
-    return abs((left_time - right_time).total_seconds()) / 3600
-
-
-def relation_score(current: dict, candidate: dict, stopwords: set[str] | None = None) -> tuple[float, dict]:
-    """Score one possible relation and return the explainable components."""
-    current_ids = _identities(current)
-    candidate_ids = _identities(candidate)
-    current_reply = _reply_target(current)
-    candidate_reply = _reply_target(candidate)
-    explicit_reply = bool(
-        (current_reply and current_reply in candidate_ids)
-        or (candidate_reply and candidate_reply in current_ids)
-    )
-    if explicit_reply:
-        return 1.0, {"explicitReply": True, "tokenOverlap": 0, "timeHours": round(_hours_between(current, candidate), 3)}
-
-    current_tokens = _tokens(str(current.get("text") or ""), stopwords)
-    candidate_tokens = _tokens(str(candidate.get("text") or ""), stopwords)
-    overlap = current_tokens & candidate_tokens
-    union = current_tokens | candidate_tokens
-    shorter = max(1, min(len(current_tokens), len(candidate_tokens)))
-    coverage = len(overlap) / shorter if current_tokens and candidate_tokens else 0.0
-    jaccard = len(overlap) / max(1, len(union))
-    hours = _hours_between(current, candidate)
-    if hours <= 0.25:
-        time_signal = 0.18
-    elif hours <= 1:
-        time_signal = 0.14
-    elif hours <= 4:
-        time_signal = 0.09
-    elif hours <= THREAD_WINDOW_HOURS:
-        time_signal = 0.04
-    else:
-        time_signal = 0.0
-    same_sender = bool(current.get("senderJid") and current.get("senderJid") == candidate.get("senderJid"))
-    # Short confirmations such as “Samstag passt” are useful when they share
-    # one strong content token with a nearby message. Long generic messages
-    # need substantially more overlap and therefore remain below the gate.
-    short_confirmation = len(current_tokens) <= 5 or len(candidate_tokens) <= 5
-    overlap_signal = 0.0
-    if len(overlap) >= 2 or (short_confirmation and len(overlap) >= 1):
-        overlap_signal = 0.50 * coverage + 0.30 * jaccard
-    score = min(0.99, overlap_signal + time_signal + (0.04 if same_sender else 0.0))
-    return score, {
-        "explicitReply": False,
-        "tokenOverlap": sorted(overlap)[:12],
-        "coverage": round(coverage, 4),
-        "jaccard": round(jaccard, 4),
-        "timeHours": round(hours, 3),
-        "sameSender": same_sender,
-    }
-
-
-def annotate_thread_context(current_id: str, context: list[dict], stopwords: set[str] | None = None) -> list[dict]:
-    """Annotate the existing AI context without adding another DB query."""
-    current = next((item for item in context if str(item.get("id")) == str(current_id)), None)
-    if not current:
-        return context
-    candidates = []
-    for item in context:
-        if str(item.get("id")) == str(current_id):
-            continue
-        score, evidence = relation_score(current, item, stopwords)
-        if score >= THREAD_CONTEXT_THRESHOLD and _hours_between(current, item) <= THREAD_WINDOW_HOURS:
-            candidates.append((score, item, evidence))
-    candidates.sort(key=lambda entry: (entry[0], str(entry[1].get("receivedAt") or "")), reverse=True)
-    allowed = {str(item.get("id")): (score, evidence) for score, item, evidence in candidates[:THREAD_MAX_CANDIDATES]}
-    for item in context:
-        item_id = str(item.get("id") or "")
-        if item_id in allowed:
-            score, evidence = allowed[item_id]
-            item["threadScore"] = round(score, 4)
-            item["threadEvidence"] = evidence
-    return context
-
-
-def _pair(left: str, right: str) -> tuple[str, str]:
-    return (left, right) if left < right else (right, left)
-
-
-async def _latest_feedback(db, group_id: str, message_id: str, related_ids: list[str]) -> dict[tuple[str, str], str]:
-    if not related_ids:
-        return {}
-    try:
-        rows = await db.fetch(
-            """SELECT message_id::text, related_message_id::text, decision
-               FROM conversation_relation_feedback
-               WHERE group_id=$1 AND ((message_id=$2::uuid AND related_message_id=ANY($3::uuid[]))
-                  OR (related_message_id=$2::uuid AND message_id=ANY($3::uuid[])))
-               ORDER BY created_at DESC""",
-            group_id, message_id, related_ids,
-        )
-    except Exception:
-        return {}
-    result: dict[tuple[str, str], str] = {}
-    for row in rows:
-        key = _pair(str(row["message_id"]), str(row["related_message_id"]))
-        result.setdefault(key, str(row["decision"]))
-    return result
-
-
-async def annotate_feedback_context(db, group_id: str | None, current_id: str, context: list[dict]) -> list[dict]:
-    """Apply the latest group-scoped link/unlink decisions to AI context."""
-    if not group_id:
-        return context
-    related_ids = [str(item.get("id")) for item in context if str(item.get("id")) and str(item.get("id")) != str(current_id)]
-    feedback = await _latest_feedback(db, group_id, str(current_id), related_ids)
-    for item in context:
-        item_id = str(item.get("id") or "")
-        if not item_id or item_id == str(current_id):
-            continue
-        decision = feedback.get(_pair(str(current_id), item_id))
-        if decision == "link":
-            item["threadScore"] = 1.0
-            item["threadEvidence"] = {"userFeedback": "link"}
-            item["threadBlocked"] = False
-        elif decision == "unlink":
-            item["threadScore"] = 0.0
-            item["threadEvidence"] = {"userFeedback": "unlink"}
-            item["threadBlocked"] = True
-    return context
-
-
-async def _thread_assignments(db, message_ids: list[str]) -> dict[str, list[str]]:
-    if not message_ids:
-        return {}
-    try:
-        rows = await db.fetch(
-            """SELECT message_id::text, thread_id::text
-               FROM conversation_thread_messages
-               WHERE message_id=ANY($1::uuid[])
-               ORDER BY confidence DESC, updated_at DESC""",
-            message_ids,
-        )
-    except Exception:
-        return {}
-    result: dict[str, list[str]] = {}
-    for row in rows:
-        result.setdefault(str(row["message_id"]), []).append(str(row["thread_id"]))
-    return result
-
-
-def _thread_title(current: dict, analysis: dict | None = None) -> str:
-    summary = str((analysis or {}).get("summary") or "").strip()
-    text = summary or str(current.get("text") or "").strip()
-    text = re.sub(r"\s+", " ", text)
-    return text[:120].rstrip(" .,:;-") or "Conversation thread"
-
-
-async def persist_conversation_thread(
-    db,
-    group_id: str | None,
-    current: dict,
-    context: list[dict],
-    analysis: dict | None = None,
-) -> str | None:
-    """Persist high-confidence links and the corresponding thread membership."""
-    if not group_id or not current.get("id"):
-        return None
-    current_id = str(current["id"])
-    candidates: list[tuple[float, dict, dict, bool]] = []
-    for item in context:
-        item_id = str(item.get("id") or "")
-        if not item_id or item_id == current_id:
-            continue
-        score = float(item.get("threadScore") or 0)
-        evidence = item.get("threadEvidence") if isinstance(item.get("threadEvidence"), dict) else {}
-        if score >= THREAD_AUTO_LINK_THRESHOLD:
-            candidates.append((score, item, evidence, False))
-    candidates.sort(key=lambda entry: entry[0], reverse=True)
-    candidates = candidates[:THREAD_MAX_CANDIDATES]
-    candidate_ids = [str(item.get("id")) for _, item, _, _ in candidates]
-    feedback = await _latest_feedback(db, group_id, current_id, candidate_ids)
-    filtered: list[tuple[float, dict, dict, bool]] = []
-    for score, item, evidence, _ in candidates:
-        item_id = str(item["id"])
-        decision = feedback.get(_pair(current_id, item_id))
-        if decision == "unlink":
-            continue
-        filtered.append((1.0 if decision == "link" else score, item, evidence, decision == "link"))
-    # A positive user link may intentionally connect messages that did not
-    # pass the automatic gate. Load it as an additional explicit candidate.
-    try:
-        positive_rows = await db.fetch(
-            """SELECT CASE WHEN message_id=$2::uuid THEN related_message_id::text ELSE message_id::text END AS id
-               FROM conversation_relation_feedback
-               WHERE group_id=$1 AND decision='link'
-                 AND (message_id=$2::uuid OR related_message_id=$2::uuid)
-               ORDER BY created_at DESC LIMIT $3""",
-            group_id, current_id, THREAD_MAX_CANDIDATES,
-        )
-    except Exception:
-        positive_rows = []
-    known_ids = {str(item.get("id")) for _, item, _, _ in filtered}
-    for row in positive_rows:
-        related_id = str(row["id"])
-        if related_id in known_ids:
-            continue
-        item = next((candidate for candidate in context if str(candidate.get("id")) == related_id), None)
-        if item:
-            filtered.append((1.0, item, {"userFeedback": "link"}, True))
-            known_ids.add(related_id)
-    if not filtered:
-        return None
-
-    selected_ids = [current_id, *(str(item.get("id")) for _, item, _, _ in filtered)]
-    assignments = await _thread_assignments(db, selected_ids)
-    thread_id = (assignments.get(current_id) or [None])[0]
-    if not thread_id:
-        for _, item, _, _ in filtered:
-            thread_id = (assignments.get(str(item.get("id"))) or [None])[0]
-            if thread_id:
-                break
-    if not thread_id:
-        row = await db.fetchrow(
-            """INSERT INTO conversation_threads(group_id, title, confidence, first_message_at, last_message_at)
-               VALUES ($1,$2,$3,$4,$4) RETURNING id::text""",
-            group_id, _thread_title(current, analysis), max(score for score, _, _, _ in filtered), current.get("receivedAt"),
-        )
-        thread_id = str(row["id"])
-
-    for score, item, evidence, user_link in filtered:
-        item_id = str(item["id"])
-        left, right = _pair(current_id, item_id)
-        await db.execute(
-            """INSERT INTO message_relations(source_message_id, target_message_id, group_id, relation_type, confidence, source, evidence)
-               VALUES ($1::uuid,$2::uuid,$3,'same_thread',$4,$5,$6::jsonb)
-               ON CONFLICT (source_message_id,target_message_id,relation_type) DO UPDATE SET
-                 confidence=CASE WHEN message_relations.source='user' THEN message_relations.confidence ELSE GREATEST(message_relations.confidence, EXCLUDED.confidence) END,
-                 source=CASE WHEN message_relations.source='user' THEN 'user' ELSE EXCLUDED.source END,
-                 evidence=CASE WHEN message_relations.source='user' THEN message_relations.evidence ELSE EXCLUDED.evidence END,
-                 updated_at=NOW()""",
-            left, right, group_id, score, "user" if user_link else "heuristic", json.dumps(evidence),
-        )
-        await db.execute(
-            """INSERT INTO conversation_thread_messages(thread_id, message_id, role, confidence, source, evidence)
-               VALUES ($1::uuid,$2::uuid,'context',$3,$4,$5::jsonb)
-               ON CONFLICT (thread_id,message_id) DO UPDATE SET
-                 confidence=GREATEST(conversation_thread_messages.confidence, EXCLUDED.confidence),
-                 source=CASE WHEN conversation_thread_messages.source='user' THEN 'user' ELSE EXCLUDED.source END,
-                 evidence=CASE WHEN conversation_thread_messages.source='user' THEN conversation_thread_messages.evidence ELSE EXCLUDED.evidence END,
-                 updated_at=NOW()""",
-            thread_id, item_id, score, "user" if user_link else "heuristic", json.dumps(evidence),
-        )
-
-    current_score = max(score for score, _, _, _ in filtered)
-    await db.execute(
-        """INSERT INTO conversation_thread_messages(thread_id, message_id, role, confidence, source, evidence)
-           VALUES ($1::uuid,$2::uuid,'root',$3,'heuristic','{}'::jsonb)
-           ON CONFLICT (thread_id,message_id) DO UPDATE SET
-             confidence=GREATEST(conversation_thread_messages.confidence, EXCLUDED.confidence),
-             source=CASE WHEN conversation_thread_messages.source='user' THEN 'user' ELSE EXCLUDED.source END,
-             evidence=CASE WHEN conversation_thread_messages.source='user' THEN conversation_thread_messages.evidence ELSE EXCLUDED.evidence END,
-             updated_at=NOW()""",
-        thread_id, current_id, current_score,
-    )
-
-    current_time = _as_datetime(current.get("receivedAt"))
-    await db.execute(
-        """UPDATE conversation_threads SET title=CASE WHEN btrim(title)='' THEN $2 ELSE title END,
-             confidence=GREATEST(confidence,$3),
-             first_message_at=LEAST(COALESCE(first_message_at,$4),$4),
-             last_message_at=GREATEST(COALESCE(last_message_at,$4),$4), updated_at=NOW()
-           WHERE id=$1::uuid""",
-        thread_id, _thread_title(current, analysis), current_score, current_time,
-    )
-    return thread_id
-
-
-async def apply_thread_feedback(db, group_id: str, message_id: str, related_message_id: str, decision: str) -> None:
-    """Apply a user's link/unlink decision without deleting the feedback history."""
-    if not group_id or not message_id or not related_message_id or message_id == related_message_id:
-        return
-    left, right = _pair(message_id, related_message_id)
-    if decision == "unlink":
-        await db.execute(
-            """DELETE FROM message_relations
-               WHERE group_id=$1 AND relation_type='same_thread'
-                 AND source_message_id=$2::uuid AND target_message_id=$3::uuid""",
-            group_id, left, right,
-        )
-        # Remove only the directly rejected member when it has no remaining
-        # active relation to another member of that thread.
-        await db.execute(
-            """DELETE FROM conversation_thread_messages member
-               WHERE member.message_id=$2::uuid
-                 AND EXISTS (SELECT 1 FROM conversation_thread_messages anchor
-                             WHERE anchor.thread_id=member.thread_id AND anchor.message_id=$3::uuid)
-                 AND NOT EXISTS (
-                   SELECT 1 FROM message_relations relation
-                   JOIN conversation_thread_messages other ON other.thread_id=member.thread_id
-                   WHERE relation.group_id=$1 AND relation.relation_type='same_thread'
-                     AND other.message_id <> $3::uuid
-                     AND ((relation.source_message_id=$2::uuid AND relation.target_message_id=other.message_id)
-                       OR (relation.target_message_id=$2::uuid AND relation.source_message_id=other.message_id)))""",
-            group_id, related_message_id, message_id,
-        )
-        return
-
+async def load_thread_context(db, current: dict, limit: int) -> list[dict]:
+    """Select the nearest messages, not the first N in a wide time window."""
     rows = await db.fetch(
-        """SELECT id::text, group_id, text, received_at, sender_jid, wa_message_id
-           FROM messages WHERE id=ANY($1::uuid[]) AND group_id=$2""",
-        [message_id, related_message_id], group_id,
+        MESSAGE_SELECT + ''' WHERE m.group_id=$1 AND m.deleted_at IS NULL
+        AND m.received_at BETWEEN $2::timestamptz - ($3 * INTERVAL '1 hour')
+                              AND $2::timestamptz + ($3 * INTERVAL '1 hour')
+        ORDER BY ABS(EXTRACT(EPOCH FROM (m.received_at-$2::timestamptz))), m.id
+        LIMIT $4''',
+        current["groupId"], current["receivedAt"], THREAD_WINDOW_HOURS,
+        min(limit, CONSOLIDATION_MAX_MESSAGES),
     )
-    by_id = {str(row["id"]): dict(row) for row in rows}
-    if message_id not in by_id or related_message_id not in by_id:
-        return
-    message = by_id[message_id]
-    related = by_id[related_message_id]
-    assignments = await _thread_assignments(db, [message_id, related_message_id])
-    thread_id = (assignments.get(message_id) or assignments.get(related_message_id) or [None])[0]
-    if not thread_id:
-        row = await db.fetchrow(
-            """INSERT INTO conversation_threads(group_id,title,confidence,first_message_at,last_message_at)
-               VALUES ($1,$2,1,$3,$3) RETURNING id::text""",
-            group_id, _thread_title(message), message.get("received_at"),
+    return [dict(row) for row in rows]
+
+
+async def iter_thread_messages(db, cutoff, batch_size: int = 200):
+    """Page the reassessment input without keeping every message/raw blob in RAM."""
+    cursor = (None, None, None)
+    while True:
+        rows = await db.fetch(
+            '''SELECT id::text AS id, group_id AS "groupId", received_at AS "receivedAt"
+               FROM messages WHERE deleted_at IS NULL AND created_at <= $1
+               AND ($2::text IS NULL OR (group_id,received_at,id) > ($2::text,$3::timestamptz,$4::uuid))
+               ORDER BY group_id,received_at,id LIMIT $5''', cutoff, *cursor, batch_size,
         )
-        thread_id = str(row["id"])
-    await db.execute(
-        """INSERT INTO message_relations(source_message_id,target_message_id,group_id,relation_type,confidence,source,evidence)
-           VALUES ($1::uuid,$2::uuid,$3,'same_thread',1,'user','{"userFeedback":"link"}'::jsonb)
-           ON CONFLICT (source_message_id,target_message_id,relation_type) DO UPDATE SET confidence=1,source='user',evidence='{"userFeedback":"link"}'::jsonb,updated_at=NOW()""",
-        *_pair(message_id, related_message_id), group_id,
-    )
-    for item_id in (message_id, related_message_id):
-        await db.execute(
-            """INSERT INTO conversation_thread_messages(thread_id,message_id,role,confidence,source,evidence)
-               VALUES ($1::uuid,$2::uuid,'context',1,'user','{"userFeedback":"link"}'::jsonb)
-               ON CONFLICT (thread_id,message_id) DO UPDATE SET confidence=1,source='user',evidence='{"userFeedback":"link"}'::jsonb,updated_at=NOW()""",
-            thread_id, item_id,
+        if not rows:
+            return
+        for row in rows:
+            yield dict(row)
+        last = rows[-1]
+        cursor = (last["groupId"], last["receivedAt"], last["id"])
+
+
+async def _expand_context(conn, group_id: str, context: list[dict]) -> tuple[list[dict], bool]:
+    """Load complete affected threads, feedback endpoints and reply parents.
+
+    Defer persistence if the closure exceeds the limit instead of replacing
+    half a manually linked thread. No user feedback is discarded.
+    """
+    items = {str(row["id"]): dict(row) for row in context if row.get("id") and row.get("groupId") == group_id}
+    while items:
+        related = await conn.fetch(
+            '''SELECT DISTINCT member.message_id::text AS id
+               FROM conversation_thread_messages seed
+               JOIN conversation_thread_messages member ON member.thread_id=seed.thread_id
+               JOIN conversation_threads t ON t.id=seed.thread_id AND t.group_id=$1
+               WHERE seed.message_id=ANY($2::uuid[])
+               UNION
+               SELECT CASE WHEN f.message_id=ANY($2::uuid[]) THEN f.related_message_id::text ELSE f.message_id::text END
+               FROM conversation_relation_feedback f
+               JOIN messages a ON a.id=f.message_id AND a.deleted_at IS NULL
+               JOIN messages b ON b.id=f.related_message_id AND b.deleted_at IS NULL
+               WHERE f.group_id=$1 AND (f.message_id=ANY($2::uuid[]) OR f.related_message_id=ANY($2::uuid[]))
+               LIMIT $3''', group_id, list(items), CONSOLIDATION_MAX_MESSAGES + 1,
         )
-    await db.execute(
-        """UPDATE conversation_threads SET confidence=1, first_message_at=LEAST(COALESCE(first_message_at,$2),$2),
-             last_message_at=GREATEST(COALESCE(last_message_at,$3),$3), updated_at=NOW() WHERE id=$1::uuid""",
-        thread_id, message.get("received_at"), related.get("received_at"),
+        wanted = {str(row["id"]) for row in related} - items.keys()
+        refs = {target for row in items.values() if (target := reply_target(row))}
+        known_refs = set().union(*(identities(row) for row in items.values()))
+        missing_refs = refs - known_refs
+        parents = await conn.fetch(
+            '''SELECT id::text FROM messages WHERE group_id=$1 AND deleted_at IS NULL
+               AND (wa_message_id=ANY($2::text[]) OR group_id || ':' || wa_message_id=ANY($2::text[])
+                    OR id::text=ANY($2::text[])) LIMIT $3''',
+            group_id, sorted(missing_refs), CONSOLIDATION_MAX_MESSAGES + 1,
+        ) if missing_refs else []
+        wanted.update(str(row["id"]) for row in parents if str(row["id"]) not in items)
+        if len(items) + len(wanted) > CONSOLIDATION_MAX_MESSAGES:
+            return list(items.values()), False
+        if not wanted:
+            return list(items.values()), True
+        rows = await conn.fetch(MESSAGE_SELECT + ' WHERE m.group_id=$1 AND m.id=ANY($2::uuid[])', group_id, sorted(wanted))
+        if not rows:
+            return list(items.values()), True
+        items.update((str(row["id"]), dict(row)) for row in rows)
+    return [], True
+
+
+async def consolidate_thread_context(db, group_id: str, current_id: str, context: list[dict], stopwords: set[str]) -> list[dict]:
+    """Reconcile a window atomically, then annotate the accepted AI context.
+
+    A group advisory lock serializes live, feedback and reassessment writers.
+    Retries replace inferred state instead of monotonically raising scores.
+    """
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "thread-consolidation:" + group_id)
+            # A queued reassessment may have read these rows before a live edit
+            # or transcript update. Refresh after taking the writer lock.
+            overrides = {str(row["id"]): row["_threadTextOverride"] for row in context if "_threadTextOverride" in row}
+            rows = await conn.fetch(
+                MESSAGE_SELECT + " WHERE m.group_id=$1 AND m.id=ANY($2::uuid[])",
+                group_id, [str(row["id"]) for row in context if row.get("id")],
+            )
+            context = [dict(row) for row in rows]
+            for row in context:
+                if str(row["id"]) in overrides:
+                    row["text"] = overrides[str(row["id"])]
+            context, complete = await _expand_context(conn, group_id, context)
+            ids = [str(row["id"]) for row in context]
+            if not ids:
+                return context
+            feedback = await conn.fetch(
+                '''SELECT message_id::text, related_message_id::text, decision
+                   FROM conversation_relation_feedback
+                   WHERE group_id=$1 AND message_id=ANY($2::uuid[]) AND related_message_id=ANY($2::uuid[])
+                   ORDER BY created_at DESC, id DESC''', group_id, ids,
+            )
+            result = consolidate_messages(context, stopwords, [dict(row) for row in feedback])
+            if complete:
+                await _persist(conn, group_id, context, result)
+            else:
+                log.warning("thread consolidation deferred group=%s reason=context-limit messages=%d limit=%d", group_id, len(ids), CONSOLIDATION_MAX_MESSAGES)
+                # Full constraints were not loaded. Do not infer a relationship
+                # from a partial view or claim the old memberships were repaired.
+                result = Consolidation([], {})
+                for row in context:
+                    row["threadDeferred"] = True
+            return annotate_consolidation(current_id, context, result)
+
+
+async def _persist(conn, group_id, context, result):
+    ids = [str(row["id"]) for row in context]
+    by_id = {str(row["id"]): row for row in context}
+    old = await conn.fetch(
+        '''SELECT t.id::text, array_agg(member.message_id::text ORDER BY member.message_id) AS members
+           FROM conversation_threads t JOIN conversation_thread_messages member ON member.thread_id=t.id
+           WHERE t.group_id=$1 AND t.id IN
+             (SELECT thread_id FROM conversation_thread_messages WHERE message_id=ANY($2::uuid[]))
+           GROUP BY t.id ORDER BY t.id''', group_id, ids,
     )
+    # Reuse IDs by overlap so retries and reprocessing do not create new threads.
+    available = {str(row["id"]): set(row["members"]) for row in old}
+    assignments = []
+    used = set()
+    for members in result.clusters:
+        choices = sorted(available, key=lambda key: (-len(available[key] & set(members)), key))
+        thread_id = choices[0] if choices and available[choices[0]] & set(members) else str(uuid5(NAMESPACE_URL, f"conxtor:thread:{group_id}:{members[0]}"))
+        if thread_id in used:
+            thread_id = str(uuid5(NAMESPACE_URL, f"conxtor:thread:{group_id}:{':'.join(members)}"))
+        used.add(thread_id)
+        available.pop(thread_id, None)
+        assignments.append((thread_id, members))
+    await conn.execute(
+        '''DELETE FROM message_relations WHERE group_id=$1 AND relation_type='same_thread'
+           AND source_message_id=ANY($2::uuid[]) AND target_message_id=ANY($2::uuid[])''', group_id, ids,
+    )
+    await conn.execute(
+        '''DELETE FROM conversation_thread_messages member USING conversation_threads t
+           WHERE member.thread_id=t.id AND t.group_id=$1 AND member.message_id=ANY($2::uuid[])''', group_id, ids,
+    )
+    for (left, right), (score, evidence, source) in result.edges.items():
+        await conn.execute(
+            '''INSERT INTO message_relations(source_message_id,target_message_id,group_id,relation_type,confidence,source,evidence)
+               VALUES ($1::uuid,$2::uuid,$3,'same_thread',$4,$5,$6::jsonb)''',
+            left, right, group_id, score, source, json.dumps(evidence),
+        )
+    for thread_id, members in assignments:
+        incident = {key: [value for edge, value in result.edges.items() if key in edge] for key in members}
+        confidence = min(max(value[0] for value in incident[key]) for key in members)
+        title = re.sub(r"\s+", " ", str(by_id[members[0]].get("text") or "")).strip()[:120] or "Conversation thread"
+        dates = [date for key in members if (date := as_datetime(by_id[key].get("receivedAt")))]
+        await conn.execute(
+            '''INSERT INTO conversation_threads(id,group_id,title,confidence,first_message_at,last_message_at)
+               VALUES ($1::uuid,$2,$3,$4,$5,$6)
+               ON CONFLICT(id) DO UPDATE SET title=EXCLUDED.title, confidence=EXCLUDED.confidence,
+                 first_message_at=EXCLUDED.first_message_at,last_message_at=EXCLUDED.last_message_at,updated_at=NOW()''',
+            thread_id, group_id, title, confidence, min(dates) if dates else None, max(dates) if dates else None,
+        )
+        for index, key in enumerate(members):
+            strongest = max(incident[key], key=lambda value: value[0])
+            source = "user" if any(value[2] == "user" for value in incident[key]) else "heuristic"
+            evidence = {**strongest[1], "version": VERSION, "memberCount": len(members)}
+            role = "root" if index == 0 else "reply" if reply_target(by_id[key]) else "context"
+            await conn.execute(
+                '''INSERT INTO conversation_thread_messages(thread_id,message_id,role,confidence,source,evidence)
+                   VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6::jsonb)''',
+                thread_id, key, role, strongest[0], source, json.dumps(evidence),
+            )
+    await conn.execute(
+        '''DELETE FROM conversation_threads t WHERE t.group_id=$1
+           AND NOT EXISTS (SELECT 1 FROM conversation_thread_messages member WHERE member.thread_id=t.id)''', group_id,
+    )
+    log.debug("threads consolidated group=%s messages=%d threads=%d edges=%d ambiguous=%d version=%s", group_id, len(ids), len(result.clusters), len(result.edges), len(result.ambiguous), VERSION)

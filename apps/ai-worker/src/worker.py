@@ -1,5 +1,4 @@
 import asyncio
-from bisect import bisect_left, bisect_right
 import json
 import logging
 import math
@@ -16,13 +15,11 @@ import httpx
 from pydantic import BaseModel, Field
 
 from reliability import claim_event, mark_processed, payload_id, retry_or_dead_letter
-from conversation_threads import (
+from conversation_threads import MESSAGE_SELECT, consolidate_thread_context, iter_thread_messages, load_thread_context
+from thread_consolidation import (
     THREAD_AUTO_LINK_THRESHOLD,
-    THREAD_WINDOW_HOURS,
-    annotate_feedback_context,
-    annotate_thread_context,
-    apply_thread_feedback,
-    persist_conversation_thread,
+    is_thread_context,
+    reply_target,
 )
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -962,21 +959,6 @@ async def enrich_text_places(
     return list(unique.values())
 
 
-def reply_target(item: dict) -> str | None:
-    if item.get("replyToWaMessageId"):
-        return str(item["replyToWaMessageId"])
-    raw = as_object(item.get("raw"))
-    message = as_object(raw.get("message"))
-    telegram_reply = as_object(raw.get("reply_to_message"))
-    if telegram_reply.get("message_id") is not None and item.get("groupId"):
-        return f"{item['groupId']}:{telegram_reply['message_id']}"
-    for key in ("extendedTextMessage", "imageMessage", "audioMessage", "videoMessage"):
-        context = as_object(as_object(message.get(key)).get("contextInfo"))
-        if context.get("stanzaId"):
-            return str(context["stanzaId"])
-    return None
-
-
 EVENT_ACTION_TERMS = (
     "treffen", "wanderung", "meeting", "termin", "event", "fahren", "fahrt", "ausflug", "reserv",
     "reunión", "reunion", "quedada", "viaje", "excursión", "excursion", "rendez-vous", "sortie",
@@ -1108,11 +1090,7 @@ def multi_message_events(message_id: str, context: list[dict], learning: dict | 
     ordered = sorted(
         (
             item for item in context
-            if item.get("id") and (
-                str(item.get("id")) == str(message_id)
-                or float(item.get("threadScore") or 0) >= THREAD_AUTO_LINK_THRESHOLD
-                or (reply_target(item) and not item.get("threadBlocked"))
-            )
+            if item.get("id") and is_thread_context(message_id, item, context)
         ),
         key=lambda item: item_time(item) or datetime.min.replace(tzinfo=timezone.utc),
     )
@@ -1217,11 +1195,7 @@ def multi_message_action_items(message_id: str, context: list[dict], learning: d
     ordered = sorted(
         (
             item for item in context
-            if item.get("id") and (
-                str(item.get("id")) == str(message_id)
-                or float(item.get("threadScore") or 0) >= THREAD_AUTO_LINK_THRESHOLD
-                or (reply_target(item) and not item.get("threadBlocked"))
-            )
+            if item.get("id") and is_thread_context(message_id, item, context)
         ),
         key=lambda item: item_time(item) or datetime.min.replace(tzinfo=timezone.utc),
     )
@@ -1666,10 +1640,9 @@ def related_knowledge_source_ids(message_id: str, normalized: str, context: list
         other_text = " ".join(str(item.get("text") or "").split()).strip()
         if not is_informative_text(other_text, stopwords):
             continue
-        # Once the thread cascade has identified high-confidence relations,
-        # do not let a broad context-window token overlap pull an entire group
-        # into one KB item. Explicit replies remain eligible below.
-        if has_thread_annotations and float(item.get("threadScore") or 0) < THREAD_AUTO_LINK_THRESHOLD and not reply_target(item):
+        # Once the consolidator has resolved the context, neither broad token
+        # overlap nor a reply to some other conversation can bypass it.
+        if has_thread_annotations and not is_thread_context(message_id, item, context):
             continue
         if item.get("threadBlocked"):
             continue
@@ -2887,45 +2860,30 @@ async def main():
         allow_remote_review = data.get("skipRemoteReview") is not True
         if not message_id:
             return
-        current = await db.fetchrow(
-            """SELECT id::text AS id, wa_message_id AS "waMessageId", group_id AS "groupId", kind, text, received_at AS "receivedAt",
-                      CASE WHEN raw ? 'reply_to_message' THEN group_id || ':' || (raw #>> '{reply_to_message,message_id}') END AS "replyToWaMessageId", raw
-               FROM messages WHERE id = $1""",
-            message_id,
-        )
-        group_id = data.get("groupId") or (current["groupId"] if current else None)
+        current = await db.fetchrow(MESSAGE_SELECT + " WHERE m.id=$1::uuid AND m.deleted_at IS NULL", message_id)
+        if not current:
+            return
+        # Stored ownership is authoritative; feedback/recovery events may only
+        # contain the ID. They must still analyse the full stored text.
+        group_id = current["groupId"]
+        if data.get("text") is None:
+            text = current["text"] or ""
         knowledge_generation = str(data.get("knowledgeGeneration") or "").strip() or None
-        context: list[dict] = []
-        if group_id:
-            anchor_received_at = current["receivedAt"] if current else datetime.now(timezone.utc)
-            rows = await db.fetch(
-                """SELECT id::text AS id, wa_message_id AS "waMessageId", group_id AS "groupId", kind, text, received_at AS "receivedAt",
-                          CASE WHEN raw ? 'reply_to_message' THEN group_id || ':' || (raw #>> '{reply_to_message,message_id}') END AS "replyToWaMessageId", raw
-                   FROM messages
-                   WHERE group_id = $1
-                     AND received_at BETWEEN $2::timestamptz - ($3 * INTERVAL '1 hour')
-                                         AND $2::timestamptz + ($3 * INTERVAL '1 hour')
-                   ORDER BY received_at ASC LIMIT $4""",
-                group_id, anchor_received_at, AI_EVENT_WINDOW_HOURS, AI_CONTEXT_MAX_MESSAGES,
-            )
-            context = [dict(row) for row in rows]
-        if current:
-            current_item = dict(current)
-            if "text" in data and data.get("text") is not None:
-                current_item["text"] = data.get("text")
-            if not any(str(item.get("id")) == str(message_id) for item in context):
-                context.append(current_item)
-            else:
-                for item in context:
-                    if str(item.get("id")) == str(message_id) and "text" in data and data.get("text") is not None:
-                        item["text"] = data.get("text")
+        context = await load_thread_context(db, dict(current), AI_CONTEXT_MAX_MESSAGES)
+        if not any(str(item.get("id")) == str(message_id) for item in context):
+            context.append(dict(current))
+        for item in context:
+            if str(item.get("id")) == str(message_id) and data.get("text") is not None:
+                item["text"] = text
+                item["_threadTextOverride"] = text
         group_language = await resolve_group_language(db, group_id, context, text)
         learning = await load_learning_terms(db, group_id, group_language)
-        # Mark likely continuation messages before analysis. The annotation is
-        # consumed by event/action/KB source selection and is also persisted as
-        # evidence by the thread graph after the analysis succeeds.
-        annotate_thread_context(message_id, context, set(learning_terms_for(learning, "exclusion")))
-        await annotate_feedback_context(db, group_id, message_id, context)
+        # Reconcile the window as a set, including older memberships and user
+        # constraints. All downstream extractors see only the accepted thread.
+        context = await consolidate_thread_context(
+            db, group_id, message_id, context, set(learning_terms_for(learning, "exclusion")),
+        )
+        context = [item for item in context if is_thread_context(message_id, item, context)]
         configured_topic_keys = await configured_knowledge_topic_keys(db, group_language)
         analysis = await adapter.analyze(
             message_id,
@@ -2985,8 +2943,6 @@ async def main():
         )
         await upsert_knowledge(db, group_id, analysis.knowledge, encoder, group_language, knowledge_generation)
         await upsert_knowledge_graph(db, group_id, analysis, knowledge_generation)
-        if current and group_id:
-            await persist_conversation_thread(db, group_id, {**dict(current), "text": text}, context, serialized_analysis)
         await publish(js, "ai.messages.analyzed", "ai.messages.analyzed", serialized_analysis)
 
     async def on_message(message):
@@ -3014,12 +2970,8 @@ async def main():
                 await message.ack()
                 return
             message_id = data.get("messageId")
-            if data.get("targetType") == "thread":
-                correction = data.get("correction") if isinstance(data.get("correction"), dict) else {}
-                related_message_id = str(correction.get("relatedMessageId") or data.get("targetKey") or "")
-                decision = "link" if data.get("decision") == "accept" else "unlink"
-                if data.get("groupId") and message_id and related_message_id:
-                    await apply_thread_feedback(db, str(data["groupId"]), str(message_id), related_message_id, decision)
+            # Thread feedback is already durable in PostgreSQL. Consolidation
+            # loads its latest state, so a delayed event cannot undo a newer vote.
             if message_id:
                 await process_analysis(
                     db,
@@ -3233,7 +3185,7 @@ async def main():
                 await db.execute(
                     """UPDATE ai_reassessment_jobs SET processed_count=$2, failed_count=$3, skipped_count=$4, updated_at=NOW()
                        WHERE id=$1::uuid""",
-                    job_id, processed, failed, skipped,
+                job_id, processed, failed, skipped,
                 )
                 if AI_REASSESSMENT_DELAY_SECONDS:
                     await asyncio.sleep(AI_REASSESSMENT_DELAY_SECONDS)
@@ -3273,73 +3225,34 @@ async def main():
                    WHERE id=$1::uuid AND status IN ('queued','running')""",
                 job_id,
             )
-            rows = await db.fetch(
-                """SELECT m.id::text AS id, m.wa_message_id AS "waMessageId", m.group_id AS "groupId",
-                          m.sender_jid AS "senderJid", m.text, m.received_at AS "receivedAt",
-                          g.language,
-                          CASE WHEN m.raw ? 'reply_to_message'
-                               THEN m.group_id || ':' || (m.raw #>> '{reply_to_message,message_id}')
-                          END AS "replyToWaMessageId"
-                   FROM messages m
-                   JOIN wa_groups g ON g.id=m.group_id
-                   ORDER BY m.group_id, m.received_at ASC""",
-            )
-            await db.execute("UPDATE thread_reassessment_jobs SET total_count=$2, updated_at=NOW() WHERE id=$1::uuid", job_id, len(rows))
+            cutoff = await db.fetchval("SELECT COALESCE(started_at,NOW()) FROM thread_reassessment_jobs WHERE id=$1::uuid", job_id)
+            total = await db.fetchval("SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL AND created_at <= $1", cutoff)
+            await db.execute("UPDATE thread_reassessment_jobs SET total_count=$2, updated_at=NOW() WHERE id=$1::uuid", job_id, total)
 
-            # Only automatic edges and memberships are rebuilt. Explicit user
-            # feedback remains authoritative and is deliberately retained.
-            await db.execute("DELETE FROM message_relations WHERE relation_type='same_thread' AND source='heuristic'")
-            await db.execute("DELETE FROM conversation_thread_messages WHERE source='heuristic'")
-            await db.execute(
-                """DELETE FROM conversation_threads thread
-                   WHERE NOT EXISTS (SELECT 1 FROM conversation_thread_messages member WHERE member.thread_id=thread.id)"""
-            )
+            # Each affected window is replaced in one transaction under the
+            # same group lock as live processing. Never clear all live threads.
 
-            grouped: dict[str, list[dict]] = {}
-            for row in rows:
-                item = dict(row)
-                grouped.setdefault(str(item["groupId"]), []).append(item)
-            group_times = {group_id: [item["receivedAt"] for item in items] for group_id, items in grouped.items()}
             stopwords_cache: dict[str, set[str]] = {}
             processed = 0
             failed = 0
             skipped = 0
-            for row in rows:
-                current = dict(row)
-                current_id = str(current["id"])
-                group_id = str(current["groupId"])
-                received_at = current["receivedAt"]
+            async for row in iter_thread_messages(db, cutoff):
+                current_id = str(row["id"])
+                group_id = str(row["groupId"])
                 try:
-                    if not received_at:
+                    current = await db.fetchrow(MESSAGE_SELECT + " WHERE m.id=$1::uuid AND m.deleted_at IS NULL", current_id)
+                    if not current:
                         skipped += 1
                         continue
-                    window_start = received_at - timedelta(hours=THREAD_WINDOW_HOURS)
-                    window_end = received_at + timedelta(hours=THREAD_WINDOW_HOURS)
-                    items = grouped[group_id]
-                    times = group_times[group_id]
-                    start = bisect_left(times, window_start)
-                    end = bisect_right(times, window_end)
-                    context = [dict(item) for item in items[start:end]]
-                    if len(context) > AI_CONTEXT_MAX_MESSAGES:
-                        context = sorted(
-                            context,
-                            key=lambda item: abs((item["receivedAt"] - received_at).total_seconds()),
-                        )[:AI_CONTEXT_MAX_MESSAGES]
-                        context.sort(key=lambda item: item["receivedAt"])
-                    language = str(current.get("language") or "de")
+                    context = await load_thread_context(db, dict(current), AI_CONTEXT_MAX_MESSAGES)
+                    if not any(item["id"] == current_id for item in context):
+                        context.append(dict(current))
                     if group_id not in stopwords_cache:
+                        language = await resolve_group_language(db, group_id, context, str(current.get("text") or ""))
                         learning = await load_learning_terms(db, group_id, language)
                         stopwords_cache[group_id] = set(learning_terms_for(learning, "exclusion"))
-                    annotate_thread_context(current_id, context, stopwords_cache[group_id])
-                    await annotate_feedback_context(db, group_id, current_id, context)
-                    thread_id = await persist_conversation_thread(
-                        db,
-                        group_id,
-                        current,
-                        context,
-                        {"summary": str(current.get("text") or "")},
-                    )
-                    if thread_id:
+                    resolved = await consolidate_thread_context(db, group_id, current_id, context, stopwords_cache[group_id])
+                    if any(str(item.get("id")) != current_id and is_thread_context(current_id, item, resolved) for item in resolved):
                         processed += 1
                     else:
                         skipped += 1
@@ -3356,10 +3269,11 @@ async def main():
                     await asyncio.sleep(AI_REASSESSMENT_DELAY_SECONDS)
             await db.execute(
                 """UPDATE thread_reassessment_jobs
-                   SET status=CASE WHEN failed_count > 0 AND processed_count=0 THEN 'failed' ELSE 'completed' END,
+                   SET status=CASE WHEN $3::int > 0 AND $2::int=0 THEN 'failed' ELSE 'completed' END,
+                       processed_count=$2, failed_count=$3, skipped_count=$4,
                        completed_at=NOW(), updated_at=NOW()
                    WHERE id=$1::uuid""",
-                job_id,
+                job_id, processed, failed, skipped,
             )
             await mark_processed(db, "ai.thread-reassessment", event_id)
             await message.ack()

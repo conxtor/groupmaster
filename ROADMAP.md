@@ -44,6 +44,7 @@ Ziel: Ein einzelner vertrauenswürdiger Nutzer kann reale Gruppen sicher verbind
 - [x] Evaluationsdatensatz für Deutsch, Spanisch, Katalanisch, Englisch und Französisch unter `apps/ai-worker/eval/dataset.jsonl`
 - [x] Konfidenzen, Quellenbelege und nachvollziehbare Herleitung je Ergebnis
 - [x] Zusammenführung von Events aus mehreren Nachrichten ohne Duplikate
+- [x] Erledigt: Lokaler Thread-Konsolidierer mit Mehrdeutigkeits- und Kohäsionsprüfung, reversiblen automatischen Zuordnungen, transitiven Nutzer-Trennregeln und gemeinsamem Kontext für Events, Action Items und KB; bestehende Threads über die Admin-Neubewertung prüfbar
 - [x] Widersprüchliche Zeit-, Orts- und Terminangaben erkennen, mit Quellen belegen und als Konflikt markieren
 - [x] Kaskadenqualität `cascade-v4`: stabiles Event-/Knowledge-Deduping, begrenzte Zeit-/Antwortfenster, kanonische Alias-Zuordnung und belegte Knowledge-Graph-Beziehungen
 - [x] Nutzerfeedback für Relevanz, Events und Knowledge-Base über `POST /api/v1/ai/feedback` speichern und betroffene Nachrichten idempotent neu analysieren
