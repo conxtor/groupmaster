@@ -1,0 +1,5 @@
+defaultNamespace: groupmaster
+kustomize:
+  dir: .
+helm:
+  takeOwnership: true

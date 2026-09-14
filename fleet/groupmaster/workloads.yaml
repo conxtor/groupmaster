@@ -1,0 +1,1831 @@
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-ai-worker",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "ai-worker",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "ai-worker"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "ai-worker"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "args": [
+              "-u",
+              "src/worker.py"
+            ],
+            "command": [
+              "python"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "ai-worker-env"
+                }
+              }
+            ],
+            "image": "ghcr.io/conxtor/wagi-ai-worker@sha256:aa07d1ea294259354627e54e0e23f459de1fb9219afd00962e8654b13d991add",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "ai-worker",
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/root/.cache/fastembed",
+                "name": "v-a84e1f436fd23dbd"
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/app"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-a84e1f436fd23dbd",
+            "persistentVolumeClaim": {
+              "claimName": "v-a84e1f436fd23dbd"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "name": "api",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "api"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "api"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/wagi-api"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "api-env"
+                }
+              }
+            ],
+            "image": "ghcr.io/conxtor/wagi-api@sha256:db8a282faaef503551b4d832791c2292d36412f42ddaf936a9637ef7e5a976b7",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "api",
+            "ports": [
+              {
+                "containerPort": 8080,
+                "name": "p8080-tcp",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 8080
+              },
+              "timeoutSeconds": 1
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "securityContext": {
+              "runAsUser": 0
+            },
+            "startupProbe": {
+              "failureThreshold": 180,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 8080
+              },
+              "timeoutSeconds": 1
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/data/media",
+                "name": "v-dfebe950a7efdc09",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-dfebe950a7efdc09",
+            "persistentVolumeClaim": {
+              "claimName": "v-dfebe950a7efdc09"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-media-worker",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "media-worker",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "media-worker"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "media-worker"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "args": [
+              "python",
+              "-u",
+              "src/worker.py"
+            ],
+            "command": [
+              "/usr/local/bin/ensure-whisper-model"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "media-worker-env"
+                }
+              }
+            ],
+            "image": "ghcr.io/conxtor/wagi-media-worker@sha256:4f82e9272e71c999c97e0551a13edc20f6ea871eda804daa1d891e7b564ca333",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "media-worker",
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/data/media",
+                "name": "v-dfebe950a7efdc09"
+              },
+              {
+                "mountPath": "/models",
+                "name": "v-616bc9eaecea7b38"
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/app"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-dfebe950a7efdc09",
+            "persistentVolumeClaim": {
+              "claimName": "v-dfebe950a7efdc09"
+            }
+          },
+          {
+            "name": "v-616bc9eaecea7b38",
+            "persistentVolumeClaim": {
+              "claimName": "v-616bc9eaecea7b38"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "name": "minio",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "minio"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "minio"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "args": [
+              "server",
+              "/data",
+              "--console-address",
+              ":9001"
+            ],
+            "command": [
+              "/usr/bin/docker-entrypoint.sh"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "minio-env"
+                }
+              }
+            ],
+            "image": "minio/minio@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "minio",
+            "ports": [
+              {
+                "containerPort": 9000,
+                "name": "p9000-tcp",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "mc",
+                  "ready",
+                  "local"
+                ]
+              },
+              "failureThreshold": 3,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "timeoutSeconds": 5
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "mc",
+                  "ready",
+                  "local"
+                ]
+              },
+              "failureThreshold": 180,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "timeoutSeconds": 5
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/data",
+                "name": "v-633eddf21152b327"
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-633eddf21152b327",
+            "persistentVolumeClaim": {
+              "claimName": "v-633eddf21152b327"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-nats",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "nats",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "nats"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "nats"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "args": [
+              "-js",
+              "-sd",
+              "/data/jetstream",
+              "-m",
+              "8222"
+            ],
+            "command": [
+              "docker-entrypoint.sh"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "nats-env"
+                }
+              }
+            ],
+            "image": "nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "nats",
+            "ports": [
+              {
+                "containerPort": 4222,
+                "name": "p4222-tcp",
+                "protocol": "TCP"
+              },
+              {
+                "containerPort": 6222,
+                "name": "p6222-tcp",
+                "protocol": "TCP"
+              },
+              {
+                "containerPort": 8222,
+                "name": "p8222-tcp",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "/bin/sh",
+                  "-c",
+                  "wget -q -O - http://127.0.0.1:8222/healthz >/dev/null"
+                ]
+              },
+              "failureThreshold": 3,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "timeoutSeconds": 3
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "/bin/sh",
+                  "-c",
+                  "wget -q -O - http://127.0.0.1:8222/healthz >/dev/null"
+                ]
+              },
+              "failureThreshold": 180,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "timeoutSeconds": 3
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/data/jetstream",
+                "name": "v-178bc1a6630f0ef3"
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-178bc1a6630f0ef3",
+            "persistentVolumeClaim": {
+              "claimName": "v-178bc1a6630f0ef3"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-postgres",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "postgres",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "postgres"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "postgres"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "args": [
+              "postgres",
+              "-D",
+              "/etc/postgresql"
+            ],
+            "command": [
+              "docker-entrypoint.sh"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "postgres-env"
+                }
+              }
+            ],
+            "image": "supabase/postgres@sha256:0e2279598bc0224fb5960c3a61eb23270cd60119427f3a7bdec86ba282600dcc",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "postgres",
+            "ports": [
+              {
+                "containerPort": 5432,
+                "name": "p5432-tcp",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "/bin/sh",
+                  "-c",
+                  "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+                ]
+              },
+              "failureThreshold": 3,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "timeoutSeconds": 5
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "/bin/sh",
+                  "-c",
+                  "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+                ]
+              },
+              "failureThreshold": 180,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "timeoutSeconds": 5
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/var/lib/postgresql/data",
+                "name": "v-4b949c6c7dcb9dea"
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-4b949c6c7dcb9dea",
+            "persistentVolumeClaim": {
+              "claimName": "v-4b949c6c7dcb9dea"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "name": "tg-connector",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "tg-connector"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "tg-connector"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/wagi-tg-connector"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "tg-connector-env"
+                }
+              }
+            ],
+            "image": "ghcr.io/conxtor/wagi-tg-connector@sha256:4299b733435b8da65c3032f91cebd845237326a93dcc7255aef7afc740d5f586",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "tg-connector",
+            "ports": [
+              {
+                "containerPort": 3002,
+                "name": "p3002-tcp",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 3002
+              },
+              "timeoutSeconds": 1
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "startupProbe": {
+              "failureThreshold": 180,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 3002
+              },
+              "timeoutSeconds": 1
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/data/tg-state",
+                "name": "v-c05b6bc67e6fcfb0"
+              },
+              {
+                "mountPath": "/data/media",
+                "name": "v-dfebe950a7efdc09"
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-c05b6bc67e6fcfb0",
+            "persistentVolumeClaim": {
+              "claimName": "v-c05b6bc67e6fcfb0"
+            }
+          },
+          {
+            "name": "v-dfebe950a7efdc09",
+            "persistentVolumeClaim": {
+              "claimName": "v-dfebe950a7efdc09"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "name": "tg-connector-worker",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "tg-connector-worker"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "tg-connector-worker"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/wagi-tg-connector"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "tg-connector-worker-env"
+                }
+              }
+            ],
+            "image": "ghcr.io/conxtor/wagi-tg-connector@sha256:4299b733435b8da65c3032f91cebd845237326a93dcc7255aef7afc740d5f586",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "tg-connector-worker",
+            "ports": [
+              {
+                "containerPort": 3002,
+                "name": "p3002-tcp",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 3002
+              },
+              "timeoutSeconds": 1
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "startupProbe": {
+              "failureThreshold": 180,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 3002
+              },
+              "timeoutSeconds": 1
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/data/tg-state",
+                "name": "v-c05b6bc67e6fcfb0"
+              },
+              {
+                "mountPath": "/data/media",
+                "name": "v-dfebe950a7efdc09"
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-c05b6bc67e6fcfb0",
+            "persistentVolumeClaim": {
+              "claimName": "v-c05b6bc67e6fcfb0"
+            }
+          },
+          {
+            "name": "v-dfebe950a7efdc09",
+            "persistentVolumeClaim": {
+              "claimName": "v-dfebe950a7efdc09"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "name": "wa-connector",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "wa-connector"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "wa-connector"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/usr/local/bin/wagi-wa-connector-whatsmeow"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "wa-connector-env"
+                }
+              }
+            ],
+            "image": "ghcr.io/conxtor/wagi-wa-connector-whatsmeow@sha256:c1689b3583724d98852c678f6a9f2378402ed8c2a041a7c16cb816a88eaf0e19",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "wa-connector",
+            "ports": [
+              {
+                "containerPort": 3001,
+                "name": "p3001-tcp",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 3001
+              },
+              "timeoutSeconds": 1
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "startupProbe": {
+              "failureThreshold": 180,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 3001
+              },
+              "timeoutSeconds": 1
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/data/media",
+                "name": "v-dfebe950a7efdc09"
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-dfebe950a7efdc09",
+            "persistentVolumeClaim": {
+              "claimName": "v-dfebe950a7efdc09"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "name": "wa-connector-worker",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "wa-connector-worker"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "wa-connector-worker"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/usr/local/bin/wagi-wa-connector-whatsmeow"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "wa-connector-worker-env"
+                }
+              }
+            ],
+            "image": "ghcr.io/conxtor/wagi-wa-connector-whatsmeow@sha256:c1689b3583724d98852c678f6a9f2378402ed8c2a041a7c16cb816a88eaf0e19",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "wa-connector-worker",
+            "ports": [
+              {
+                "containerPort": 3001,
+                "name": "p3001-tcp",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 3001
+              },
+              "timeoutSeconds": 1
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "startupProbe": {
+              "failureThreshold": 180,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "tcpSocket": {
+                "port": 3001
+              },
+              "timeoutSeconds": 1
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/data/media",
+                "name": "v-dfebe950a7efdc09"
+              },
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "name": "v-dfebe950a7efdc09",
+            "persistentVolumeClaim": {
+              "claimName": "v-dfebe950a7efdc09"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "1"
+    },
+    "name": "web",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "web"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "web"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "args": [
+              "node",
+              "apps/web/server.js"
+            ],
+            "command": [
+              "docker-entrypoint.sh"
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "web-env"
+                }
+              }
+            ],
+            "image": "ghcr.io/conxtor/wagi-web@sha256:a23d79e1d751289ecee3807dc294886e1262e44e0f8e625e153cb15649645d1a",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "web",
+            "ports": [
+              {
+                "containerPort": 3000,
+                "name": "p3000-tcp",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "/bin/sh",
+                  "-c",
+                  "wget -q -O - http://127.0.0.1:3000/ >/dev/null"
+                ]
+              },
+              "failureThreshold": 3,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "timeoutSeconds": 5
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "64Mi"
+              }
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "/bin/sh",
+                  "-c",
+                  "wget -q -O - http://127.0.0.1:3000/ >/dev/null"
+                ]
+              },
+              "failureThreshold": 180,
+              "periodSeconds": 10,
+              "successThreshold": 1,
+              "timeoutSeconds": 5
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/dev/shm",
+                "name": "shm"
+              }
+            ],
+            "workingDir": "/app"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "imagePullSecrets": [
+          {
+            "name": "registry-credentials"
+          }
+        ],
+        "nodeSelector": {
+          "kubernetes.io/hostname": "spainip-k3s"
+        },
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 120,
+        "volumes": [
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "67108864"
+            },
+            "name": "shm"
+          }
+        ]
+      }
+    }
+  }
+}
+
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-api",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "api",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "clusterIP": "10.43.89.193",
+    "clusterIPs": [
+      "10.43.89.193"
+    ],
+    "internalTrafficPolicy": "Cluster",
+    "ipFamilies": [
+      "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "ports": [
+      {
+        "name": "p8080-tcp",
+        "port": 8080,
+        "protocol": "TCP",
+        "targetPort": 8080
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "api"
+    },
+    "sessionAffinity": "None",
+    "type": "ClusterIP"
+  }
+}
+
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-minio",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "minio",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "clusterIP": "10.43.97.140",
+    "clusterIPs": [
+      "10.43.97.140"
+    ],
+    "internalTrafficPolicy": "Cluster",
+    "ipFamilies": [
+      "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "ports": [
+      {
+        "name": "p9000-tcp",
+        "port": 9000,
+        "protocol": "TCP",
+        "targetPort": 9000
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "minio"
+    },
+    "sessionAffinity": "None",
+    "type": "ClusterIP"
+  }
+}
+
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-nats",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "nats",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "clusterIP": "10.43.89.49",
+    "clusterIPs": [
+      "10.43.89.49"
+    ],
+    "internalTrafficPolicy": "Cluster",
+    "ipFamilies": [
+      "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "ports": [
+      {
+        "name": "p4222-tcp",
+        "port": 4222,
+        "protocol": "TCP",
+        "targetPort": 4222
+      },
+      {
+        "name": "p6222-tcp",
+        "port": 6222,
+        "protocol": "TCP",
+        "targetPort": 6222
+      },
+      {
+        "name": "p8222-tcp",
+        "port": 8222,
+        "protocol": "TCP",
+        "targetPort": 8222
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "nats"
+    },
+    "sessionAffinity": "None",
+    "type": "ClusterIP"
+  }
+}
+
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-postgres",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "postgres",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "clusterIP": "10.43.213.10",
+    "clusterIPs": [
+      "10.43.213.10"
+    ],
+    "internalTrafficPolicy": "Cluster",
+    "ipFamilies": [
+      "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "ports": [
+      {
+        "name": "p5432-tcp",
+        "port": 5432,
+        "protocol": "TCP",
+        "targetPort": 5432
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "postgres"
+    },
+    "sessionAffinity": "None",
+    "type": "ClusterIP"
+  }
+}
+
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-tg-connector",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "tg-connector",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "clusterIP": "10.43.2.60",
+    "clusterIPs": [
+      "10.43.2.60"
+    ],
+    "internalTrafficPolicy": "Cluster",
+    "ipFamilies": [
+      "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "ports": [
+      {
+        "name": "p3002-tcp",
+        "port": 3002,
+        "protocol": "TCP",
+        "targetPort": 3002
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "tg-connector"
+    },
+    "sessionAffinity": "None",
+    "type": "ClusterIP"
+  }
+}
+
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-tg-connector-worker",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "tg-connector-worker",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "clusterIP": "10.43.204.249",
+    "clusterIPs": [
+      "10.43.204.249"
+    ],
+    "internalTrafficPolicy": "Cluster",
+    "ipFamilies": [
+      "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "ports": [
+      {
+        "name": "p3002-tcp",
+        "port": 3002,
+        "protocol": "TCP",
+        "targetPort": 3002
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "tg-connector-worker"
+    },
+    "sessionAffinity": "None",
+    "type": "ClusterIP"
+  }
+}
+
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-wa-connector",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "wa-connector",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "clusterIP": "10.43.233.53",
+    "clusterIPs": [
+      "10.43.233.53"
+    ],
+    "internalTrafficPolicy": "Cluster",
+    "ipFamilies": [
+      "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "ports": [
+      {
+        "name": "p3001-tcp",
+        "port": 3001,
+        "protocol": "TCP",
+        "targetPort": 3001
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "wa-connector"
+    },
+    "sessionAffinity": "None",
+    "type": "ClusterIP"
+  }
+}
+
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-wa-connector-worker",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "wa-connector-worker",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "clusterIP": "10.43.42.136",
+    "clusterIPs": [
+      "10.43.42.136"
+    ],
+    "internalTrafficPolicy": "Cluster",
+    "ipFamilies": [
+      "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "ports": [
+      {
+        "name": "p3001-tcp",
+        "port": 3001,
+        "protocol": "TCP",
+        "targetPort": 3001
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "wa-connector-worker"
+    },
+    "sessionAffinity": "None",
+    "type": "ClusterIP"
+  }
+}
+
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-web",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "web",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "clusterIP": "10.43.160.181",
+    "clusterIPs": [
+      "10.43.160.181"
+    ],
+    "internalTrafficPolicy": "Cluster",
+    "ipFamilies": [
+      "IPv4"
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "ports": [
+      {
+        "name": "p3000-tcp",
+        "port": 3000,
+        "protocol": "TCP",
+        "targetPort": 3000
+      }
+    ],
+    "selector": {
+      "app.kubernetes.io/name": "web"
+    },
+    "sessionAffinity": "None",
+    "type": "ClusterIP"
+  }
+}
+
+---
+{
+  "apiVersion": "traefik.io/v1alpha1",
+  "kind": "IngressRoute",
+  "metadata": {
+    "labels": {
+      "kustomize.toolkit.fluxcd.io/name": "groupmaster-web",
+      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+    },
+    "name": "web-wagi-web",
+    "namespace": "groupmaster"
+  },
+  "spec": {
+    "entryPoints": [
+      "websecure"
+    ],
+    "routes": [
+      {
+        "kind": "Rule",
+        "match": "Host(`conxtor.com`)",
+        "priority": 10,
+        "services": [
+          {
+            "name": "web",
+            "port": 3000
+          }
+        ]
+      }
+    ],
+    "tls": {
+      "certResolver": "acmeresolver",
+      "domains": [
+        {
+          "main": "conxtor.com"
+        }
+      ]
+    }
+  }
+}
