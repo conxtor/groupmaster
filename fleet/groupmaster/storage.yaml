@@ -1,257 +1,11 @@
----
-{
-  "apiVersion": "v1",
-  "kind": "PersistentVolumeClaim",
-  "metadata": {
-    "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled",
-      "pv.kubernetes.io/bind-completed": "yes"
-    },
-    "finalizers": [
-      "kubernetes.io/pvc-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "v-178bc1a6630f0ef3",
-    "namespace": "groupmaster"
-  },
-  "spec": {
-    "accessModes": [
-      "ReadWriteOnce"
-    ],
-    "resources": {
-      "requests": {
-        "storage": "1Gi"
-      }
-    },
-    "storageClassName": "",
-    "volumeMode": "Filesystem",
-    "volumeName": "groupmaster-v-178bc1a6630f0ef3"
-  }
-}
-
----
-{
-  "apiVersion": "v1",
-  "kind": "PersistentVolumeClaim",
-  "metadata": {
-    "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled",
-      "pv.kubernetes.io/bind-completed": "yes"
-    },
-    "finalizers": [
-      "kubernetes.io/pvc-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "v-4b949c6c7dcb9dea",
-    "namespace": "groupmaster"
-  },
-  "spec": {
-    "accessModes": [
-      "ReadWriteOnce"
-    ],
-    "resources": {
-      "requests": {
-        "storage": "1Gi"
-      }
-    },
-    "storageClassName": "",
-    "volumeMode": "Filesystem",
-    "volumeName": "groupmaster-v-4b949c6c7dcb9dea"
-  }
-}
-
----
-{
-  "apiVersion": "v1",
-  "kind": "PersistentVolumeClaim",
-  "metadata": {
-    "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled",
-      "pv.kubernetes.io/bind-completed": "yes"
-    },
-    "finalizers": [
-      "kubernetes.io/pvc-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "v-616bc9eaecea7b38",
-    "namespace": "groupmaster"
-  },
-  "spec": {
-    "accessModes": [
-      "ReadWriteOnce"
-    ],
-    "resources": {
-      "requests": {
-        "storage": "1Gi"
-      }
-    },
-    "storageClassName": "",
-    "volumeMode": "Filesystem",
-    "volumeName": "groupmaster-v-616bc9eaecea7b38"
-  }
-}
-
----
-{
-  "apiVersion": "v1",
-  "kind": "PersistentVolumeClaim",
-  "metadata": {
-    "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled",
-      "pv.kubernetes.io/bind-completed": "yes"
-    },
-    "finalizers": [
-      "kubernetes.io/pvc-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "v-633eddf21152b327",
-    "namespace": "groupmaster"
-  },
-  "spec": {
-    "accessModes": [
-      "ReadWriteOnce"
-    ],
-    "resources": {
-      "requests": {
-        "storage": "1Gi"
-      }
-    },
-    "storageClassName": "",
-    "volumeMode": "Filesystem",
-    "volumeName": "groupmaster-v-633eddf21152b327"
-  }
-}
-
----
-{
-  "apiVersion": "v1",
-  "kind": "PersistentVolumeClaim",
-  "metadata": {
-    "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled",
-      "pv.kubernetes.io/bind-completed": "yes"
-    },
-    "finalizers": [
-      "kubernetes.io/pvc-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "v-a84e1f436fd23dbd",
-    "namespace": "groupmaster"
-  },
-  "spec": {
-    "accessModes": [
-      "ReadWriteOnce"
-    ],
-    "resources": {
-      "requests": {
-        "storage": "1Gi"
-      }
-    },
-    "storageClassName": "",
-    "volumeMode": "Filesystem",
-    "volumeName": "groupmaster-v-a84e1f436fd23dbd"
-  }
-}
-
----
-{
-  "apiVersion": "v1",
-  "kind": "PersistentVolumeClaim",
-  "metadata": {
-    "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled",
-      "pv.kubernetes.io/bind-completed": "yes"
-    },
-    "finalizers": [
-      "kubernetes.io/pvc-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "v-c05b6bc67e6fcfb0",
-    "namespace": "groupmaster"
-  },
-  "spec": {
-    "accessModes": [
-      "ReadWriteOnce"
-    ],
-    "resources": {
-      "requests": {
-        "storage": "1Gi"
-      }
-    },
-    "storageClassName": "",
-    "volumeMode": "Filesystem",
-    "volumeName": "groupmaster-v-c05b6bc67e6fcfb0"
-  }
-}
-
----
-{
-  "apiVersion": "v1",
-  "kind": "PersistentVolumeClaim",
-  "metadata": {
-    "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled",
-      "pv.kubernetes.io/bind-completed": "yes"
-    },
-    "finalizers": [
-      "kubernetes.io/pvc-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "v-dfebe950a7efdc09",
-    "namespace": "groupmaster"
-  },
-  "spec": {
-    "accessModes": [
-      "ReadWriteOnce"
-    ],
-    "resources": {
-      "requests": {
-        "storage": "1Gi"
-      }
-    },
-    "storageClassName": "",
-    "volumeMode": "Filesystem",
-    "volumeName": "groupmaster-v-dfebe950a7efdc09"
-  }
-}
-
----
 {
   "apiVersion": "v1",
   "kind": "PersistentVolume",
   "metadata": {
+    "name": "groupmaster-v-178bc1a6630f0ef3",
     "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled"
-    },
-    "finalizers": [
-      "kubernetes.io/pv-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "groupmaster-v-178bc1a6630f0ef3"
+      "pv.kubernetes.io/bound-by-controller": "yes"
+    }
   },
   "spec": {
     "accessModes": [
@@ -265,8 +19,7 @@
       "kind": "PersistentVolumeClaim",
       "name": "v-178bc1a6630f0ef3",
       "namespace": "groupmaster",
-      "resourceVersion": "1121",
-      "uid": "286b3010-91c9-499a-af5d-a2219267577f"
+      "uid": "6a6879f6-116d-4bf0-9cc8-794291c36a22"
     },
     "local": {
       "path": "/opt/k3s-data/volumes/wagi_dockge_nats_data"
@@ -292,23 +45,15 @@
     "volumeMode": "Filesystem"
   }
 }
-
 ---
 {
   "apiVersion": "v1",
   "kind": "PersistentVolume",
   "metadata": {
+    "name": "groupmaster-v-4b949c6c7dcb9dea",
     "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled"
-    },
-    "finalizers": [
-      "kubernetes.io/pv-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "groupmaster-v-4b949c6c7dcb9dea"
+      "pv.kubernetes.io/bound-by-controller": "yes"
+    }
   },
   "spec": {
     "accessModes": [
@@ -322,8 +67,7 @@
       "kind": "PersistentVolumeClaim",
       "name": "v-4b949c6c7dcb9dea",
       "namespace": "groupmaster",
-      "resourceVersion": "1122",
-      "uid": "efb338f5-e712-4258-8f20-bec7e0521327"
+      "uid": "69266beb-5dca-4d85-8ae1-6048e5a3532e"
     },
     "local": {
       "path": "/opt/k3s-data/volumes/wagi_dockge_postgres_data"
@@ -349,23 +93,15 @@
     "volumeMode": "Filesystem"
   }
 }
-
 ---
 {
   "apiVersion": "v1",
   "kind": "PersistentVolume",
   "metadata": {
+    "name": "groupmaster-v-616bc9eaecea7b38",
     "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled"
-    },
-    "finalizers": [
-      "kubernetes.io/pv-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "groupmaster-v-616bc9eaecea7b38"
+      "pv.kubernetes.io/bound-by-controller": "yes"
+    }
   },
   "spec": {
     "accessModes": [
@@ -379,8 +115,7 @@
       "kind": "PersistentVolumeClaim",
       "name": "v-616bc9eaecea7b38",
       "namespace": "groupmaster",
-      "resourceVersion": "1124",
-      "uid": "24455e07-a993-4dd0-b3e6-52d0569701aa"
+      "uid": "a18318ae-7e35-42f5-9e6f-4d621805a8e4"
     },
     "local": {
       "path": "/opt/k3s-data/volumes/wagi_dockge_whisper_models"
@@ -406,23 +141,15 @@
     "volumeMode": "Filesystem"
   }
 }
-
 ---
 {
   "apiVersion": "v1",
   "kind": "PersistentVolume",
   "metadata": {
+    "name": "groupmaster-v-633eddf21152b327",
     "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled"
-    },
-    "finalizers": [
-      "kubernetes.io/pv-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "groupmaster-v-633eddf21152b327"
+      "pv.kubernetes.io/bound-by-controller": "yes"
+    }
   },
   "spec": {
     "accessModes": [
@@ -436,8 +163,7 @@
       "kind": "PersistentVolumeClaim",
       "name": "v-633eddf21152b327",
       "namespace": "groupmaster",
-      "resourceVersion": "1125",
-      "uid": "a78c9bde-074c-4a02-a946-6392e73f20a2"
+      "uid": "683ad54e-fed2-4324-a87f-f2b242ad23d3"
     },
     "local": {
       "path": "/opt/k3s-data/volumes/wagi_dockge_minio_data"
@@ -463,23 +189,15 @@
     "volumeMode": "Filesystem"
   }
 }
-
 ---
 {
   "apiVersion": "v1",
   "kind": "PersistentVolume",
   "metadata": {
+    "name": "groupmaster-v-a84e1f436fd23dbd",
     "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled"
-    },
-    "finalizers": [
-      "kubernetes.io/pv-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "groupmaster-v-a84e1f436fd23dbd"
+      "pv.kubernetes.io/bound-by-controller": "yes"
+    }
   },
   "spec": {
     "accessModes": [
@@ -493,8 +211,7 @@
       "kind": "PersistentVolumeClaim",
       "name": "v-a84e1f436fd23dbd",
       "namespace": "groupmaster",
-      "resourceVersion": "1126",
-      "uid": "3ee50185-120c-4040-8ce4-04535549ffc7"
+      "uid": "a2a10cf8-3bfc-48cb-b384-f4d409b66367"
     },
     "local": {
       "path": "/opt/k3s-data/volumes/wagi_dockge_ai_models"
@@ -520,23 +237,15 @@
     "volumeMode": "Filesystem"
   }
 }
-
 ---
 {
   "apiVersion": "v1",
   "kind": "PersistentVolume",
   "metadata": {
+    "name": "groupmaster-v-c05b6bc67e6fcfb0",
     "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled"
-    },
-    "finalizers": [
-      "kubernetes.io/pv-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "groupmaster-v-c05b6bc67e6fcfb0"
+      "pv.kubernetes.io/bound-by-controller": "yes"
+    }
   },
   "spec": {
     "accessModes": [
@@ -550,8 +259,7 @@
       "kind": "PersistentVolumeClaim",
       "name": "v-c05b6bc67e6fcfb0",
       "namespace": "groupmaster",
-      "resourceVersion": "1127",
-      "uid": "f82ea916-fa6c-42e2-97fd-1e7673f48b32"
+      "uid": "69d8670a-e381-4daa-a2b2-4fb4aab7a407"
     },
     "local": {
       "path": "/opt/k3s-data/volumes/wagi_dockge_tg_state"
@@ -577,23 +285,15 @@
     "volumeMode": "Filesystem"
   }
 }
-
 ---
 {
   "apiVersion": "v1",
   "kind": "PersistentVolume",
   "metadata": {
+    "name": "groupmaster-v-dfebe950a7efdc09",
     "annotations": {
-      "kustomize.toolkit.fluxcd.io/prune": "disabled"
-    },
-    "finalizers": [
-      "kubernetes.io/pv-protection"
-    ],
-    "labels": {
-      "kustomize.toolkit.fluxcd.io/name": "cutover-storage",
-      "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
-    },
-    "name": "groupmaster-v-dfebe950a7efdc09"
+      "pv.kubernetes.io/bound-by-controller": "yes"
+    }
   },
   "spec": {
     "accessModes": [
@@ -607,8 +307,7 @@
       "kind": "PersistentVolumeClaim",
       "name": "v-dfebe950a7efdc09",
       "namespace": "groupmaster",
-      "resourceVersion": "1128",
-      "uid": "360adf0f-c561-46c5-8264-5d59a078089a"
+      "uid": "76f9a44b-c50a-41c1-aba7-49ddf999fcea"
     },
     "local": {
       "path": "/opt/k3s-data/volumes/wagi_dockge_media_data"
@@ -632,5 +331,180 @@
     },
     "persistentVolumeReclaimPolicy": "Retain",
     "volumeMode": "Filesystem"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "v-178bc1a6630f0ef3",
+    "namespace": "groupmaster",
+    "annotations": {
+      "pv.kubernetes.io/bind-completed": "yes"
+    }
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "resources": {
+      "requests": {
+        "storage": "1Gi"
+      }
+    },
+    "storageClassName": "",
+    "volumeMode": "Filesystem",
+    "volumeName": "groupmaster-v-178bc1a6630f0ef3"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "v-4b949c6c7dcb9dea",
+    "namespace": "groupmaster",
+    "annotations": {
+      "pv.kubernetes.io/bind-completed": "yes"
+    }
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "resources": {
+      "requests": {
+        "storage": "1Gi"
+      }
+    },
+    "storageClassName": "",
+    "volumeMode": "Filesystem",
+    "volumeName": "groupmaster-v-4b949c6c7dcb9dea"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "v-616bc9eaecea7b38",
+    "namespace": "groupmaster",
+    "annotations": {
+      "pv.kubernetes.io/bind-completed": "yes"
+    }
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "resources": {
+      "requests": {
+        "storage": "1Gi"
+      }
+    },
+    "storageClassName": "",
+    "volumeMode": "Filesystem",
+    "volumeName": "groupmaster-v-616bc9eaecea7b38"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "v-633eddf21152b327",
+    "namespace": "groupmaster",
+    "annotations": {
+      "pv.kubernetes.io/bind-completed": "yes"
+    }
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "resources": {
+      "requests": {
+        "storage": "1Gi"
+      }
+    },
+    "storageClassName": "",
+    "volumeMode": "Filesystem",
+    "volumeName": "groupmaster-v-633eddf21152b327"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "v-a84e1f436fd23dbd",
+    "namespace": "groupmaster",
+    "annotations": {
+      "pv.kubernetes.io/bind-completed": "yes"
+    }
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "resources": {
+      "requests": {
+        "storage": "1Gi"
+      }
+    },
+    "storageClassName": "",
+    "volumeMode": "Filesystem",
+    "volumeName": "groupmaster-v-a84e1f436fd23dbd"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "v-c05b6bc67e6fcfb0",
+    "namespace": "groupmaster",
+    "annotations": {
+      "pv.kubernetes.io/bind-completed": "yes"
+    }
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "resources": {
+      "requests": {
+        "storage": "1Gi"
+      }
+    },
+    "storageClassName": "",
+    "volumeMode": "Filesystem",
+    "volumeName": "groupmaster-v-c05b6bc67e6fcfb0"
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "v-dfebe950a7efdc09",
+    "namespace": "groupmaster",
+    "annotations": {
+      "pv.kubernetes.io/bind-completed": "yes"
+    }
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "resources": {
+      "requests": {
+        "storage": "1Gi"
+      }
+    },
+    "storageClassName": "",
+    "volumeMode": "Filesystem",
+    "volumeName": "groupmaster-v-dfebe950a7efdc09"
   }
 }
